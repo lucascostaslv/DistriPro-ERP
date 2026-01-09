@@ -1018,7 +1018,7 @@ const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotifi
   );
 };
 
-const InventoryWMS = ({ products, setProducts, groups, setGroups, showNotification }) => {
+const InventoryWMS = ({ products, setProducts, groups, setGroups, showNotification, storeConfig }) => {
   const [activeTab, setActiveTab] = useState('products');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState(null);
@@ -1028,65 +1028,54 @@ const InventoryWMS = ({ products, setProducts, groups, setGroups, showNotificati
   const [newGroupName, setNewGroupName] = useState('');
   const [confirmModal, setConfirmModal] = useState({ isOpen: false, onConfirm: null, title: '', message: '' });
 
+  // Verifica se o modo atacado está ativo nas configurações
+  const isWholesaleEnabled = storeConfig?.enableWholesale;
+
   const handleSave = (product) => {
     const productWithNumbers = {
       ...product,
       cost: parseFloat(String(product.cost || '0').replace(',', '.')) || 0,
       price: parseFloat(String(product.price || '0').replace(',', '.')) || 0,
-      wholesalePrice: parseFloat(String(product.wholesalePrice || '0').replace(',', '.')) || 0,
       minStock: parseInt(product.minStock, 10) || 0,
+      // Novos campos de atacado
+      wholesalePrice: parseFloat(String(product.wholesalePrice || '0').replace(',', '.')) || 0,
+      packQuantity: parseInt(product.packQuantity, 10) || 0,
+      // Mantendo compatibilidade com lógica antiga de fardo separado, se houver
       conversionFactor: parseInt(product.conversionFactor, 10) || 1,
     };
+    
+    // Se o modo atacado estiver desligado, zera os valores para evitar sujeira no banco
+    if (!isWholesaleEnabled) {
+        productWithNumbers.wholesalePrice = 0;
+        productWithNumbers.packQuantity = 0;
+    }
+
     const { childId, ...productData } = productWithNumbers;
 
-    if (productData.itemType === 'pack') {
-      let packToSave = { ...productData };
-      if (!packToSave.conversionFactor || packToSave.conversionFactor <= 1) return showNotification('Fardo deve ter fator de conversão maior que 1.', 'error');
-      packToSave.parentId = null;
+    // Lógica Unificada (Simples) ou Legada (Pack)
+    if (productData.itemType === 'unit' || !productData.itemType) {
+        productData.conversionFactor = 1;
+        productData.itemType = 'unit'; // Garante tipo unitário padrão
 
-      const isNewPack = !packToSave.id;
-      if (isNewPack) {
-        const newId = Date.now();
-        const maxCba = products.reduce((max, p) => { const code = parseInt(p.cbaCode, 10); return !isNaN(code) && code > max ? code : max; }, 999);
-        const nextCba = String(maxCba + 1);
-        packToSave = { ...packToSave, id: newId, cbaCode: nextCba, stock: 0, batches: [] };
-      }
-
-      const oldChild = products.find(p => p.parentId === packToSave.id);
-      const newChildId = childId;
-
-      if (newChildId) {
-        const newChildProduct = products.find(p => p.id === newChildId);
-        if (newChildProduct && newChildProduct.parentId && newChildProduct.parentId !== packToSave.id) {
-          return showNotification('Esta unidade já está vinculada a outro fardo.', 'error');
+        if (productData.id) {
+            setProducts(products.map(p => p.id === productData.id ? productData : p));
+            showNotification('Produto atualizado.', 'success');
+        } else {
+            const maxCba = products.reduce((max, p) => { const code = parseInt(p.cbaCode, 10); return !isNaN(code) && code > max ? code : max; }, 999);
+            const nextCba = String(maxCba + 1);
+            setProducts([...products, { ...productData, id: Date.now(), cbaCode: nextCba, stock: 0, batches: [] }]);
+            showNotification('Produto cadastrado.', 'success');
         }
-      }
-
-      let updatedProducts = products.map(p => {
-        if (oldChild && p.id === oldChild.id && p.id !== newChildId) return { ...p, parentId: null };
-        if (p.id === newChildId) return { ...p, parentId: packToSave.id, conversionFactor: 1 };
-        if (!isNewPack && p.id === packToSave.id) return packToSave;
-        return p;
-      });
-
-      if (isNewPack) {
-        updatedProducts.push(packToSave);
-      }
-
-      setProducts(updatedProducts);
-      showNotification('Fardo salvo com sucesso.', 'success');
-    } else { // 'unit' or legacy
-      if (productData.itemType === 'unit') productData.conversionFactor = 1;
-
-      if (productData.id) {
-        setProducts(products.map(p => p.id === productData.id ? productData : p));
-        showNotification('Produto atualizado.', 'success');
-      } else {
-        const maxCba = products.reduce((max, p) => { const code = parseInt(p.cbaCode, 10); return !isNaN(code) && code > max ? code : max; }, 999);
-        const nextCba = String(maxCba + 1);
-        setProducts([...products, { ...productData, id: Date.now(), cbaCode: nextCba, stock: 0, batches: [], itemType: productData.itemType || 'unit' }]);
-        showNotification('Produto cadastrado.', 'success');
-      }
+    } else {
+        // Fallback para lógica antiga de 'pack' separado, se ainda for usada
+        // (Mantivemos sua lógica original aqui para não quebrar cadastros antigos de Fardos isolados)
+        if (productData.id) {
+           setProducts(products.map(p => p.id === productData.id ? productData : p));
+        } else {
+           const maxCba = products.reduce((max, p) => { const code = parseInt(p.cbaCode, 10); return !isNaN(code) && code > max ? code : max; }, 999);
+           setProducts([...products, { ...productData, id: Date.now(), cbaCode: String(maxCba+1), stock: 0, batches: [] }]);
+        }
+        showNotification('Item tipo Fardo/Pack salvo.', 'success');
     }
 
     setIsModalOpen(false);
@@ -1158,7 +1147,7 @@ const InventoryWMS = ({ products, setProducts, groups, setGroups, showNotificati
           <Search className="absolute left-3 top-2.5 text-slate-400" size={16}/>
           <input className="w-full pl-9 pr-4 py-1.5 border rounded text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Buscar no estoque (Nome, Item, Fab)..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
         </div>
-        <button onClick={() => { setEditingProduct({}); setIsModalOpen(true); }} className="bg-slate-800 text-white px-4 py-2 rounded text-sm font-medium hover:bg-slate-700 flex items-center gap-2">
+        <button onClick={() => { setEditingProduct({ itemType: 'unit' }); setIsModalOpen(true); }} className="bg-slate-800 text-white px-4 py-2 rounded text-sm font-medium hover:bg-slate-700 flex items-center gap-2">
           <Plus size={16} /> Novo Item
         </button>
       </div>
@@ -1172,15 +1161,17 @@ const InventoryWMS = ({ products, setProducts, groups, setGroups, showNotificati
               <th className="p-4">Cat</th>
               <th className="p-4 text-right">Custo</th>
               <th className="p-4 text-right">Venda (V/A)</th>
-              <th className="p-4 text-center">Estoque Total</th>
-              <th className="p-4 text-center">Lotes</th>
+              <th className="p-4 text-center">Estoque</th>
               <th className="p-4 text-right">Ação</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {filteredProducts.map(p => (
               <tr key={p.id} className="hover:bg-slate-50">
-                <td className="p-4 font-medium text-slate-800">{p.name}</td>
+                <td className="p-4 font-medium text-slate-800">
+                    {p.name}
+                    {p.packQuantity > 1 && <span className="ml-2 text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded border border-indigo-200">Atacado: {p.packQuantity}un</span>}
+                </td>
                 <td className="p-4 text-xs text-slate-500">
                   <div title="Código Item (Sistema)">Item: {p.cbaCode || '-'}</div>
                   <div title="Código Fabricação">FAB: {p.manufacturingCode || '-'}</div>
@@ -1189,16 +1180,11 @@ const InventoryWMS = ({ products, setProducts, groups, setGroups, showNotificati
                 <td className="p-4 text-right text-slate-600">{formatCurrency(p.cost)}</td>
                 <td className="p-4 text-right">
                   <div className="font-bold text-slate-700">{formatCurrency(p.price)}</div>
-                  <div className="text-xs text-emerald-600">{formatCurrency(p.wholesalePrice)}</div>
+                  {p.wholesalePrice > 0 && <div className="text-xs text-emerald-600 font-bold" title={`Preço Atacado (Fardo de ${p.packQuantity})`}>{formatCurrency(p.wholesalePrice)}</div>}
                 </td>
                 <td className="p-4 text-center">
                   <span className={`px-2 py-1 rounded text-xs font-bold ${getDisplayStock(p, products) <= p.minStock ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
-                    {getDisplayStock(p, products)} {p.itemType === 'pack' ? 'Fardos' : 'un.'}
-                  </span>
-                </td>
-                <td className="p-4 text-center">
-                  <span className="text-xs bg-slate-100 px-2 py-1 rounded text-slate-600 cursor-help" title={p.batches.map(b => `${b.lot}: ${b.qty} (Vence: ${formatDate(b.expiry)})`).join('\n')}>
-                    {p.batches.length} Lotes
+                    {getDisplayStock(p, products)} un.
                   </span>
                 </td>
                 <td className="p-4 text-right flex justify-end gap-2">
@@ -1216,7 +1202,7 @@ const InventoryWMS = ({ products, setProducts, groups, setGroups, showNotificati
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">Código Item (Sistema)</label>
-              <input className="w-full border p-2 rounded text-sm bg-slate-100 text-slate-500" value={editingProduct?.id ? editingProduct.cbaCode : 'Automático (1000+)'} disabled />
+              <input className="w-full border p-2 rounded text-sm bg-slate-100 text-slate-500" value={editingProduct?.id ? editingProduct.cbaCode : 'Automático'} disabled />
             </div>
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">Cód. Fabricação</label>
@@ -1227,8 +1213,9 @@ const InventoryWMS = ({ products, setProducts, groups, setGroups, showNotificati
               <label className="block text-xs font-bold text-slate-700 mb-1">Nome do Produto</label>
               <input className="w-full border p-2 rounded text-sm" value={editingProduct?.name || ''} onChange={e => setEditingProduct({...editingProduct, name: e.target.value})} required/>
             </div>
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Categoria / Grupo</label>
+            
+            <div className="col-span-2">
+              <label className="block text-xs font-bold text-slate-700 mb-1">Categoria</label>
               <div className="relative">
                 <input 
                   className="w-full border p-2 rounded text-sm" 
@@ -1236,100 +1223,76 @@ const InventoryWMS = ({ products, setProducts, groups, setGroups, showNotificati
                   onChange={e => setEditingProduct({...editingProduct, category: e.target.value})}
                   onFocus={() => setShowGroupSuggestions(true)}
                   onBlur={() => setTimeout(() => setShowGroupSuggestions(false), 200)}
-                  placeholder="Digite nome ou código..."
+                  placeholder="Selecione ou digite..."
                 />
                 {showGroupSuggestions && (
                   <div className="absolute z-10 w-full bg-white border border-slate-200 rounded shadow-lg max-h-40 overflow-y-auto mt-1">
-                    {groups.filter(g => g.name.toLowerCase().includes((editingProduct?.category || '').toLowerCase()) || g.code.includes(editingProduct?.category || '')).map(g => (
-                      <div key={g.id} className="p-2 text-sm hover:bg-slate-100 cursor-pointer flex justify-between" onMouseDown={() => setEditingProduct({...editingProduct, category: g.name})}>
-                        <span>{g.name}</span> <span className="text-xs text-slate-400 font-mono">Cód: {g.code}</span>
+                    {groups.filter(g => g.name.toLowerCase().includes((editingProduct?.category || '').toLowerCase())).map(g => (
+                      <div key={g.id} className="p-2 text-sm hover:bg-slate-100 cursor-pointer" onMouseDown={() => setEditingProduct({...editingProduct, category: g.name})}>
+                        {g.name}
                       </div>
                     ))}
                   </div>
                 )}
               </div>
             </div>
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Tipo de Item</label>
-              <select 
-                className="w-full border p-2 rounded text-sm" 
-                value={editingProduct?.itemType || 'unit'} 
-                onChange={e => {
-                  const type = e.target.value;
-                  setEditingProduct({
-                    ...editingProduct, 
-                    itemType: type, 
-                    conversionFactor: type === 'pack' ? editingProduct?.conversionFactor || 2 : 1,
-                    parentId: type === 'unit' ? editingProduct?.parentId || null : null
-                  });
-                }}
-              >
-                <option value="unit">Unidade (Produto Final)</option>
-                <option value="pack">Fardo/Caixa (Embalagem)</option>
-              </select>
-            </div>
-            
-            {(editingProduct?.itemType === 'unit') && (
-            <div className="col-span-2">
-              <label className="block text-xs font-bold text-slate-700 mb-1">Vincular ao Fardo (Produto Pai)</label>
-              <select 
-                className="w-full border p-2 rounded text-sm" 
-                value={editingProduct?.parentId || ''} 
-                onChange={e => setEditingProduct({...editingProduct, parentId: Number(e.target.value) || null})}
-              >
-                <option value="">Nenhum</option>
-                {products.filter(p => p.itemType === 'pack').map(p => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </select>
-            </div>
-            )}
-
-            {(editingProduct?.itemType === 'pack') && (
-            <>
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Fator de Conversão</label>
-                <input type="text" inputMode="numeric" className="w-full border p-2 rounded text-sm" value={editingProduct?.conversionFactor || ''} onChange={e => setEditingProduct({...editingProduct, conversionFactor: e.target.value})} required/>
-              </div>
-              <div className="col-span-2">
-                <label className="block text-xs font-bold text-slate-700 mb-1">Produto Filho (Unidade)</label>
-                <select 
-                  className="w-full border p-2 rounded text-sm" 
-                  value={editingProduct.childId ?? products.find(p => p.parentId === editingProduct.id)?.id ?? ''} 
-                  onChange={e => {
-                    setEditingProduct({...editingProduct, childId: Number(e.target.value) || null });
-                  }}
-                >
-                  <option value="">Nenhum</option>
-                  {products
-                      .filter(p => p.itemType === 'unit' && (!p.parentId || p.parentId === editingProduct.id))
-                      .map(p => (
-                          <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </select>
-              </div>
-            </>
-            )}
 
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">Estoque Mínimo</label>
               <input type="text" inputMode="numeric" className="w-full border p-2 rounded text-sm" value={editingProduct?.minStock || ''} onChange={e => setEditingProduct({...editingProduct, minStock: e.target.value})}/>
             </div>
             <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Preço Custo</label>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Preço Custo (Un)</label>
               <input type="text" inputMode="decimal" className="w-full border p-2 rounded text-sm" value={editingProduct?.cost || ''} onChange={e => setEditingProduct({...editingProduct, cost: e.target.value})}/>
             </div>
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Preço Venda (Varejo)</label>
-              <input type="text" inputMode="decimal" className="w-full border p-2 rounded text-sm" value={editingProduct?.price || ''} onChange={e => setEditingProduct({...editingProduct, price: e.target.value})}/>
+            
+            {/* PREÇO VAREJO */}
+            <div className="col-span-2 bg-slate-50 p-3 rounded border border-slate-200">
+               <label className="block text-xs font-bold text-slate-700 mb-1">Venda Varejo (Unitário)</label>
+               <input type="text" inputMode="decimal" className="w-full border p-2 rounded text-sm text-lg font-bold text-slate-800" value={editingProduct?.price || ''} onChange={e => setEditingProduct({...editingProduct, price: e.target.value})} placeholder="R$ 0,00"/>
             </div>
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Preço Atacado</label>
-              <input type="text" inputMode="decimal" className="w-full border p-2 rounded text-sm" value={editingProduct?.wholesalePrice || ''} onChange={e => setEditingProduct({...editingProduct, wholesalePrice: e.target.value})}/>
+
+            {/* ÁREA ATACADO (CONDICIONAL) */}
+            <div className={`col-span-2 p-3 rounded border ${isWholesaleEnabled ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-100 border-slate-200 opacity-70'}`} title={!isWholesaleEnabled ? "Habilite 'Venda por Atacado' nas configurações para editar." : ""}>
+               <div className="flex items-center gap-2 mb-2">
+                  <h4 className={`text-xs font-bold uppercase ${isWholesaleEnabled ? 'text-indigo-700' : 'text-slate-500'}`}>Venda Atacado / Caixa Fechada</h4>
+                  {!isWholesaleEnabled && <span className="text-[10px] bg-slate-200 px-1 rounded text-slate-500">Desabilitado</span>}
+               </div>
+               <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">Qtd no Pacote/Fardo</label>
+                    <input 
+                        type="number" 
+                        className="w-full border p-2 rounded text-sm disabled:cursor-not-allowed" 
+                        value={editingProduct?.packQuantity || ''} 
+                        onChange={e => setEditingProduct({...editingProduct, packQuantity: e.target.value})}
+                        disabled={!isWholesaleEnabled}
+                        placeholder="Ex: 12"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">Preço do Pacote (R$)</label>
+                    <input 
+                        type="text" 
+                        inputMode="decimal" 
+                        className="w-full border p-2 rounded text-sm disabled:cursor-not-allowed font-bold" 
+                        value={editingProduct?.wholesalePrice || ''} 
+                        onChange={e => setEditingProduct({...editingProduct, wholesalePrice: e.target.value})}
+                        disabled={!isWholesaleEnabled}
+                        placeholder="R$ 0,00"
+                    />
+                  </div>
+               </div>
+               {isWholesaleEnabled && editingProduct?.packQuantity > 0 && editingProduct?.wholesalePrice > 0 && (
+                   <p className="text-[10px] text-indigo-600 mt-1 text-right">
+                       Sai a {formatCurrency(editingProduct.wholesalePrice / editingProduct.packQuantity)} por unidade
+                   </p>
+               )}
             </div>
+
             <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Estoque Atual</label>
-              <input type="number" className="w-full border p-2 rounded text-sm bg-slate-50" value={editingProduct?.stock || ''} disabled/>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Estoque Atual (Unidades)</label>
+              <input type="number" className="w-full border p-2 rounded text-sm bg-slate-50" value={editingProduct?.stock || ''} disabled title="Faça entradas/saídas pela aba Notas & Gastos"/>
             </div>
           </div>
 
@@ -2560,7 +2523,7 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
             {activeModule === 'clients' && <ClientsManager clients={store.clients} setClients={(c) => updateStore({...store, clients: c})} showNotification={showNotification} />}
             {activeModule === 'transactions' && <TransactionsManager products={store.products} transactions={store.transactions} transactionCategories={store.transactionCategories} setTransactionCategories={(tc) => updateStore({...store, transactionCategories: tc})} onSaveTransaction={handleSaveTransaction} onUpdateTransaction={handleUpdateTransaction} onDeleteTransaction={handleDeleteTransaction} showNotification={showNotification} />}
             {activeModule === 'finance' && <Finance sales={store.sales} transactions={store.transactions} transactionCategories={store.transactionCategories} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} />}
-            {activeModule === 'inventory' && <InventoryWMS products={store.products} setProducts={(p) => updateStore({...store, products: p})} groups={store.groups} setGroups={(g) => updateStore({...store, groups: g})} showNotification={showNotification} />}
+            {activeModule === 'inventory' && <InventoryWMS products={store.products} setProducts={(p) => updateStore({...store, products: p})} groups={store.groups} setGroups={(g) => updateStore({...store, groups: g})} showNotification={showNotification} storeConfig={store} />}
             {activeModule === 'settings' && (
               <SettingsManager 
                 users={store.users} 
