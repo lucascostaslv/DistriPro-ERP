@@ -688,7 +688,7 @@ const ClientsManager = ({ clients, setClients, showNotification }) => {
   );
 };
 
-const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotification, companyInfo }) => {
+const PDV = ({ products, groups, onUpdateProduct, clients, setClients, feeProfiles, onNewSale, showNotification, companyInfo, storeConfig }) => {
   const [cart, setCart] = useState([]);
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('');
@@ -702,25 +702,85 @@ const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotifi
   const [newClientName, setNewClientName] = useState('');
   const [isNewClient, setIsNewClient] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
-  
-  const [modalStep, setModalStep] = useState('config'); // 'config' | 'confirm'
+  const [modalStep, setModalStep] = useState('config'); 
   const [shouldPrint, setShouldPrint] = useState(false);
   const [pendingSale, setPendingSale] = useState(null);
-  
-  const addToCart = (product) => {
-    const existing = cart.find(item => item.id === product.id); // First declaration
-    const currentQtyInCart = existing ? existing.qty : 0;
 
-    const displayStock = getDisplayStock(product, products);
-    if (displayStock <= currentQtyInCart) { // This check was already here and correct.
-      showNotification(`Estoque esgotado. Disponível: ${displayStock}`, 'error');
+  // Estados de Edição
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [editingProduct, setEditingProduct] = useState(null);
+  const [showGroupSuggestions, setShowGroupSuggestions] = useState(false);
+  
+  // Configurações
+  const isWholesaleEnabled = storeConfig?.enableWholesale;
+  const isEditEnabled = storeConfig?.enablePDVEditing;
+
+  const handleSaveProduct = (e) => {
+      e.preventDefault();
+      const product = editingProduct;
+      
+      const productWithNumbers = {
+        ...product,
+        cost: parseFloat(String(product.cost || '0').replace(',', '.')) || 0,
+        price: parseFloat(String(product.price || '0').replace(',', '.')) || 0,
+        minStock: parseInt(product.minStock, 10) || 0,
+        wholesalePrice: parseFloat(String(product.wholesalePrice || '0').replace(',', '.')) || 0,
+        packQuantity: parseInt(product.packQuantity, 10) || 0,
+        conversionFactor: parseInt(product.conversionFactor, 10) || 1,
+      };
+
+      if (!isWholesaleEnabled) {
+          productWithNumbers.wholesalePrice = 0;
+          productWithNumbers.packQuantity = 0;
+      }
+
+      const updatedList = products.map(p => p.id === productWithNumbers.id ? productWithNumbers : p);
+      onUpdateProduct(updatedList);
+      
+      showNotification('Produto atualizado com sucesso!', 'success');
+      setIsEditModalOpen(false);
+      setEditingProduct(null);
+  };
+
+  const addToCart = (product, mode = 'retail') => {
+    let cartItemId, cartItemName, cartItemPrice, stockDeduction;
+
+    if (mode === 'wholesale') {
+        cartItemId = `${product.id}_pack`; 
+        cartItemName = `${product.name} [CX ${product.packQuantity}]`;
+        cartItemPrice = product.wholesalePrice;
+        stockDeduction = product.packQuantity; 
+    } else {
+        cartItemId = product.id;
+        cartItemName = product.name;
+        cartItemPrice = product.price;
+        stockDeduction = 1;
+    }
+
+    const existing = cart.find(item => item.id === cartItemId);
+    
+    const currentStock = getDisplayStock(product, products);
+    const allCartItemsForThisProduct = cart.filter(item => (item.id === product.id) || (item.originalId === product.id));
+    const totalUnitsAlreadyInCart = allCartItemsForThisProduct.reduce((acc, item) => acc + (item.qty * (item.stockDeduction || 1)), 0);
+    const unitsRequested = stockDeduction;
+
+    if (currentStock < (totalUnitsAlreadyInCart + unitsRequested)) {
+      showNotification(`Estoque insuficiente. Disponível: ${currentStock} un`, 'error');
       return;
     }
 
     if (existing) {
-      setCart(cart.map(item => item.id === product.id ? { ...item, qty: item.qty + 1 } : item));
+      setCart(cart.map(item => item.id === cartItemId ? { ...item, qty: item.qty + 1 } : item));
     } else {
-      setCart([...cart, { ...product, qty: 1 }]);
+      setCart([...cart, { 
+          id: cartItemId, 
+          originalId: product.id,
+          name: cartItemName, 
+          price: cartItemPrice, 
+          qty: 1,
+          stockDeduction: stockDeduction,
+          isWholesale: mode === 'wholesale'
+      }]);
     }
   };
 
@@ -728,17 +788,19 @@ const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotifi
     const itemInCart = cart.find(item => item.id === id);
     if (!itemInCart) return;
 
-    const newQty = itemInCart.qty + delta;
-
     if (delta > 0) {
-      const product = products.find(p => p.id === id);
-      const displayStock = getDisplayStock(product, products);
-      if (displayStock < newQty) {
-        showNotification('Estoque insuficiente.', 'error');
-        return;
-      }
+        const product = products.find(p => p.id === (itemInCart.originalId || itemInCart.id));
+        const currentStock = getDisplayStock(product, products);
+        const allCartItemsForThisProduct = cart.filter(item => (item.id === product.id) || (item.originalId === product.id));
+        const totalUnitsAlreadyInCart = allCartItemsForThisProduct.reduce((acc, item) => acc + (item.qty * (item.stockDeduction || 1)), 0);
+        
+        if (currentStock < (totalUnitsAlreadyInCart + (itemInCart.stockDeduction || 1))) {
+            showNotification('Estoque insuficiente.', 'error');
+            return;
+        }
     }
 
+    const newQty = itemInCart.qty + delta;
     if (newQty <= 0) {
       removeItem(id);
     } else {
@@ -749,7 +811,12 @@ const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotifi
   const removeItem = (id) => setCart(cart.filter(item => item.id !== id));
 
   const totalCart = cart.reduce((acc, item) => acc + (item.price * item.qty), 0);
-  const totalCost = cart.reduce((acc, item) => acc + (item.cost * item.qty), 0);
+  const totalCost = cart.reduce((acc, item) => {
+     const product = products.find(p => p.id === (item.originalId || item.id));
+     const unitCost = product ? product.cost : 0;
+     const totalUnits = item.qty * (item.stockDeduction || 1);
+     return acc + (unitCost * totalUnits);
+  }, 0);
 
   const handlePaymentInit = (method) => {
     if (cart.length === 0) return showNotification('Carrinho vazio', 'error');
@@ -758,7 +825,6 @@ const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotifi
     setModalStep('config');
     setShouldPrint(false);
     setPendingSale(null);
-    // Reset fields
     setInstallments(1);
     setSelectedProfileId(feeProfiles[0]?.id || '');
     setFiadoClientId('');
@@ -781,7 +847,6 @@ const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotifi
     let finalClientId = null;
     let finalClientName = 'Consumidor Final';
 
-    // Lógica de Taxas
     if (paymentMethod === 'Crédito' || paymentMethod === 'Débito' || paymentMethod === 'Pix') {
       const profile = feeProfiles.find(p => p.id === Number(selectedProfileId));
       if (profile) {
@@ -793,10 +858,8 @@ const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotifi
       }
     }
 
-    // Lógica Fiado
     if (paymentMethod === 'Fiado') {
       if (!fiadoDueDate) return showNotification('Data de vencimento obrigatória', 'error');
-      
       if (isNewClient) {
         if (!newClientName) return showNotification('Nome do cliente obrigatório', 'error');
         const newId = Date.now();
@@ -809,7 +872,6 @@ const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotifi
         finalClientId = Number(fiadoClientId);
         const existingClient = clients.find(c => c.id === finalClientId);
         finalClientName = existingClient.name;
-        // Atualiza dívida
         setClients(clients.map(c => c.id === finalClientId ? { ...c, debt: c.debt + totalCart } : c));
       }
     }
@@ -841,7 +903,6 @@ const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotifi
     setCart([]);
     setPaymentModalOpen(false);
     setIsPaymentStep(false);
-    showNotification('Pedido realizado com sucesso!', 'success');
   };
 
   return (
@@ -854,27 +915,62 @@ const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotifi
           </div>
         </div>
         <div className="flex-1 overflow-y-auto p-4 grid grid-cols-2 md:grid-cols-3 gap-4 content-start">
-          {filteredProducts.map(p => (
-            <button key={p.id} onClick={() => addToCart(p)} className="text-left p-4 border rounded hover:border-indigo-500 hover:bg-indigo-50 transition-colors group">
-              <div className="font-bold text-slate-800 group-hover:text-indigo-700">{p.name}</div>
-              <div className="text-xs text-slate-500 mb-2 flex gap-2">
-                <span className="bg-slate-100 px-1 rounded">Item: {p.cbaCode || '-'}</span>
-                <span>Cat: {p.category}</span>
-              </div>
-              <div className="flex justify-between items-end">
-              <div className="flex-1">
-                <div className="text-xs text-slate-400">Estoque</div>
-                <div className={`font-bold ${getDisplayStock(p, products) <= (p.minStock || 0) ? 'text-red-500' : 'text-blue-600'}`}>
-                  {getDisplayStock(p, products)} {p.itemType === 'pack' ? 'Fds' : 'Un'}
+          {filteredProducts.map(p => {
+              const hasWholesale = isWholesaleEnabled && p.wholesalePrice > 0 && p.packQuantity > 1;
+
+              return (
+                <div key={p.id} className="border rounded hover:border-indigo-500 hover:bg-indigo-50 transition-colors group flex flex-col justify-between relative">
+                  
+                  {isEditEnabled && (
+                    <button 
+                        onClick={(e) => { e.stopPropagation(); setEditingProduct({...p}); setIsEditModalOpen(true); }}
+                        className="absolute top-2 right-2 p-1.5 bg-white/80 hover:bg-white text-slate-400 hover:text-indigo-600 rounded-full shadow-sm z-10 border border-slate-100"
+                        title="Editar Produto"
+                    >
+                        <Edit size={14} />
+                    </button>
+                  )}
+
+                  <div className="p-4 cursor-pointer" onClick={() => addToCart(p, 'retail')}>
+                      <div className="font-bold text-slate-800 group-hover:text-indigo-700 pr-6">{p.name}</div>
+                      <div className="text-xs text-slate-500 mb-2 flex gap-2">
+                        <span className="bg-slate-100 px-1 rounded">Item: {p.cbaCode || '-'}</span>
+                      </div>
+                      <div className="flex justify-between items-end">
+                        <div className="flex-1">
+                            <div className="text-xs text-slate-400">Estoque</div>
+                            <div className={`font-bold ${getDisplayStock(p, products) <= (p.minStock || 0) ? 'text-red-500' : 'text-blue-600'}`}>
+                            {getDisplayStock(p, products)} Un
+                            {hasWholesale && (
+                                <span className="text-[10px] text-slate-400 font-normal ml-1">
+                                    ({Math.floor(getDisplayStock(p, products) / p.packQuantity)} cx)
+                                </span>
+                            )}
+                            </div>
+                        </div>
+                        <div className="text-right">
+                            <div className="text-xs text-slate-400">Unidade</div>
+                            <div className="font-bold text-slate-700">{formatCurrency(p.price)}</div>
+                        </div>
+                      </div>
+                  </div>
+                  
+                  {hasWholesale ? (
+                      <div className="grid grid-cols-2 border-t divide-x divide-slate-200">
+                          <button onClick={() => addToCart(p, 'retail')} className="py-2 text-xs font-bold text-slate-600 hover:bg-slate-200 text-center">
+                              +1 Unidade
+                          </button>
+                          <button onClick={() => addToCart(p, 'wholesale')} className="py-2 text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 text-center flex flex-col items-center leading-tight">
+                              <span>+1 Caixa</span>
+                              <span className="text-[9px]">{formatCurrency(p.wholesalePrice)}</span>
+                          </button>
+                      </div>
+                  ) : (
+                       null
+                  )}
                 </div>
-                </div>
-                <div className="text-right">
-                <div className="text-xs text-slate-400">Preço</div>
-                <div className="font-bold text-slate-700">{formatCurrency(p.price)}</div>
-                </div>
-              </div>
-            </button>
-          ))}
+              );
+          })}
         </div>
       </div>
 
@@ -885,11 +981,14 @@ const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotifi
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
           {cart.map(item => {
              return (
-              <div key={item.id} className="flex justify-between items-center p-2 border-b border-slate-100 last:border-0">
+              <div key={item.id} className={`flex justify-between items-center p-2 border-b border-slate-100 last:border-0 ${item.isWholesale ? 'bg-indigo-50/50 rounded' : ''}`}>
                 <div className="flex-1">
-                  <div className="font-medium text-sm">{item.name}</div>
+                  <div className="font-medium text-sm flex items-center gap-1">
+                      {item.name}
+                      {item.isWholesale && <Package size={12} className="text-indigo-600"/>}
+                  </div>
                   <div className="text-xs text-slate-500">
-                    {item.qty} x {formatCurrency(item.price)} 
+                    {item.qty} {item.isWholesale ? 'cx' : 'un'} x {formatCurrency(item.price)} 
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
@@ -927,17 +1026,14 @@ const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotifi
         </div>
       </div>
 
-      {/* Modal de Pagamento */}
       <Modal isOpen={paymentModalOpen} onClose={() => setPaymentModalOpen(false)} title={`Pagamento: ${paymentMethod}`}>
-        <div className="space-y-4">
+         <div className="space-y-4">
           {modalStep === 'config' ? (
             <>
           <div className="text-center p-4 bg-slate-50 rounded">
             <p className="text-sm text-slate-500">Valor a Pagar</p>
             <p className="text-3xl font-bold text-slate-800">{formatCurrency(totalCart)}</p>
           </div>
-
-          {/* Seleção de Perfil de Taxa (Exceto Dinheiro e Fiado) */}
           {(paymentMethod !== 'Dinheiro' && paymentMethod !== 'Fiado') && (
             <div>
               <label className="block text-xs font-bold text-slate-500 mb-1">Perfil de Taxa (Máquina)</label>
@@ -946,8 +1042,6 @@ const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotifi
               </select>
             </div>
           )}
-
-          {/* Parcelas (Apenas Crédito) */}
           {paymentMethod === 'Crédito' && (
             <div>
               <label className="block text-xs font-bold text-slate-500 mb-1">Parcelas</label>
@@ -956,8 +1050,6 @@ const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotifi
               </select>
             </div>
           )}
-
-          {/* Configuração Fiado */}
           {paymentMethod === 'Fiado' && (
             <div className="space-y-3 bg-amber-50 p-3 rounded border border-amber-100">
               <div className="flex gap-2">
@@ -980,7 +1072,6 @@ const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotifi
               </div>
             </div>
           )}
-
               <button onClick={handleReview} className="w-full bg-slate-900 text-white py-3 rounded font-bold hover:bg-slate-800 mt-4">Revisar Venda</button>
             </>
           ) : (
@@ -988,24 +1079,7 @@ const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotifi
               <div className="bg-emerald-50 p-4 rounded border border-emerald-100 text-center">
                 <CheckCircle className="mx-auto text-emerald-600 mb-2" size={32}/>
                 <h3 className="font-bold text-emerald-800 text-lg">Pronto para Finalizar!</h3>
-                <p className="text-emerald-600 text-sm">Confira os dados abaixo</p>
               </div>
-              
-              <div className="text-sm space-y-2 border p-3 rounded bg-slate-50">
-                <div className="flex justify-between"><span>Total Itens:</span> <span className="font-bold">{pendingSale?.items.length}</span></div>
-                <div className="flex justify-between"><span>Cliente:</span> <span className="font-bold">{pendingSale?.clientName}</span></div>
-                <div className="flex justify-between"><span>Pagamento:</span> <span className="font-bold">{pendingSale?.paymentMethod} {pendingSale?.installments > 1 && `(${pendingSale?.installments}x)`}</span></div>
-                <div className="flex justify-between text-lg border-t pt-2 mt-2"><span>Total Final:</span> <span className="font-bold text-slate-900">{formatCurrency(pendingSale?.total)}</span></div>
-              </div>
-
-              <div 
-                className="flex items-center gap-3 p-3 border rounded cursor-pointer hover:bg-slate-50 transition-colors"
-                onClick={() => setShouldPrint(!shouldPrint)}
-              >
-                {shouldPrint ? <CheckSquare className="text-indigo-600"/> : <Square className="text-slate-400"/>}
-                <span className="font-bold text-slate-700 select-none">Gerar Cupom / Recibo</span>
-              </div>
-
               <div className="grid grid-cols-2 gap-3">
                 <button onClick={() => setModalStep('config')} className="py-3 border rounded font-bold text-slate-600 hover:bg-slate-50">Voltar</button>
                 <button onClick={confirmSale} className="py-3 bg-emerald-600 text-white rounded font-bold hover:bg-emerald-700">Fechar Venda</button>
@@ -1013,6 +1087,89 @@ const PDV = ({ products, clients, setClients, feeProfiles, onNewSale, showNotifi
             </div>
           )}
         </div>
+      </Modal>
+
+      {/* --- Modal de Edição Rápida no PDV (VISUAL CORRIGIDO) --- */}
+      <Modal isOpen={isEditModalOpen} onClose={() => setIsEditModalOpen(false)} title="Editar Produto (PDV)">
+        <form onSubmit={handleSaveProduct} className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <div className="col-span-2">
+              <label className="block text-xs font-bold text-slate-700 mb-1">Nome do Produto</label>
+              <input className="w-full border p-2 rounded text-sm" value={editingProduct?.name || ''} onChange={e => setEditingProduct({...editingProduct, name: e.target.value})} required/>
+            </div>
+            
+            <div className="col-span-2">
+              <label className="block text-xs font-bold text-slate-700 mb-1">Categoria</label>
+              <div className="relative">
+                <input 
+                  className="w-full border p-2 rounded text-sm" 
+                  value={editingProduct?.category || ''} 
+                  onChange={e => setEditingProduct({...editingProduct, category: e.target.value})}
+                  onFocus={() => setShowGroupSuggestions(true)}
+                  onBlur={() => setTimeout(() => setShowGroupSuggestions(false), 200)}
+                />
+                {showGroupSuggestions && groups && (
+                  <div className="absolute z-10 w-full bg-white border border-slate-200 rounded shadow-lg max-h-40 overflow-y-auto mt-1">
+                    {groups.filter(g => g.name.toLowerCase().includes((editingProduct?.category || '').toLowerCase())).map(g => (
+                      <div key={g.id} className="p-2 text-sm hover:bg-slate-100 cursor-pointer" onMouseDown={() => setEditingProduct({...editingProduct, category: g.name})}>
+                        {g.name}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="col-span-2 bg-slate-50 p-3 rounded border border-slate-200">
+               <label className="block text-xs font-bold text-slate-700 mb-1">Preço Venda (Varejo)</label>
+               <input type="text" inputMode="decimal" className="w-full border p-2 rounded text-sm font-bold text-slate-800" value={editingProduct?.price || ''} onChange={e => setEditingProduct({...editingProduct, price: e.target.value})}/>
+            </div>
+
+            {/* ÁREA ATACADO (ESTILO IDÊNTICO AO ESTOQUE) */}
+            <div className={`col-span-2 p-3 rounded border ${isWholesaleEnabled ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-100 border-slate-200 opacity-70'}`} title={!isWholesaleEnabled ? "Habilite 'Venda por Atacado' nas configurações para editar." : ""}>
+               <div className="flex items-center gap-2 mb-2">
+                  <h4 className={`text-xs font-bold uppercase ${isWholesaleEnabled ? 'text-indigo-700' : 'text-slate-500'}`}>Venda Atacado / Caixa Fechada</h4>
+                  {!isWholesaleEnabled && <span className="text-[10px] bg-slate-200 px-1 rounded text-slate-500">Desabilitado</span>}
+               </div>
+               <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">Qtd no Pacote/Fardo</label>
+                    <input 
+                        type="number" 
+                        className="w-full border p-2 rounded text-sm disabled:cursor-not-allowed" 
+                        value={editingProduct?.packQuantity || ''} 
+                        onChange={e => setEditingProduct({...editingProduct, packQuantity: e.target.value})}
+                        disabled={!isWholesaleEnabled}
+                        placeholder="Ex: 12"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">Preço do Pacote (R$)</label>
+                    <input 
+                        type="text" 
+                        inputMode="decimal" 
+                        className="w-full border p-2 rounded text-sm disabled:cursor-not-allowed font-bold" 
+                        value={editingProduct?.wholesalePrice || ''} 
+                        onChange={e => setEditingProduct({...editingProduct, wholesalePrice: e.target.value})}
+                        disabled={!isWholesaleEnabled}
+                        placeholder="R$ 0,00"
+                    />
+                  </div>
+               </div>
+            </div>
+            
+            <div className="col-span-2">
+               <label className="block text-xs font-bold text-slate-700 mb-1">Estoque Atual</label>
+               <input type="number" className="w-full border p-2 rounded text-sm bg-slate-50" value={editingProduct?.stock || ''} disabled title="Alterações de estoque devem ser feitas via Notas/Movimentações"/>
+               <p className="text-[10px] text-slate-400 mt-1">Para ajustar estoque, use a aba "Notas & Gastos" ou "Estoque".</p>
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-2 pt-4 border-t mt-2">
+            <button type="button" onClick={() => setIsEditModalOpen(false)} className="px-4 py-2 text-slate-500 hover:bg-slate-50 rounded text-sm">Cancelar</button>
+            <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded text-sm font-medium hover:bg-indigo-700">Salvar Alterações</button>
+          </div>
+        </form>
       </Modal>
     </div>
   );
@@ -2205,7 +2362,6 @@ const Finance = ({ sales, transactions, transactionCategories, feeProfiles, setF
   );
 };
 
-// --- SUBSTITUIR O COMPONENTE SettingsManager EXISTENTE POR ESTE ---
 const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeConfig, setStoreConfig, showNotification }) => {
   const [newUser, setNewUser] = useState({ username: '', password: '' });
   const [editingCompanyInfo, setEditingCompanyInfo] = useState(companyInfo);
@@ -2238,7 +2394,6 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
 
   return (
     <div className="space-y-6">
-       {/* NOVA SEÇÃO: PREFERÊNCIAS DO SISTEMA */}
        <div className="bg-white p-6 rounded border border-slate-200 shadow-sm">
          <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Settings size={20}/> Preferências do Sistema</h3>
          
@@ -2259,6 +2414,22 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
             </button>
          </div>
        </div>
+
+      <div className="flex items-center justify-between p-4 bg-slate-50 rounded border border-slate-200 mt-2">
+        <div>
+          <h4 className="font-bold text-slate-800">Permitir Edição Rápida no PDV</h4>
+          <p className="text-xs text-slate-500">Exibe botão de editar nos produtos direto na tela de vendas.</p>
+        </div>
+        <button 
+          onClick={() => {
+              const newState = !storeConfig.enablePDVEditing;
+              setStoreConfig({ ...storeConfig, enablePDVEditing: newState });
+              showNotification(`Edição no PDV ${newState ? 'LIBERADA' : 'BLOQUEADA'}`, 'success');
+          }}
+          className={`relative w-14 h-7 rounded-full transition-colors duration-200 ease-in-out focus:outline-none ${storeConfig.enablePDVEditing ? 'bg-emerald-600' : 'bg-slate-300'}`}>
+          <span className={`block w-5 h-5 bg-white rounded-full shadow transform transition-transform duration-200 ease-in-out mt-1 ml-1 ${storeConfig.enablePDVEditing ? 'translate-x-7' : 'translate-x-0'}`} />
+        </button>
+      </div>
        {/* FIM DA NOVA SEÇÃO */}
 
        <div className="bg-white p-6 rounded border border-slate-200 shadow-sm">
@@ -2355,33 +2526,39 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
 
   const handleNewSale = (sale) => {
     let newProducts = JSON.parse(JSON.stringify(store.products)); // Deep copy for mutation
-
+    
     for (const item of sale.items) {
-      const productSold = newProducts.find(p => p.id === item.id);
+      // Se for item de atacado (virtual), usamos o originalId, senão o id normal
+      const targetId = item.originalId || item.id;
+      
+      const productSold = newProducts.find(p => p.id === targetId);
       if (!productSold) continue;
 
+      // Quantas unidades reais estão saindo do estoque?
+      // Se tiver stockDeduction (Venda Atacado), usa ele. Senão é 1 (Varejo).
+      const unitsPerItem = item.stockDeduction || 1; 
+      const totalUnitsToDeduct = item.qty * unitsPerItem;
+
+      // Lógica de Baixa (Sempre na Unidade Base)
       const itemType = productSold.itemType || 'unit';
 
       if (itemType === 'unit') {
-        // Selling a UNIT
-        const unitProductIndex = newProducts.findIndex(p => p.id === productSold.id);
-        if (unitProductIndex !== -1) {
-          if (newProducts[unitProductIndex].stock < item.qty) {
-            showNotification(`Estoque insuficiente para ${productSold.name}`, 'error');
-            return; // Abort sale
-          }
-          newProducts[unitProductIndex].stock -= item.qty;
+        // Produto Unitário (ou Pai do Atacado)
+        if (productSold.stock < totalUnitsToDeduct) {
+          showNotification(`Estoque insuficiente para ${productSold.name}. Necessário: ${totalUnitsToDeduct}`, 'error');
+          return; // Aborta venda
         }
-      } else if (itemType === 'pack') {
-        // Selling a PACK
+        productSold.stock -= totalUnitsToDeduct;
+      } 
+      else if (itemType === 'pack') {
+        // Lógica Legada (Caso ainda existam produtos tipo 'pack' antigos)
         const unitProductIndex = newProducts.findIndex(p => p.parentId === productSold.id);
         if (unitProductIndex !== -1) {
-          const unitsToDecrement = item.qty * productSold.conversionFactor;
-          if (newProducts[unitProductIndex].stock < unitsToDecrement) {
-            showNotification(`Estoque insuficiente para ${productSold.name}`, 'error');
-            return; // Abort sale
-          }
-          newProducts[unitProductIndex].stock -= unitsToDecrement;
+          const legacyUnitsToDecrement = item.qty * productSold.conversionFactor;
+          newProducts[unitProductIndex].stock -= legacyUnitsToDecrement;
+        } else {
+           // Se for pack isolado sem filho, baixa dele mesmo
+           productSold.stock -= item.qty;
         }
       }
     }
@@ -2519,7 +2696,21 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
         <div className="flex-1 overflow-auto p-6">
           <div className="max-w-7xl mx-auto animate-in fade-in duration-300">
             {activeModule === 'dashboard' && <Dashboard sales={store.sales} products={store.products} />}
-            {activeModule === 'pdv' && <PDV products={store.products} clients={store.clients} setClients={(c) => updateStore({...store, clients: c})} feeProfiles={store.feeProfiles} onNewSale={handleNewSale} showNotification={showNotification} />}
+            {activeModule === 'pdv' && (
+              <PDV 
+                products={store.products} 
+                // --- NOVAS PROPS ---
+                groups={store.groups}
+                onUpdateProduct={(updatedProducts) => updateStore({...store, products: updatedProducts})}
+                // -------------------
+                clients={store.clients} 
+                setClients={(c) => updateStore({...store, clients: c})} 
+                feeProfiles={store.feeProfiles} 
+                onNewSale={handleNewSale} 
+                showNotification={showNotification} 
+                storeConfig={store} // Já adicionado anteriormente
+              />
+            )}
             {activeModule === 'clients' && <ClientsManager clients={store.clients} setClients={(c) => updateStore({...store, clients: c})} showNotification={showNotification} />}
             {activeModule === 'transactions' && <TransactionsManager products={store.products} transactions={store.transactions} transactionCategories={store.transactionCategories} setTransactionCategories={(tc) => updateStore({...store, transactionCategories: tc})} onSaveTransaction={handleSaveTransaction} onUpdateTransaction={handleUpdateTransaction} onDeleteTransaction={handleDeleteTransaction} showNotification={showNotification} />}
             {activeModule === 'finance' && <Finance sales={store.sales} transactions={store.transactions} transactionCategories={store.transactionCategories} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} />}
