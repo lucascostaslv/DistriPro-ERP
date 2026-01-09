@@ -2242,7 +2242,8 @@ const Finance = ({ sales, transactions, transactionCategories, feeProfiles, setF
   );
 };
 
-const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, showNotification }) => {
+// --- SUBSTITUIR O COMPONENTE SettingsManager EXISTENTE POR ESTE ---
+const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeConfig, setStoreConfig, showNotification }) => {
   const [newUser, setNewUser] = useState({ username: '', password: '' });
   const [editingCompanyInfo, setEditingCompanyInfo] = useState(companyInfo);
 
@@ -2266,8 +2267,37 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, showNot
     showNotification('Dados da empresa atualizados!', 'success');
   };
 
+  const toggleWholesale = () => {
+    const newState = !storeConfig.enableWholesale;
+    setStoreConfig({ ...storeConfig, enableWholesale: newState });
+    showNotification(`Modo Atacado ${newState ? 'ATIVADO' : 'DESATIVADO'}`, 'success');
+  };
+
   return (
     <div className="space-y-6">
+       {/* NOVA SEÇÃO: PREFERÊNCIAS DO SISTEMA */}
+       <div className="bg-white p-6 rounded border border-slate-200 shadow-sm">
+         <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Settings size={20}/> Preferências do Sistema</h3>
+         
+         <div className="flex items-center justify-between p-4 bg-slate-50 rounded border border-slate-200">
+            <div>
+              <h4 className="font-bold text-slate-800">Habilitar Venda por Atacado</h4>
+              <p className="text-xs text-slate-500">Habilita campos de "Qtd no Fardo" no estoque e botões de venda atacado no PDV.</p>
+            </div>
+            
+            {/* Toggle Switch Personalizado com Tailwind */}
+            <button 
+              onClick={toggleWholesale}
+              className={`relative w-14 h-7 rounded-full transition-colors duration-200 ease-in-out focus:outline-none ${storeConfig.enableWholesale ? 'bg-indigo-600' : 'bg-slate-300'}`}
+            >
+              <span 
+                className={`block w-5 h-5 bg-white rounded-full shadow transform transition-transform duration-200 ease-in-out mt-1 ml-1 ${storeConfig.enableWholesale ? 'translate-x-7' : 'translate-x-0'}`} 
+              />
+            </button>
+         </div>
+       </div>
+       {/* FIM DA NOVA SEÇÃO */}
+
        <div className="bg-white p-6 rounded border border-slate-200 shadow-sm">
          <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Package size={20}/> Dados da Empresa (para Cupons)</h3>
          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
@@ -2531,7 +2561,18 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
             {activeModule === 'transactions' && <TransactionsManager products={store.products} transactions={store.transactions} transactionCategories={store.transactionCategories} setTransactionCategories={(tc) => updateStore({...store, transactionCategories: tc})} onSaveTransaction={handleSaveTransaction} onUpdateTransaction={handleUpdateTransaction} onDeleteTransaction={handleDeleteTransaction} showNotification={showNotification} />}
             {activeModule === 'finance' && <Finance sales={store.sales} transactions={store.transactions} transactionCategories={store.transactionCategories} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} />}
             {activeModule === 'inventory' && <InventoryWMS products={store.products} setProducts={(p) => updateStore({...store, products: p})} groups={store.groups} setGroups={(g) => updateStore({...store, groups: g})} showNotification={showNotification} />}
-            {activeModule === 'settings' && <SettingsManager users={store.users} setUsers={(u) => updateStore({...store, users: u})} companyInfo={store.companyInfo} setCompanyInfo={(ci) => updateStore({...store, companyInfo: ci})} showNotification={showNotification} />}
+            {activeModule === 'settings' && (
+              <SettingsManager 
+                users={store.users} 
+                setUsers={(u) => updateStore({...store, users: u})} 
+                companyInfo={store.companyInfo} 
+                setCompanyInfo={(ci) => updateStore({...store, companyInfo: ci})}
+                /* NOVAS PROPS CONECTADAS AO ESTADO GLOBAL */
+                storeConfig={store}
+                setStoreConfig={updateStore} 
+                showNotification={showNotification} 
+              />
+            )}
           </div>
         </div>
       </main>
