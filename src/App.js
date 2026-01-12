@@ -12,6 +12,7 @@ import logo from './img/LOGO-MAQUINA-PNG.png';
 import logoWhite from './img/logo-maquina-texto-branco.png';
 import * as firebase from './firebase';
 import EntradaNotas from './EntradaNotas/EntradaNotas';
+import Transactions from './EntradaNotas/Transactions';
 
 // --- UTILS ---
 const formatCurrency = (value) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
@@ -2349,6 +2350,64 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
     </button>
   );
 
+  // --- SISTEMA DE NOTIFICAÇÃO DE CONTAS A PAGAR ---
+  useEffect(() => {
+    const checkBillNotifications = async () => {
+       const todayStr = new Date().toISOString().split('T')[0];
+       const lastCheck = localStorage.getItem('last_bill_check_date');
+       
+       const alreadyCheckedToday = lastCheck === todayStr;
+
+       try {
+         const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
+         const q = query(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'invoices'), where('status', '!=', 'CANCELADA')); 
+         
+         const snap = await getDocs(q);
+         const invoices = snap.docs.map(d => d.data());
+         
+         let urgentCount = 0;
+         let warningFiveDays = 0;
+
+         invoices.forEach(inv => {
+             if (!inv.financials) return;
+             inv.financials.forEach(inst => {
+                 if (inst.status !== 'PENDENTE') return;
+
+                 const due = new Date(inst.dueDate);
+                 const today = new Date();
+                 const diffTime = due - today;
+                 const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
+                 
+                 const warningKey = `warn_5d_${inv.header.number}_${inst.number}`;
+                 if (diffDays === 5 && !localStorage.getItem(warningKey)) {
+                     showNotification(`Conta vence em 5 dias: ${inv.header.entityName} (${formatCurrency(inst.value)})`, 'warning');
+                     localStorage.setItem(warningKey, 'true');
+                     warningFiveDays++;
+                 }
+
+                 if (diffDays <= 3 && diffDays > 0) {
+                     urgentCount++;
+                 }
+             });
+         });
+
+         if (urgentCount > 0 && !alreadyCheckedToday) {
+             showNotification(`ATENÇÃO: Existem ${urgentCount} contas vencendo nos próximos 3 dias!`, 'error');
+             localStorage.setItem('last_bill_check_date', todayStr);
+         }
+
+       } catch (e) {
+           console.error("Erro ao verificar notificações:", e);
+       }
+    };
+
+    const timer = setTimeout(() => {
+        if(store) checkBillNotifications();
+    }, 2000);
+    
+    return () => clearTimeout(timer);
+  }, [store]);
+
   return (
     <div className="flex h-screen bg-slate-100 font-sans text-slate-900">
       {/* Sidebar */}
@@ -2410,14 +2469,16 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
               />
             )}
             {activeModule === 'clients' && <ClientsManager clients={store.clients} setClients={(c) => updateStore({...store, clients: c})} showNotification={showNotification} />}
-            {activeModule === 'transactions' && <EntradaNotas 
-              products={store.products} 
-              onSaveEntry={async (newProducts, newTransaction) => {
-                  const newState = { ...store, products: newProducts };
-                  if (newTransaction) newState.transactions = [...store.transactions, newTransaction];
-                  await updateStore(newState);
-              }}
-            />}
+            {activeModule === 'transactions' && (
+              <Transactions 
+                  products={store.products} 
+                  onSaveEntry={async (newProducts, newTransaction) => {
+                      const newState = { ...store, products: newProducts };
+                      if (newTransaction) newState.transactions = [...store.transactions, newTransaction];
+                      await updateStore(newState);
+                  }}
+              />
+            )}
             {activeModule === 'finance' && <Finance sales={store.sales} transactions={store.transactions} transactionCategories={store.transactionCategories} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} />}
             {activeModule === 'inventory' && <InventoryWMS products={store.products} setProducts={(p) => updateStore({...store, products: p})} groups={store.groups} setGroups={(g) => updateStore({...store, groups: g})} showNotification={showNotification} storeConfig={store} />}
             {activeModule === 'settings' && (
