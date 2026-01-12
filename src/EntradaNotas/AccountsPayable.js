@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
-  Calendar, Filter, Search, DollarSign, 
-  Clock, CheckCircle, AlertTriangle, Eye, X, Package 
+  Calendar, Search, CheckCircle, Eye, X, Package, 
+  ChevronLeft, ChevronRight, CalendarDays
 } from 'lucide-react';
 import { collection, getDocs, query, orderBy } from 'firebase/firestore';
-import { db } from '../firebase'; // Ajuste o caminho conforme sua estrutura
+import { db } from '../firebase'; 
 
 // Utilitários de formatação
 const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val);
@@ -18,15 +18,51 @@ const AccountsPayable = ({ products }) => {
   const [invoices, setInvoices] = useState([]);
   const [loading, setLoading] = useState(true);
   
+  // --- ESTADO DE DATA ---
+  const [currentDate, setCurrentDate] = useState(new Date());
+  const [showMonthPicker, setShowMonthPicker] = useState(false); // Novo estado para o popup de meses
+  
   // Filtros
-  const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
   const [selectedCategory, setSelectedCategory] = useState('ALL');
   const [searchTerm, setSearchTerm] = useState('');
   
   // Modal Detalhes
   const [detailsModal, setDetailsModal] = useState(null);
 
-  // Categorias extraídas dos produtos cadastrados
+  // Lista de Meses
+  const monthNames = [
+    "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+    "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
+  ];
+
+  // Computa a string "YYYY-MM" para filtragem
+  const selectedMonthStr = useMemo(() => {
+    const year = currentDate.getFullYear();
+    const month = String(currentDate.getMonth() + 1).padStart(2, '0');
+    return `${year}-${month}`;
+  }, [currentDate]);
+
+  // Controles de Navegação de Data
+  const handlePrevMonth = () => {
+    setCurrentDate(prev => new Date(prev.getFullYear(), prev.getMonth() - 1, 1));
+  };
+
+  const handleNextMonth = () => {
+    setCurrentDate(prev => new Date(prev.getFullYear(), prev.getMonth() + 1, 1));
+  };
+
+  const handleYearChange = (e) => {
+    const newYear = parseInt(e.target.value, 10);
+    setCurrentDate(prev => new Date(newYear, prev.getMonth(), 1));
+  };
+
+  // Nova função: Selecionar mês direto no Grid
+  const handleSelectMonthSpecific = (monthIndex) => {
+    setCurrentDate(prev => new Date(prev.getFullYear(), monthIndex, 1));
+    setShowMonthPicker(false);
+  };
+
+  // Categorias extraídas
   const categories = useMemo(() => {
     const cats = new Set(products.map(p => p.category).filter(Boolean));
     return ['ALL', ...Array.from(cats)];
@@ -38,7 +74,6 @@ const AccountsPayable = ({ products }) => {
       setLoading(true);
       try {
         const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
-        // Acessa a mesma coleção que o EntradaNotas grava
         const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'invoices'), orderBy('createdAt', 'desc'));
         const snap = await getDocs(q);
         const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -52,29 +87,25 @@ const AccountsPayable = ({ products }) => {
     fetchInvoices();
   }, []);
 
-  // Processamento dos dados para exibição (Flattening: Nota -> Parcelas)
+  // Processamento dos dados (Filtragem)
   const payableItems = useMemo(() => {
     let items = [];
     
     invoices.forEach(inv => {
-      // Filtrar por categoria do produto (se selecionado)
       if (selectedCategory !== 'ALL') {
         const hasCategory = inv.items.some(i => {
-            // Tenta encontrar a categoria do item no banco de produtos
             const prod = products.find(p => p.id === i.productId);
             return prod && prod.category === selectedCategory;
         });
         if (!hasCategory) return;
       }
 
-      // Se não tiver financeiro, ignora (ex: bonificação sem financeiro)
       if (!inv.financials || inv.financials.length === 0) return;
 
       inv.financials.forEach(inst => {
-        // Filtrar pelo Mês de Vencimento
-        if (!inst.dueDate.startsWith(selectedMonth)) return;
+        // Filtrar pelo Mês Selecionado
+        if (!inst.dueDate.startsWith(selectedMonthStr)) return;
         
-        // Filtro de Busca Texto (Fornecedor ou Número Nota)
         const searchLower = searchTerm.toLowerCase();
         if (searchTerm && 
             !inv.header.entityName.toLowerCase().includes(searchLower) && 
@@ -88,57 +119,128 @@ const AccountsPayable = ({ products }) => {
           invoiceNumber: inv.header.number,
           supplier: inv.header.entityName,
           issueDate: inv.header.issueDate,
-          fullInvoice: inv, // Referência para abrir detalhes
-          
-          // Dados da Parcela
+          fullInvoice: inv,
           installmentNum: inst.number,
           dueDate: inst.dueDate,
           value: inst.value,
-          status: inst.status, // 'PENDENTE' ou 'PAGO'
-          
-          // Cálculo de dias
+          status: inst.status,
           daysToDue: Math.ceil((new Date(inst.dueDate) - new Date()) / (1000 * 60 * 60 * 24))
         });
       });
     });
 
     return items.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
-  }, [invoices, selectedMonth, selectedCategory, searchTerm, products]);
+  }, [invoices, selectedMonthStr, selectedCategory, searchTerm, products]);
 
   const totalDueMonth = payableItems.reduce((acc, item) => acc + (item.status === 'PENDENTE' ? item.value : 0), 0);
   const totalPaidMonth = payableItems.reduce((acc, item) => acc + (item.status === 'PAGO' ? item.value : 0), 0);
 
+  // Lista de Anos para o Dropdown (Atual +/- 5 anos)
+  const years = Array.from({length: 11}, (_, i) => new Date().getFullYear() - 5 + i);
+
+  // Fechar o picker se clicar fora (ref simples)
+  const pickerRef = useRef(null);
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (pickerRef.current && !pickerRef.current.contains(event.target)) {
+        setShowMonthPicker(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
   return (
-    <div className="space-y-6 animate-fade-in">
-      {/* KPI Cards */}
+    <div className="space-y-6 animate-fade-in pb-10">
+      
+      {/* 1. SELETOR DE DATA ESTILIZADO */}
+      <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm flex flex-col md:flex-row justify-between items-center gap-4">
+          <div className="flex items-center gap-2">
+              <div className="p-2 bg-indigo-50 text-indigo-600 rounded-full">
+                  <CalendarDays size={20} />
+              </div>
+              <div>
+                  <h3 className="text-sm font-bold text-slate-700">Período Financeiro</h3>
+                  <p className="text-xs text-slate-500">Selecione o mês de referência</p>
+              </div>
+          </div>
+
+          <div className="flex items-center bg-slate-50 rounded-lg p-1 border border-slate-200">
+              {/* Botão Mês Anterior */}
+              <button onClick={handlePrevMonth} className="p-2 hover:bg-white hover:shadow-sm rounded-md transition-all text-slate-500 hover:text-indigo-600">
+                  <ChevronLeft size={20} />
+              </button>
+              
+              <div className="flex items-center px-4 gap-2 relative" ref={pickerRef}>
+                  
+                  {/* Nome do Mês (Clicável para abrir Grid) */}
+                  <div className="relative">
+                      <button 
+                        onClick={() => setShowMonthPicker(!showMonthPicker)}
+                        className="text-lg font-bold text-slate-800 capitalize w-28 text-center hover:text-indigo-600 transition-colors flex justify-center items-center gap-1"
+                      >
+                          {monthNames[currentDate.getMonth()]}
+                      </button>
+
+                      {/* POPUP GRID DE MESES */}
+                      {showMonthPicker && (
+                        <div className="absolute top-full left-1/2 -translate-x-1/2 mt-3 bg-white border border-slate-200 shadow-xl rounded-lg p-3 z-50 w-64 animate-in fade-in zoom-in-95 duration-200">
+                            <div className="grid grid-cols-3 gap-2">
+                                {monthNames.map((m, idx) => (
+                                    <button
+                                        key={m}
+                                        onClick={() => handleSelectMonthSpecific(idx)}
+                                        className={`p-2 text-xs font-bold rounded hover:bg-indigo-50 hover:text-indigo-600 transition-colors
+                                            ${currentDate.getMonth() === idx ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm' : 'text-slate-600 bg-slate-50'}
+                                        `}
+                                    >
+                                        {m.substring(0, 3)}
+                                    </button>
+                                ))}
+                            </div>
+                            {/* Setinha visual do popup */}
+                            <div className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white border-t border-l border-slate-200 transform rotate-45"></div>
+                        </div>
+                      )}
+                  </div>
+
+                  {/* Dropdown de Ano */}
+                  <select 
+                    value={currentDate.getFullYear()} 
+                    onChange={handleYearChange}
+                    className="bg-transparent text-sm font-bold text-slate-500 cursor-pointer outline-none border-none hover:text-indigo-600"
+                  >
+                      {years.map(y => <option key={y} value={y}>{y}</option>)}
+                  </select>
+              </div>
+
+              {/* Botão Próximo Mês */}
+              <button onClick={handleNextMonth} className="p-2 hover:bg-white hover:shadow-sm rounded-md transition-all text-slate-500 hover:text-indigo-600">
+                  <ChevronRight size={20} />
+              </button>
+          </div>
+      </div>
+
+      {/* 2. KPI Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="bg-white p-4 rounded border border-slate-200 shadow-sm">
-          <p className="text-xs text-slate-500 uppercase font-bold">Total a Pagar ({selectedMonth.split('-')[1]}/{selectedMonth.split('-')[0]})</p>
+        <div className="bg-white p-4 rounded border border-slate-200 shadow-sm flex flex-col justify-between">
+          <p className="text-xs text-slate-500 uppercase font-bold">A Pagar em {monthNames[currentDate.getMonth()]}</p>
           <p className="text-2xl font-bold text-slate-800 mt-1">{formatCurrency(totalDueMonth)}</p>
         </div>
-        <div className="bg-emerald-50 p-4 rounded border border-emerald-100 shadow-sm">
-          <p className="text-xs text-emerald-600 uppercase font-bold">Total Pago</p>
+        <div className="bg-emerald-50 p-4 rounded border border-emerald-100 shadow-sm flex flex-col justify-between">
+          <p className="text-xs text-emerald-600 uppercase font-bold">Pago em {monthNames[currentDate.getMonth()]}</p>
           <p className="text-2xl font-bold text-emerald-700 mt-1">{formatCurrency(totalPaidMonth)}</p>
         </div>
       </div>
 
-      {/* Filtros */}
-      <div className="bg-white p-4 rounded border border-slate-200 shadow-sm flex flex-col md:flex-row gap-4 items-end">
-         <div className="w-full md:w-auto">
-            <label className="text-xs font-bold text-slate-500 block mb-1">Mês de Referência</label>
-            <input 
-              type="month" 
-              className="border p-2 rounded text-sm w-full md:w-48" 
-              value={selectedMonth} 
-              onChange={e => setSelectedMonth(e.target.value)}
-            />
-         </div>
+      {/* 3. Filtros Secundários */}
+      <div className="bg-white p-4 rounded border border-slate-200 shadow-sm flex flex-col md:flex-row gap-4">
          <div className="w-full md:w-auto flex-1">
             <label className="text-xs font-bold text-slate-500 block mb-1">Buscar Fornecedor/Nota</label>
             <div className="relative">
                 <Search className="absolute left-2 top-2.5 text-slate-400" size={16}/>
                 <input 
-                  className="border p-2 pl-8 rounded text-sm w-full" 
+                  className="border p-2 pl-8 rounded text-sm w-full outline-none focus:ring-1 focus:ring-indigo-500" 
                   placeholder="Nome ou número..."
                   value={searchTerm}
                   onChange={e => setSearchTerm(e.target.value)}
@@ -146,9 +248,9 @@ const AccountsPayable = ({ products }) => {
             </div>
          </div>
          <div className="w-full md:w-auto">
-            <label className="text-xs font-bold text-slate-500 block mb-1">Filtrar Categoria</label>
+            <label className="text-xs font-bold text-slate-500 block mb-1">Categoria de Produto</label>
             <select 
-              className="border p-2 rounded text-sm w-full md:w-48"
+              className="border p-2 rounded text-sm w-full md:w-48 outline-none focus:ring-1 focus:ring-indigo-500"
               value={selectedCategory}
               onChange={e => setSelectedCategory(e.target.value)}
             >
@@ -158,12 +260,12 @@ const AccountsPayable = ({ products }) => {
          </div>
       </div>
 
-      {/* Grid de Contas */}
+      {/* 4. Grid de Contas */}
       {loading ? (
         <div className="text-center py-10 text-slate-500">Carregando contas...</div>
       ) : payableItems.length === 0 ? (
         <div className="text-center py-10 bg-slate-50 rounded border border-dashed border-slate-300 text-slate-400">
-           Nenhuma conta encontrada para este período/filtro.
+           Nenhuma conta encontrada para {monthNames[currentDate.getMonth()]} de {currentDate.getFullYear()} com estes filtros.
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -205,7 +307,6 @@ const AccountsPayable = ({ products }) => {
                             </div>
                         </div>
                         
-                        {/* Hover Overlay */}
                         <div className="absolute inset-0 bg-indigo-900/5 backdrop-blur-[1px] opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                             <span className="bg-white px-3 py-1 rounded-full text-xs font-bold shadow text-indigo-700 flex items-center gap-1">
                                 <Eye size={14}/> Ver Detalhes
@@ -217,7 +318,7 @@ const AccountsPayable = ({ products }) => {
         </div>
       )}
 
-      {/* Modal de Detalhes */}
+      {/* Modal de Detalhes (Mantido) */}
       {detailsModal && (
          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 animate-in fade-in">
             <div className="bg-white w-full max-w-2xl rounded-lg shadow-2xl flex flex-col max-h-[90vh]">
@@ -230,7 +331,6 @@ const AccountsPayable = ({ products }) => {
                 </div>
                 
                 <div className="p-6 overflow-y-auto space-y-6">
-                    {/* Cabeçalho */}
                     <div className="grid grid-cols-2 gap-4 text-sm">
                         <div className="bg-slate-50 p-3 rounded border">
                             <p className="text-xs text-slate-500 font-bold uppercase">Fornecedor</p>
@@ -244,7 +344,6 @@ const AccountsPayable = ({ products }) => {
                         </div>
                     </div>
 
-                    {/* Itens */}
                     <div>
                         <h4 className="font-bold text-sm text-slate-700 mb-2 border-b pb-1">Produtos Comprados</h4>
                         <table className="w-full text-sm text-left">
@@ -270,7 +369,6 @@ const AccountsPayable = ({ products }) => {
                         </table>
                     </div>
 
-                    {/* Financeiro */}
                     <div>
                         <h4 className="font-bold text-sm text-slate-700 mb-2 border-b pb-1">Parcelas Financeiras</h4>
                          <div className="grid grid-cols-2 md:grid-cols-3 gap-2">

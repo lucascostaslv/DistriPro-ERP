@@ -75,7 +75,7 @@ const DenseSelect = (props) => (
 );
 
 // --- APP PRINCIPAL ---
-export default function EntradaNotas({ products: appProducts, onSaveEntry }) {
+export default function EntradaNotas({ products: appProducts, priceGroups, onSaveEntry }) {
   const [user, setUser] = useState(null);
   const [currentStep, setCurrentStep] = useState(1); 
   const [loading, setLoading] = useState(false);
@@ -264,6 +264,21 @@ export default function EntradaNotas({ products: appProducts, onSaveEntry }) {
             existingProd = products.find(p => (p.cbaCode && String(p.cbaCode).includes(cProd)) || (p.manufacturingCode && p.manufacturingCode.includes(cProd)));
         }
 
+        // --- LÓGICA DE GRUPO DE PREÇO (NOVO BLOCO) ---
+        let suggestedPrice = null;
+        let priceGroupId = null;
+        let priceGroupMargin = 0;
+
+        if (existingProd && existingProd.priceGroupId && priceGroups) {
+            const group = priceGroups.find(g => g.id === existingProd.priceGroupId);
+            if (group) {
+                priceGroupId = group.id;
+                priceGroupMargin = group.margin;
+                // Fórmula: Custo * (1 + Margem/100)
+                suggestedPrice = vUnCom * (1 + (group.margin / 100));
+            }
+        }
+
         newItems.push({
             id: Math.random().toString(36).substring(2),
             productId: existingProd ? existingProd.id : '',
@@ -277,7 +292,10 @@ export default function EntradaNotas({ products: appProducts, onSaveEntry }) {
             icmsRate: 0, ipiRate: 0, icmsValue: vICMS, ipiValue: vIPI,
             total: (qCom * vUnCom) + vIPI,
             cfop: getTagContent(prod, "CFOP") || selectedType?.defaultCfop || "",
-            isService: false
+            isService: false,
+            suggestedPrice: suggestedPrice,
+            priceGroupMargin: priceGroupMargin,
+            acceptedSuggestion: false
         });
     }
 
@@ -448,6 +466,11 @@ export default function EntradaNotas({ products: appProducts, onSaveEntry }) {
                                 product.stock = (Number(product.stock) || 0) + (qtyToUpdate * factor);
                             }
                             updatedCount++;
+
+                            if (item.acceptedSuggestion && item.suggestedPrice) {
+                                product.cost = item.unitPrice;
+                                product.price = item.suggestedPrice;
+                            }
                         }
                     }
                 }
@@ -500,6 +523,15 @@ export default function EntradaNotas({ products: appProducts, onSaveEntry }) {
       
     } catch (e) { alert("Erro ao gravar: " + e); } finally { setLoading(false); }
   };
+
+    const togglePriceSuggestion = (itemId) => {
+        setItems(prev => prev.map(item => {
+            if (item.id === itemId) {
+                return { ...item, acceptedSuggestion: !item.acceptedSuggestion };
+            }
+            return item;
+        }));
+    };
 
   return (
     <div className="flex flex-col min-h-screen bg-gray-100 font-sans text-gray-800">
@@ -636,6 +668,7 @@ export default function EntradaNotas({ products: appProducts, onSaveEntry }) {
                             <th className="p-2 border-b">Produto / Descrição</th>
                             <th className="p-2 border-b text-right">Qtd</th>
                             <th className="p-2 border-b text-right">Unitário</th>
+                            <th className="p-2 border-b text-right bg-indigo-50 text-indigo-800">Sugestão Venda</th>
                             <th className="p-2 border-b text-right bg-blue-50 text-blue-800">Total + Desp.</th>
                             <th className="p-2 border-b w-8"></th>
                         </tr>
@@ -693,6 +726,23 @@ export default function EntradaNotas({ products: appProducts, onSaveEntry }) {
                                 </td>
                                 <td className="p-2 text-right">{item.quantity}</td>
                                 <td className="p-2 text-right">{formatCurrency(item.unitPrice)}</td>
+                                <td className="p-2 text-right bg-indigo-50/30">
+                                    {item.suggestedPrice ? (
+                                        <div className="flex flex-col items-end gap-1">
+                                            <button 
+                                                onClick={() => togglePriceSuggestion(item.id)}
+                                                className={`flex items-center gap-1 px-2 py-1 rounded border shadow-sm transition-all ${item.acceptedSuggestion ? 'bg-green-600 text-white border-green-700' : 'bg-white text-indigo-600 border-indigo-200 hover:bg-indigo-50'}`}
+                                                title={`Margem do Grupo: ${item.priceGroupMargin}%`}
+                                            >
+                                                {item.acceptedSuggestion ? <CheckCircle2 size={10}/> : <RefreshCw size={10}/>}
+                                                <span className="font-bold">{formatCurrency(item.suggestedPrice)}</span>
+                                            </button>
+                                            {item.acceptedSuggestion && <span className="text-[9px] text-green-600 font-bold">Será Atualizado</span>}
+                                        </div>
+                                    ) : (
+                                        <span className="text-gray-300">-</span>
+                                    )}
+                                </td>
                                 <td className="p-2 text-right font-bold bg-blue-50/30 text-blue-800">{formatCurrency(item.total)}</td>
                                 <td className="p-2 text-center"><button onClick={()=>setItems(items.filter(i=>i.id!==item.id))} className="text-gray-400 hover:text-red-500"><Trash2 size={14}/></button></td>
                             </tr>

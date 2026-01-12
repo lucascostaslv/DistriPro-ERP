@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
 import { PlusCircle, FileText } from 'lucide-react';
 import EntradaNotas from './EntradaNotas'; // Importa seu arquivo original
-import AccountsPayable from './AccountsPayable'; // O arquivo novo acima
+import AccountsPayable from './AccountsPayable'; // O arquivo novo de contas a pagar
 
 const Transactions = (props) => {
-  // Props recebidos: products, onSaveEntry
+  // Props recebidos: products, onSaveEntry e priceGroups (via ...props)
   const [activeTab, setActiveTab] = useState('entry'); // 'entry' | 'payable'
 
   return (
@@ -28,7 +28,8 @@ const Transactions = (props) => {
       {/* Renderização Condicional */}
       <div className="min-h-[600px]">
         {activeTab === 'entry' ? (
-          // Renderiza o componente original com todas as props que ele precisa
+          // O {...props} aqui é fundamental: ele passa 'products', 'onSaveEntry' 
+          // e agora 'priceGroups' para o EntradaNotas automaticamente.
           <EntradaNotas {...props} />
         ) : (
           // Renderiza a nova tela, passando produtos para os filtros de categoria

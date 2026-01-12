@@ -5,7 +5,7 @@ import {
   AlertTriangle, CheckCircle, X,
   Search, FileText,
   ArrowRight, ArrowLeft, Clock, Eye, ClipboardList,
-  PieChart, Save, UserPlus, Printer, Lock, Settings, CheckSquare, Square, Edit, Download, LogOut, Server, Beer, Minus, PlusCircle
+  PieChart, Save, UserPlus, Printer, Lock, Settings, CheckSquare, Square, Edit, Download, LogOut, Server, Beer, Minus, PlusCircle, Tags
 } from 'lucide-react';
 import { collection, query, where, getDocs, setDoc, doc, updateDoc, getDoc } from "firebase/firestore";
 import logo from './img/LOGO-MAQUINA-PNG.png';
@@ -13,6 +13,7 @@ import logoWhite from './img/logo-maquina-texto-branco.png';
 import * as firebase from './firebase';
 import EntradaNotas from './EntradaNotas/EntradaNotas';
 import Transactions from './EntradaNotas/Transactions';
+import PriceGroups from './PriceGroups';
 
 // --- UTILS ---
 const formatCurrency = (value) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
@@ -2223,6 +2224,12 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
     setTimeout(() => setNotification(null), 3000);
   };
 
+  useEffect(() => {
+    if (!store.priceGroups) {
+        updateStore({ ...store, priceGroups: [] });
+    }
+  }, []);
+
   const handleNewSale = (sale) => {
     let newProducts = JSON.parse(JSON.stringify(store.products)); // Deep copy for mutation
     
@@ -2425,6 +2432,7 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
           <MenuButton id="clients" icon={Users} label="Clientes" />
           <MenuButton id="transactions" icon={ClipboardList} label="Notas & Gastos" />
           <MenuButton id="finance" icon={DollarSign} label="Financeiro" />
+          <MenuButton id="priceGroups" icon={Tags} label="Precificação (Grupos)" />
           <MenuButton id="inventory" icon={Package} label="Estoque (WMS)" />
           <MenuButton id="settings" icon={Settings} label="Configurações" />
         </nav>
@@ -2472,11 +2480,21 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
             {activeModule === 'transactions' && (
               <Transactions 
                   products={store.products} 
+                  priceGroups={store.priceGroups || []}
                   onSaveEntry={async (newProducts, newTransaction) => {
                       const newState = { ...store, products: newProducts };
                       if (newTransaction) newState.transactions = [...store.transactions, newTransaction];
                       await updateStore(newState);
                   }}
+              />
+            )}
+            {activeModule === 'priceGroups' && (
+              <PriceGroups 
+                products={store.products}
+                priceGroups={store.priceGroups || []}
+                // ESTA É A NOVA FUNÇÃO QUE PERMITE ATUALIZAR TUDO DE UMA VEZ
+                onMergeChange={(updates) => updateStore({ ...store, ...updates })}
+                showNotification={showNotification}
               />
             )}
             {activeModule === 'finance' && <Finance sales={store.sales} transactions={store.transactions} transactionCategories={store.transactionCategories} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} />}
