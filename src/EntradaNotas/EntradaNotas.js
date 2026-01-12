@@ -1,0 +1,813 @@
+import { db, auth } from '../firebase';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { 
+  Save, 
+  X as XIcon, 
+  Plus, 
+  Trash2, 
+  Upload, 
+  CheckCircle2,
+  DollarSign,
+  ArrowRight,
+  ArrowLeft,
+  Package,
+  FileText,
+  Link as LinkIcon,
+  Settings,
+  RefreshCw
+} from 'lucide-react';
+import { 
+  collection, 
+  doc, 
+  writeBatch, 
+  serverTimestamp,
+  query,
+  where,
+  getDocs,
+  limit,
+  addDoc
+} from 'firebase/firestore';
+import { 
+  signInAnonymously, 
+  onAuthStateChanged,
+  signInWithCustomToken 
+} from 'firebase/auth';
+
+// --- CONFIGURAÇÃO FIREBASE ---
+const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
+const initialAuthToken = typeof window.__initial_auth_token !== 'undefined' ? window.__initial_auth_token : undefined;
+
+// --- UTILITÁRIOS ---
+const formatCurrency = (val) => 
+  new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val);
+
+const MOVEMENT_TYPES = [
+  { id: '1', code: 101, description: 'COMPRA MERCADORIA P/ REVENDA', direction: 'ENTRADA', stockAction: 'SOMAR', financialAction: 'PAGAR', defaultCfop: '1.102' },
+  { id: '2', code: 102, description: 'COMPRA BONIFICADA', direction: 'ENTRADA', stockAction: 'SOMAR', financialAction: 'NENHUM', defaultCfop: '1.910' },
+  { id: '3', code: 301, description: 'VENDA DISTRIBUIÇÃO', direction: 'SAIDA', stockAction: 'SUBTRAIR', financialAction: 'RECEBER', defaultCfop: '5.102' },
+  { id: '4', code: 501, description: 'LANÇAMENTO DE DESPESAS/SERVIÇOS', direction: 'SAIDA', stockAction: 'NEUTRO', financialAction: 'PAGAR', defaultCfop: '5.933' },
+];
+
+// Mock inicial
+const INITIAL_PRODUCTS = [];
+
+// --- COMPONENTES UI ---
+const Label = ({ children, required = false }) => (
+  <label className="block text-[10px] font-bold text-gray-600 uppercase mb-0.5 tracking-wide">
+    {children} {required && <span className="text-red-600">*</span>}
+  </label>
+);
+
+const DenseInput = (props) => (
+  <input 
+    {...props}
+    className={`w-full h-8 text-xs px-2 border border-gray-300 rounded-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-colors disabled:bg-gray-100 disabled:text-gray-500 ${props.className || ''}`} 
+  />
+);
+
+const DenseSelect = (props) => (
+  <select 
+    {...props}
+    className={`w-full h-8 text-xs px-1 border border-gray-300 rounded-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none bg-white ${props.className || ''}`} 
+  >
+    {props.children}
+  </select>
+);
+
+// --- APP PRINCIPAL ---
+export default function EntradaNotas({ products: appProducts, onSaveEntry }) {
+  const [user, setUser] = useState(null);
+  const [currentStep, setCurrentStep] = useState(1); 
+  const [loading, setLoading] = useState(false);
+  const [processingXml, setProcessingXml] = useState(false);
+  const [entryMode, setEntryMode] = useState('XML');
+  
+  // Estado de Produtos
+  const [products, setProducts] = useState(appProducts || INITIAL_PRODUCTS);
+
+  // Sincroniza com os produtos do App.js se mudarem, preservando os novos criados localmente
+  useEffect(() => {
+    if (appProducts) {
+        setProducts(prev => {
+            const localNew = prev.filter(p => !appProducts.some(ap => String(ap.id) === String(p.id)));
+            return [...appProducts, ...localNew];
+        });
+    }
+  }, [appProducts]);
+  
+  // Header State
+  const [establishment, setEstablishment] = useState('1');
+  const [selectedType, setSelectedType] = useState(null);
+  
+  const [headerData, setHeaderData] = useState({
+    series: '1',
+    number: '',
+    issueDate: new Date().toISOString().split('T')[0],
+    entryDate: new Date().toISOString().split('T')[0],
+    model: '55',
+    accessKey: '',
+    entityId: '',
+    entityName: '',
+    entityDoc: '',
+    xmlFile: '',
+    xmlValidated: false,
+    observations: '',
+    paymentCondition: '30 DIAS', 
+    paymentMethod: 'BOLETO'      
+  });
+
+  const [items, setItems] = useState([]);
+  const [installments, setInstallments] = useState([]);
+
+  const xmlInputRef = useRef(null);
+
+  // --- INIT ---
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (initialAuthToken) {
+          await signInWithCustomToken(auth, initialAuthToken);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Auth error:", error);
+      }
+    };
+    initAuth();
+    return onAuthStateChanged(auth, setUser);
+  }, []);
+
+  // --- LÓGICA DE NEGÓCIO ---
+
+  const handleNextStep = () => {
+    if (currentStep === 1) {
+      if (!selectedType) return alert("Selecione o Tipo de Movimento para continuar.");
+      if (!headerData.number) return alert("Informe o número da nota.");
+      if (!headerData.entityName) return alert("Informe o Parceiro (Fornecedor/Cliente).");
+    }
+    
+    if (currentStep === 2) {
+      if (items.length === 0) return alert("Adicione pelo menos um item à nota.");
+      
+      // Validação de itens não vinculados
+      const unlinkedItems = items.filter(i => !i.productId && !i.isService);
+      if (unlinkedItems.length > 0) {
+          if (!window.confirm(`Existem ${unlinkedItems.length} itens sem código de sistema vinculado.\nEles serão salvos apenas com a descrição do XML.\nDeseja continuar?`)) return;
+      }
+
+      if (installments.length === 0) {
+          try { generateFinancials(); } catch (e) { console.error("Erro financeiro:", e); }
+      }
+    }
+    
+    setCurrentStep(prev => prev + 1);
+  };
+
+  const handlePrevStep = () => {
+    setCurrentStep(prev => prev - 1);
+  };
+
+  const totals = useMemo(() => {
+    const totalProducts = items.reduce((acc, i) => acc + (i.quantity * i.unitPrice), 0);
+    const totalDiscount = items.reduce((acc, i) => acc + i.discount, 0);
+    const totalSurcharge = items.reduce((acc, i) => acc + i.surcharge, 0);
+    const totalIpi = items.reduce((acc, i) => acc + i.ipiValue, 0);
+    const totalIcms = items.reduce((acc, i) => acc + i.icmsValue, 0);
+    const totalNote = totalProducts - totalDiscount + totalSurcharge + totalIpi;
+    return { totalProducts, totalDiscount, totalSurcharge, totalIpi, totalIcms, totalNote };
+  }, [items]);
+
+  // Importação XML
+  const handleXmlUpload = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!selectedType) {
+        alert("ATENÇÃO: Selecione o Tipo de Operação antes de importar o XML.");
+        if (xmlInputRef.current) xmlInputRef.current.value = '';
+        return;
+    }
+
+    setProcessingXml(true);
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        await parseNFeXML(e.target?.result, file.name);
+      } catch (err) {
+        alert("Erro no XML: " + err);
+      } finally {
+        setProcessingXml(false);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const parseNFeXML = async (xmlText, fileName) => {
+    const parser = new DOMParser();
+    const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+    if (xmlDoc.getElementsByTagName("parsererror").length > 0) throw new Error("XML Inválido");
+    
+    const getTag = (parent, name) => parent.getElementsByTagName(name)[0] || parent.getElementsByTagName("nfe:"+name)[0];
+    const getTagContent = (parent, name) => { const el = getTag(parent, name); return el ? el.textContent || "" : ""; };
+    const infNFe = getTag(xmlDoc, "infNFe");
+    if(!infNFe) throw new Error("Tag infNFe não encontrada");
+    const ide = getTag(infNFe, "ide");
+    const emit = getTag(infNFe, "emit");
+    const dest = getTag(infNFe, "dest");
+    const nNF = getTagContent(ide, "nNF");
+    
+    const isSaida = selectedType?.direction === 'SAIDA';
+    const partnerNode = (isSaida && dest) ? dest : emit;
+    if (!partnerNode) throw new Error("Emitente/Destinatário não encontrado no XML");
+    
+    const xNome = getTagContent(partnerNode, "xNome");
+    const cnpj = getTagContent(partnerNode, "CNPJ") || getTagContent(partnerNode, "CPF");
+
+    // Cadastro Simulado/Real Fornecedor
+    let supplier = { name: xNome, id: 'AUTO' };
+    if (auth.currentUser) {
+        try {
+            supplier = await getOrCreateSupplier(cnpj, xNome);
+        } catch (e) {
+            console.warn("Erro ao cadastrar fornecedor auto:", e);
+        }
+    }
+
+    const detList = infNFe.getElementsByTagName("det");
+    const newItems = [];
+    
+    for(let i=0; i<detList.length; i++) {
+        const prod = getTag(detList[i], "prod");
+        const impostos = getTag(detList[i], "imposto");
+        
+        let vICMS = 0; let vIPI = 0;
+        if (impostos) {
+            const allTags = impostos.getElementsByTagName("*");
+            for(let j=0; j<allTags.length; j++) {
+                if (allTags[j].tagName.includes("vICMS") && !allTags[j].tagName.includes("vICMSDeson")) vICMS = parseFloat(allTags[j].textContent || "0");
+                if (allTags[j].tagName.includes("vIPI")) vIPI = parseFloat(allTags[j].textContent || "0");
+            }
+        }
+
+        const qCom = parseFloat(getTagContent(prod, "qCom") || "0");
+        const vUnCom = parseFloat(getTagContent(prod, "vUnCom") || "0");
+        const cProd = getTagContent(prod, "cProd");
+        const xProd = getTagContent(prod, "xProd");
+
+        // PROCURA O PRODUTO NA LISTA ATUAL
+        // BUSCA INTELIGENTE: Código Exato (Sistema ou Fabricante)
+        let existingProd = products.find(p => String(p.cbaCode) === String(cProd) || String(p.manufacturingCode) === String(cProd));
+        
+        if (!existingProd) {
+            // Tenta achar se o código do XML está contido no código do sistema ou vice-versa
+            existingProd = products.find(p => (p.cbaCode && String(p.cbaCode).includes(cProd)) || (p.manufacturingCode && p.manufacturingCode.includes(cProd)));
+        }
+
+        newItems.push({
+            id: Math.random().toString(36).substring(2),
+            productId: existingProd ? existingProd.id : '',
+            systemSku: existingProd ? existingProd.cbaCode : '',
+            xmlProductCode: cProd, 
+            xmlProductName: xProd,
+            productName: existingProd ? existingProd.name : xProd,
+            unit: getTagContent(prod, "uCom"),
+            quantity: qCom, unitPrice: vUnCom,
+            discount: 0, surcharge: 0, 
+            icmsRate: 0, ipiRate: 0, icmsValue: vICMS, ipiValue: vIPI,
+            total: (qCom * vUnCom) + vIPI,
+            cfop: getTagContent(prod, "CFOP") || selectedType?.defaultCfop || "",
+            isService: false
+        });
+    }
+
+    setHeaderData(prev => ({ ...prev, number: nNF, xmlValidated: true, xmlFile: fileName, entityName: supplier.name, entityDoc: cnpj, entityId: supplier.id }));
+    setItems(newItems);
+    alert(`XML Importado com sucesso! ${newItems.length} itens carregados.\n\nIMPORTANTE: Verifique os itens sem código vinculado e use o botão [+] para cadastrá-los se necessário.`);
+  };
+
+  const getOrCreateSupplier = async (cnpj, name) => {
+     if(!auth.currentUser) return { name, id: 'ERR' };
+     const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'suppliers'), where('cnpj', '==', cnpj), limit(1));
+     const snap = await getDocs(q);
+     if(!snap.empty) return { name: snap.docs[0].data().name, id: snap.docs[0].data().code };
+     
+     const newCode = Date.now().toString().slice(-4);
+     await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'suppliers'), {
+         name, cnpj, code: newCode, autoCreated: true, createdBy: auth.currentUser.uid
+     });
+     return { name, id: newCode };
+  };
+
+  // --- MANIPULAÇÃO DE ITENS (Vínculo e Cadastro Rápido) ---
+
+  const handleSystemSkuChange = (itemId, newSku) => {
+      setItems(prevItems => prevItems.map(item => {
+          if (item.id === itemId) {
+              // Apenas atualiza o texto digitado, sem buscar o produto automaticamente
+              return { ...item, systemSku: newSku };
+          }
+          return item;
+      }));
+  };
+
+  const handleUpdateItemInfo = (itemId) => {
+      setItems(prevItems => prevItems.map(item => {
+          if (item.id === itemId) {
+              // Busca pelo código do sistema (cbaCode)
+              const systemProd = products.find(p => String(p.cbaCode).trim() === String(item.systemSku).trim());
+              if (systemProd) {
+                  return {
+                      ...item,
+                      productId: systemProd.id,
+                      productName: systemProd.name, 
+                      unit: systemProd.unit || item.unit
+                  };
+              }
+              else {
+                  alert(`Produto não encontrado no sistema com o código: ${item.systemSku}`);
+              }
+          }
+          return item;
+      }));
+  };
+
+  const handleQuickCreate = (item) => {
+      const codeToUse = item.systemSku || item.xmlProductCode;
+      
+      if (!codeToUse) {
+          alert("O item precisa ter um código do XML ou um código digitado para ser cadastrado.");
+          return;
+      }
+
+      const newProduct = {
+          id: `sys-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+          cbaCode: codeToUse,
+          name: item.xmlProductName || 'Novo Produto',
+          unit: item.unit,
+          cost: item.unitPrice,
+          price: item.unitPrice * 1.5 // Margem padrão simulada
+      };
+
+      setProducts(prev => [...prev, newProduct]);
+      
+      // Atualiza no sistema global se a função existir
+      // Nota: A atualização real acontece no Salvar Final para evitar inconsistências
+      // Mas mantemos o estado local atualizado para a UI
+
+      setItems(prev => prev.map(i => i.id === item.id ? {
+          ...i,
+          productId: newProduct.id,
+          systemSku: newProduct.cbaCode,
+          productName: newProduct.name
+      } : i));
+  };
+
+  const generateFinancials = () => {
+    if (!selectedType || selectedType.financialAction === 'NENHUM') { setInstallments([]); return; }
+    let dateObj = new Date(headerData.issueDate);
+    if (isNaN(dateObj.getTime())) dateObj = new Date();
+    dateObj.setDate(dateObj.getDate() + 30);
+    setInstallments([{ id: Math.random().toString(), number: 1, dueDate: dateObj.toISOString().split('T')[0], value: totals.totalNote, status: 'PENDENTE' }]);
+  };
+
+  const handleAddInstallment = () => {
+      const nextNum = installments.length + 1;
+      let baseDate = new Date(headerData.issueDate);
+      if (installments.length > 0) baseDate = new Date(installments[installments.length-1].dueDate);
+      baseDate.setDate(baseDate.getDate() + 30);
+      setInstallments([...installments, { id: Math.random().toString(), number: nextNum, dueDate: baseDate.toISOString().split('T')[0], value: 0, status: 'PENDENTE' }]);
+  };
+
+  const handleRemoveInstallment = (id) => { setInstallments(installments.filter(i => i.id !== id)); };
+
+  const handleSave = async () => {
+    setLoading(true);
+    try {
+      // 1. Tenta vincular itens automaticamente antes de salvar (caso o usuário tenha digitado o código mas esquecido de clicar no botão de atualizar)
+      const finalItems = items.map(item => {
+          if (!item.productId && item.systemSku) {
+              const found = products.find(p => String(p.cbaCode).trim() === String(item.systemSku).trim());
+              if (found) {
+                  return { 
+                      ...item, 
+                      productId: found.id, 
+                      productName: found.name, 
+                      unit: found.unit || item.unit 
+                  };
+              }
+          }
+          return item;
+      });
+
+      const batch = writeBatch(db);
+      const invoiceRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'invoices'));
+      batch.set(invoiceRef, {
+          header: headerData, type: selectedType, items: finalItems, financials: installments, totals,
+          status: 'CONFIRMADA', createdAt: serverTimestamp(), userId: auth.currentUser?.uid || 'anon_user'
+      });
+
+      // --- ATUALIZAÇÃO DE ESTOQUE ---
+      let updatedCount = 0;
+      if (selectedType && selectedType.stockAction !== 'NEUTRO') {
+        const factor = selectedType.stockAction === 'SOMAR' ? 1 : -1;
+        
+        if (onSaveEntry && appProducts) {
+            // 1. Base na lista oficial
+            const newProductsList = JSON.parse(JSON.stringify(appProducts));
+            
+            // 2. Incorpora produtos novos criados nesta sessão (que estão no state local mas não no oficial)
+            const createdProducts = products.filter(p => !appProducts.some(ap => String(ap.id) === String(p.id)));
+            if (createdProducts.length > 0) {
+                newProductsList.push(...createdProducts);
+            }
+            
+            finalItems.forEach(item => {
+                if (item.productId && item.productId !== 'MANUAL') {
+                    // Busca pelo ID convertendo ambos para String para evitar erro de tipo (número vs texto)
+                    const idx = newProductsList.findIndex(p => String(p.id) === String(item.productId));
+                    
+                    if (idx > -1) {
+                        const product = newProductsList[idx];
+                        const qtyToUpdate = Number(item.quantity) || 0;
+                        
+                        if (qtyToUpdate > 0) {
+                            // Lógica Específica para Fardos/Packs (Atualiza a unidade filha)
+                            if (product.itemType === 'pack') {
+                                const unitProductIdx = newProductsList.findIndex(p => p.parentId === product.id);
+                                if (unitProductIdx > -1) {
+                                    const currentStock = Number(newProductsList[unitProductIdx].stock) || 0;
+                                    const conversion = Number(product.conversionFactor) || 1;
+                                    newProductsList[unitProductIdx].stock = currentStock + (qtyToUpdate * conversion * factor);
+                                } else {
+                                    // Fallback: se não achar filho, atualiza o próprio pack
+                                    product.stock = (Number(product.stock) || 0) + (qtyToUpdate * factor);
+                                }
+                            } else {
+                                // Produto Unitário Normal
+                                product.stock = (Number(product.stock) || 0) + (qtyToUpdate * factor);
+                            }
+                            updatedCount++;
+                        }
+                    }
+                }
+            });
+            
+            // Cria o objeto de transação para o histórico financeiro
+            const newTransaction = {
+                id: Date.now(),
+                type: selectedType.direction === 'ENTRADA' ? 'entry' : 'exit',
+                category: 'Revenda',
+                description: `NF ${headerData.number} - ${headerData.entityName}`,
+                value: totals.totalNote,
+                date: headerData.issueDate,
+                items: finalItems.map(i => ({
+                    productId: i.productId,
+                    name: i.productName,
+                    qty: i.quantity,
+                    total: i.total
+                }))
+            };
+
+            // Salva TUDO (Estoque + Transação) de uma vez no App.js
+            await onSaveEntry(newProductsList, newTransaction);
+        }
+      }
+
+      await batch.commit();
+      alert(`Nota Gravada! Estoque de ${updatedCount} produtos atualizado e lançado no financeiro.`);
+      
+      // Limpa o formulário para nova entrada sem recarregar a página (evita logout)
+      setItems([]);
+      setInstallments([]);
+      setHeaderData({
+        series: '1',
+        number: '',
+        issueDate: new Date().toISOString().split('T')[0],
+        entryDate: new Date().toISOString().split('T')[0],
+        model: '55',
+        accessKey: '',
+        entityId: '',
+        entityName: '',
+        entityDoc: '',
+        xmlFile: '',
+        xmlValidated: false,
+        observations: '',
+        paymentCondition: '30 DIAS', 
+        paymentMethod: 'BOLETO'      
+      });
+      setCurrentStep(1);
+      
+    } catch (e) { alert("Erro ao gravar: " + e); } finally { setLoading(false); }
+  };
+
+  return (
+    <div className="flex flex-col min-h-screen bg-gray-100 font-sans text-gray-800">
+      
+      {/* HEADER FIXO: PROGRESSO */}
+      <div className="bg-white border-b border-gray-300 p-4 sticky top-0 z-30 shadow-sm">
+         <div className="max-w-6xl mx-auto">
+             <div className="flex items-center justify-between relative mb-2">
+                 <div className="absolute left-0 top-1/2 w-full h-0.5 bg-gray-200 -z-10"></div>
+                 <div className={`flex flex-col items-center gap-1 bg-white px-2 ${currentStep >= 1 ? 'text-blue-700 font-bold' : 'text-gray-400'}`}>
+                     <div className={`w-8 h-8 rounded-full flex items-center justify-center border-2 ${currentStep >= 1 ? 'border-blue-600 bg-blue-50' : 'border-gray-300 bg-white'}`}>1</div>
+                     <span className="text-xs uppercase">Cabeçalho</span>
+                 </div>
+                 <div className={`flex flex-col items-center gap-1 bg-white px-2 ${currentStep >= 2 ? 'text-blue-700 font-bold' : 'text-gray-400'}`}>
+                     <div className={`w-8 h-8 rounded-full flex items-center justify-center border-2 ${currentStep >= 2 ? 'border-blue-600 bg-blue-50' : 'border-gray-300 bg-white'}`}>2</div>
+                     <span className="text-xs uppercase">Itens</span>
+                 </div>
+                 <div className={`flex flex-col items-center gap-1 bg-white px-2 ${currentStep >= 3 ? 'text-blue-700 font-bold' : 'text-gray-400'}`}>
+                     <div className={`w-8 h-8 rounded-full flex items-center justify-center border-2 ${currentStep >= 3 ? 'border-blue-600 bg-blue-50' : 'border-gray-300 bg-white'}`}>3</div>
+                     <span className="text-xs uppercase">Financeiro</span>
+                 </div>
+             </div>
+         </div>
+      </div>
+
+      <main className="flex-1 max-w-6xl w-full mx-auto p-4 flex flex-col">
+        
+        {/* === PASSO 1: CABEÇALHO & IMPORTAÇÃO === */}
+        {currentStep === 1 && (
+          <div className="bg-white border border-gray-300 rounded shadow-sm">
+            <div className="p-4 border-b bg-gray-50 flex justify-between items-center">
+                <h2 className="font-bold text-gray-700 flex items-center gap-2"><FileText size={18}/> Dados Iniciais</h2>
+                
+                <div className="flex bg-gray-100 p-1 rounded">
+                    <button onClick={() => setEntryMode('XML')} className={`px-3 py-1 text-xs font-bold rounded transition-colors ${entryMode === 'XML' ? 'bg-white text-blue-700 shadow' : 'text-gray-500'}`}>Com XML</button>
+                    <button onClick={() => setEntryMode('MANUAL')} className={`px-3 py-1 text-xs font-bold rounded transition-colors ${entryMode === 'MANUAL' ? 'bg-white text-blue-700 shadow' : 'text-gray-500'}`}>Sem XML (Manual)</button>
+                </div>
+            </div>
+            
+            <div className="p-6 grid grid-cols-12 gap-4">
+               {/* Bloco de Configuração */}
+               <div className="col-span-12 grid grid-cols-12 gap-4 pb-4 border-b border-gray-100">
+                   <div className="col-span-12 md:col-span-4">
+                       <Label required>Estabelecimento</Label>
+                       <DenseSelect value={establishment} onChange={(e)=>setEstablishment(e.target.value)}>
+                           <option value="1">1 - MATRIZ</option>
+                           <option value="2">2 - FILIAL</option>
+                       </DenseSelect>
+                   </div>
+                   <div className="col-span-12 md:col-span-8">
+                       <Label required>Operação</Label>
+                       <DenseSelect 
+                         className={`font-bold ${!selectedType ? 'border-red-500 text-red-500' : 'text-blue-900 border-gray-300'}`}
+                         value={selectedType?.id || ''} 
+                         onChange={(e) => setSelectedType(MOVEMENT_TYPES.find(t=>t.id===e.target.value)||null)}
+                       >
+                           <option value="">SELECIONE (OBRIGATÓRIO)...</option>
+                           {MOVEMENT_TYPES.map(t=><option key={t.id} value={t.id}>{t.code} - {t.description}</option>)}
+                       </DenseSelect>
+                   </div>
+               </div>
+
+               {/* Importação XML (Apenas se Modo XML) */}
+               {entryMode === 'XML' && (
+                   <div className="col-span-12 bg-blue-50/50 p-4 border border-blue-100 rounded flex flex-col md:flex-row items-center gap-4">
+                       <div className="flex-1">
+                           <h3 className="text-sm font-bold text-blue-800 mb-1">Importar NFe</h3>
+                           <p className="text-xs text-gray-600">O sistema preencherá fornecedor e itens automaticamente.</p>
+                       </div>
+                       <input type="file" ref={xmlInputRef} onChange={handleXmlUpload} className="hidden" accept=".xml"/>
+                       <button onClick={()=>xmlInputRef.current?.click()} disabled={processingXml} className="bg-blue-600 text-white px-4 py-2 rounded text-sm font-bold hover:bg-blue-700 flex items-center gap-2 shadow-sm">
+                         {processingXml ? 'Lendo...' : <><Upload size={16}/> Carregar XML</>}
+                       </button>
+                   </div>
+               )}
+
+               {/* Dados da Nota - Layout Manual Limpo */}
+               <div className="col-span-2">
+                   <Label required>Série</Label>
+                   <DenseInput value={headerData.series} onChange={(e)=>setHeaderData({...headerData, series: e.target.value})} placeholder="Ex: A"/>
+               </div>
+               <div className="col-span-4">
+                   <Label required>Número</Label>
+                   <DenseInput value={headerData.number} onChange={(e)=>setHeaderData({...headerData, number: e.target.value})}/>
+               </div>
+               <div className="col-span-3">
+                   <Label required>Emissão</Label>
+                   <DenseInput type="date" value={headerData.issueDate} onChange={(e)=>setHeaderData({...headerData, issueDate: e.target.value})}/>
+               </div>
+               <div className="col-span-3">
+                   <Label required>Entrada/Saída</Label>
+                   <DenseInput type="date" value={headerData.entryDate} onChange={(e)=>setHeaderData({...headerData, entryDate: e.target.value})}/>
+               </div>
+               
+               {/* Chave de Acesso - APENAS no Modo XML */}
+               {entryMode === 'XML' && (
+                   <div className="col-span-12">
+                       <Label>Chave de Acesso</Label>
+                       <div className="relative">
+                           <DenseInput value={headerData.accessKey} onChange={(e)=>setHeaderData({...headerData, accessKey: e.target.value})} />
+                           <CheckCircle2 size={14} className={`absolute right-2 top-2 ${headerData.xmlValidated ? 'text-green-500':'text-gray-300'}`}/>
+                       </div>
+                   </div>
+               )}
+
+               {/* Parceiro */}
+               <div className="col-span-12 pt-2 border-t mt-2">
+                   <h4 className="text-xs font-bold text-gray-700 mb-2 uppercase flex items-center gap-1">
+                       {selectedType?.direction==='SAIDA' ? 'Cliente' : 'Fornecedor'}
+                   </h4>
+                   <div className="grid grid-cols-12 gap-2">
+                       <div className="col-span-2"><DenseInput placeholder="Cód." value={headerData.entityId} readOnly className="bg-gray-50"/></div>
+                       <div className="col-span-6"><DenseInput placeholder="Razão Social / Nome" value={headerData.entityName} onChange={(e)=>setHeaderData({...headerData, entityName: e.target.value})}/></div>
+                       <div className="col-span-4"><DenseInput placeholder="CNPJ/CPF (Opcional se manual)" value={headerData.entityDoc} onChange={(e)=>setHeaderData({...headerData, entityDoc: e.target.value})}/></div>
+                   </div>
+               </div>
+            </div>
+          </div>
+        )}
+
+        {/* === PASSO 2: ITENS & FISCAL (INTEGRADO) === */}
+        {currentStep === 2 && (
+          <div className="flex-1 flex flex-col bg-white border border-gray-300 rounded shadow-sm h-full">
+            <div className="p-3 border-b bg-gray-50 flex justify-between items-center">
+                <h2 className="font-bold text-gray-700 flex items-center gap-2"><Package size={18}/> Itens da Nota</h2>
+            </div>
+
+            {/* Grid */}
+            <div className="flex-1 overflow-auto p-2">
+                <table className="w-full text-xs text-left border-collapse">
+                    <thead className="bg-gray-100 text-gray-600 sticky top-0 shadow-sm z-10">
+                        <tr>
+                            <th className="p-2 border-b w-40 bg-yellow-50 text-yellow-800 border-r border-yellow-200">Cód. Interno / Ação</th>
+                            <th className="p-2 border-b">Produto / Descrição</th>
+                            <th className="p-2 border-b text-right">Qtd</th>
+                            <th className="p-2 border-b text-right">Unitário</th>
+                            <th className="p-2 border-b text-right bg-blue-50 text-blue-800">Total + Desp.</th>
+                            <th className="p-2 border-b w-8"></th>
+                        </tr>
+                    </thead>
+                    <tbody className="divide-y">
+                        {items.map(item => (
+                            <tr key={item.id} className="hover:bg-gray-50">
+                                {/* CAMPO DE VÍNCULO & CADASTRO */}
+                                <td className="p-1 border-r border-gray-200 bg-yellow-50/30 align-top">
+                                    {item.isService ? (
+                                        <div className="flex items-center gap-1 text-gray-500 italic px-2 py-1">
+                                            <Settings size={12} /> SERVIÇO
+                                        </div>
+                                    ) : (
+                                        <div className="flex gap-1 items-center">
+                                          <div className="relative flex-1">
+                                            <input 
+                                              type="text" 
+                                              value={item.systemSku} 
+                                              onChange={(e) => handleSystemSkuChange(item.id, e.target.value)}
+                                              className={`w-full border rounded px-1 py-1 font-bold text-xs ${item.productId ? 'border-green-400 text-green-700 bg-green-50' : 'border-gray-300 text-gray-600 bg-white'}`}
+                                              placeholder="Cód."
+                                            />
+                                            {item.productId && <CheckCircle2 size={10} className="absolute right-1 top-1.5 text-green-500" />}
+                                          </div>
+                                          
+                                          <button 
+                                            onClick={() => handleUpdateItemInfo(item.id)}
+                                            className="bg-blue-100 text-blue-700 p-1 rounded hover:bg-blue-200 border border-blue-200"
+                                            title="Alterar item para o código digitado"
+                                          >
+                                              <RefreshCw size={14} />
+                                          </button>
+
+                                          {!item.productId && (
+                                              <button 
+                                                onClick={() => handleQuickCreate(item)}
+                                                className="bg-blue-600 text-white p-1 rounded hover:bg-blue-700"
+                                                title="Cadastrar Produto com dados do XML"
+                                              >
+                                                  <Plus size={14} />
+                                              </button>
+                                          )}
+                                        </div>
+                                    )}
+                                </td>
+                                
+                                <td className="p-2">
+                                    <div className="font-medium text-gray-800">{item.productName}</div>
+                                    {item.xmlProductCode && (
+                                      <div className="text-[10px] text-gray-400 flex items-center gap-1">
+                                        <LinkIcon size={10} /> XML: {item.xmlProductCode} - {item.xmlProductName}
+                                      </div>
+                                    )}
+                                </td>
+                                <td className="p-2 text-right">{item.quantity}</td>
+                                <td className="p-2 text-right">{formatCurrency(item.unitPrice)}</td>
+                                <td className="p-2 text-right font-bold bg-blue-50/30 text-blue-800">{formatCurrency(item.total)}</td>
+                                <td className="p-2 text-center"><button onClick={()=>setItems(items.filter(i=>i.id!==item.id))} className="text-gray-400 hover:text-red-500"><Trash2 size={14}/></button></td>
+                            </tr>
+                        ))}
+                        {items.length === 0 && <tr><td colSpan={6} className="p-8 text-center text-gray-400">Nenhum item lançado.</td></tr>}
+                    </tbody>
+                </table>
+            </div>
+
+            {/* Footer Totais */}
+            <div className="p-3 bg-gray-50 border-t flex justify-end gap-6">
+                <div className="text-right">
+                    <span className="text-[10px] uppercase font-bold text-gray-500">Total Itens</span>
+                    <div className="font-bold text-gray-700">{formatCurrency(totals.totalProducts)}</div>
+                </div>
+                <div className="text-right">
+                    <span className="text-[10px] uppercase font-bold text-gray-500">Total Despesas</span>
+                    <div className="font-bold text-gray-700">{formatCurrency(totals.totalSurcharge)}</div>
+                </div>
+                <div className="text-right border-l pl-4 border-gray-300">
+                    <span className="text-[10px] uppercase font-bold text-gray-900">Total Nota</span>
+                    <div className="font-bold text-lg text-gray-900">{formatCurrency(totals.totalNote)}</div>
+                </div>
+            </div>
+          </div>
+        )}
+
+        {/* === PASSO 3: FINANCEIRO & FECHAMENTO === */}
+        {currentStep === 3 && (
+          <div className="bg-white border border-gray-300 rounded shadow-sm h-full flex flex-col">
+            <div className="p-4 border-b bg-gray-50 flex justify-between items-center">
+                <h2 className="font-bold text-gray-700 flex items-center gap-2"><DollarSign size={18}/> Financeiro & Confirmação</h2>
+            </div>
+
+            <div className="p-6 flex-1 flex flex-col gap-6">
+                <div className="grid grid-cols-2 gap-4 p-4 bg-gray-50 rounded border border-gray-200">
+                     <div><Label>Condição Pagamento</Label><DenseInput value={headerData.paymentCondition} onChange={(e) => setHeaderData({...headerData, paymentCondition: e.target.value})} placeholder="Ex: 30/60/90"/></div>
+                     <div><Label>Forma Pagamento</Label><DenseInput value={headerData.paymentMethod} onChange={(e) => setHeaderData({...headerData, paymentMethod: e.target.value})} placeholder="Ex: BOLETO"/></div>
+                </div>
+
+                <div className="flex justify-end">
+                    <button onClick={handleAddInstallment} className="text-xs flex items-center gap-1 bg-blue-50 text-blue-700 border border-blue-200 px-3 py-1 rounded hover:bg-blue-100 font-bold transition-colors">
+                        <Plus size={14} /> Adicionar Parcela Manual
+                    </button>
+                </div>
+
+                <div className="flex-1 border rounded overflow-hidden">
+                    <table className="w-full text-sm text-left">
+                        <thead className="bg-gray-100 font-bold text-gray-600">
+                            <tr>
+                                <th className="p-3 border-b text-center w-16">Parc.</th>
+                                <th className="p-3 border-b">Vencimento (Data Fatura)</th>
+                                <th className="p-3 border-b text-right">Valor</th>
+                                <th className="p-3 border-b text-center">Status</th>
+                                <th className="p-3 border-b w-8"></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {installments.map((inst, idx) => (
+                                <tr key={inst.id} className="border-b">
+                                    <td className="p-3 text-center">{idx + 1}</td>
+                                    <td className="p-3"><input type="date" value={inst.dueDate} onChange={(e)=>{const n = [...installments]; n[idx].dueDate=e.target.value; setInstallments(n);}} className="border rounded p-1 w-full"/></td>
+                                    <td className="p-3 text-right"><input type="number" value={inst.value} onChange={(e)=>{const n = [...installments]; n[idx].value=Number(e.target.value); setInstallments(n);}} className="border rounded p-1 text-right font-bold w-32"/></td>
+                                    <td className="p-3 text-center"><span className="bg-yellow-100 text-yellow-800 text-xs px-2 py-1 rounded">PENDENTE</span></td>
+                                    <td className="p-3 text-center">
+                                        <button onClick={() => handleRemoveInstallment(inst.id)} className="text-gray-400 hover:text-red-500">
+                                            <XIcon size={14} />
+                                        </button>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+
+                <div className="bg-gray-800 text-white p-4 rounded flex justify-between items-center shadow-lg mt-auto">
+                    <div>
+                        <p className="text-gray-400 text-xs uppercase font-bold">Total da Nota</p>
+                        <p className="text-2xl font-bold">{formatCurrency(totals.totalNote)}</p>
+                    </div>
+                    {selectedType?.financialAction !== 'NENHUM' && (
+                        <div className="text-right">
+                             <p className="text-gray-400 text-xs uppercase font-bold">Total Financeiro</p>
+                             <p className={`text-xl font-bold ${Math.abs(totals.totalNote - installments.reduce((a, b)=>a+b.value,0)) > 0.05 ? 'text-red-400' : 'text-green-400'}`}>
+                                 {formatCurrency(installments.reduce((a, b)=>a+b.value,0))}
+                             </p>
+                        </div>
+                    )}
+                </div>
+            </div>
+          </div>
+        )}
+
+      </main>
+
+      {/* FOOTER NAVEGAÇÃO */}
+      <div className="bg-white border-t border-gray-300 p-4 sticky bottom-0 z-30 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)]">
+        <div className="max-w-6xl mx-auto flex justify-between items-center">
+             <button onClick={handlePrevStep} disabled={currentStep === 1} className="px-6 py-2 border border-gray-300 text-gray-600 font-bold rounded hover:bg-gray-50 disabled:opacity-50 flex items-center gap-2">
+                <ArrowLeft size={16}/> Voltar
+             </button>
+             <div className="flex gap-2">
+                 {currentStep < 3 ? (
+                     <button onClick={handleNextStep} className="px-8 py-2 bg-blue-700 text-white font-bold rounded hover:bg-blue-800 shadow flex items-center gap-2">
+                        Próximo <ArrowRight size={16}/>
+                     </button>
+                 ) : (
+                     <button onClick={handleSave} disabled={loading} className="px-8 py-2 bg-green-600 text-white font-bold rounded hover:bg-green-700 shadow flex items-center gap-2">
+                        {loading ? 'Gravando...' : <><Save size={16}/> CONCLUIR LANÇAMENTO (F10)</>}
+                     </button>
+                 )}
+             </div>
+        </div>
+      </div>
+
+    </div>
+  );
+}

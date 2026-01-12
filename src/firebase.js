@@ -1,5 +1,6 @@
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
+import { getAuth } from "firebase/auth";
 
 // This is the config for your central "admin" database
 // that would store the configurations for all other stores.
@@ -17,6 +18,8 @@ export const adminFirebaseConfig = {
 // Initialize the main admin app. We give it a unique name to avoid conflicts.
 const adminApp = initializeApp(adminFirebaseConfig, "admin-app");
 export const adminDB = getFirestore(adminApp);
+export const db = adminDB; // Exporta como 'db' padrão para compatibilidade
+export const auth = getAuth(adminApp); // Exporta o serviço de autenticação
 
 // A cache for initialized store apps to avoid re-initialization on every call.
 const appCache = new Map();
