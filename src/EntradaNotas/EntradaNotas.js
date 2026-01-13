@@ -25,7 +25,8 @@ import {
   where,
   getDocs,
   limit,
-  addDoc
+  addDoc,
+  increment // IMPORTANTE: Usado para somar estoque atomicamente
 } from 'firebase/firestore';
 import { 
   signInAnonymously, 
@@ -48,7 +49,6 @@ const MOVEMENT_TYPES = [
   { id: '4', code: 501, description: 'LANÇAMENTO DE DESPESAS/SERVIÇOS', direction: 'SAIDA', stockAction: 'NEUTRO', financialAction: 'PAGAR', defaultCfop: '5.933' },
 ];
 
-// Mock inicial
 const INITIAL_PRODUCTS = [];
 
 // --- COMPONENTES UI ---
@@ -82,13 +82,13 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
   const [processingXml, setProcessingXml] = useState(false);
   const [entryMode, setEntryMode] = useState('XML');
   
-  // Estado de Produtos
+  // Estado de Produtos Local
   const [products, setProducts] = useState(appProducts || INITIAL_PRODUCTS);
 
-  // Sincroniza com os produtos do App.js se mudarem, preservando os novos criados localmente
   useEffect(() => {
     if (appProducts) {
         setProducts(prev => {
+            // Mantém os criados localmente que ainda não estão na lista global
             const localNew = prev.filter(p => !appProducts.some(ap => String(ap.id) === String(p.id)));
             return [...appProducts, ...localNew];
         });
@@ -150,10 +150,9 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
     if (currentStep === 2) {
       if (items.length === 0) return alert("Adicione pelo menos um item à nota.");
       
-      // Validação de itens não vinculados
       const unlinkedItems = items.filter(i => !i.productId && !i.isService);
       if (unlinkedItems.length > 0) {
-          if (!window.confirm(`Existem ${unlinkedItems.length} itens sem código de sistema vinculado.\nEles serão salvos apenas com a descrição do XML.\nDeseja continuar?`)) return;
+          if (!window.confirm(`Existem ${unlinkedItems.length} itens sem código vinculado.\nEles serão criados automaticamente como novos produtos.\nDeseja continuar?`)) return;
       }
 
       if (installments.length === 0) {
@@ -256,15 +255,13 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
         const xProd = getTagContent(prod, "xProd");
 
         // PROCURA O PRODUTO NA LISTA ATUAL
-        // BUSCA INTELIGENTE: Código Exato (Sistema ou Fabricante)
         let existingProd = products.find(p => String(p.cbaCode) === String(cProd) || String(p.manufacturingCode) === String(cProd));
         
         if (!existingProd) {
-            // Tenta achar se o código do XML está contido no código do sistema ou vice-versa
             existingProd = products.find(p => (p.cbaCode && String(p.cbaCode).includes(cProd)) || (p.manufacturingCode && p.manufacturingCode.includes(cProd)));
         }
 
-        // --- LÓGICA DE GRUPO DE PREÇO (NOVO BLOCO) ---
+        // Sugestão de Preço
         let suggestedPrice = null;
         let priceGroupId = null;
         let priceGroupMargin = 0;
@@ -274,7 +271,6 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
             if (group) {
                 priceGroupId = group.id;
                 priceGroupMargin = group.margin;
-                // Fórmula: Custo * (1 + Margem/100)
                 suggestedPrice = vUnCom * (1 + (group.margin / 100));
             }
         }
@@ -301,7 +297,7 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
 
     setHeaderData(prev => ({ ...prev, number: nNF, xmlValidated: true, xmlFile: fileName, entityName: supplier.name, entityDoc: cnpj, entityId: supplier.id }));
     setItems(newItems);
-    alert(`XML Importado com sucesso! ${newItems.length} itens carregados.\n\nIMPORTANTE: Verifique os itens sem código vinculado e use o botão [+] para cadastrá-los se necessário.`);
+    alert(`XML Importado com sucesso! ${newItems.length} itens carregados.`);
   };
 
   const getOrCreateSupplier = async (cnpj, name) => {
@@ -317,12 +313,11 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
      return { name, id: newCode };
   };
 
-  // --- MANIPULAÇÃO DE ITENS (Vínculo e Cadastro Rápido) ---
+  // --- MANIPULAÇÃO DE ITENS ---
 
   const handleSystemSkuChange = (itemId, newSku) => {
       setItems(prevItems => prevItems.map(item => {
           if (item.id === itemId) {
-              // Apenas atualiza o texto digitado, sem buscar o produto automaticamente
               return { ...item, systemSku: newSku };
           }
           return item;
@@ -332,7 +327,6 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
   const handleUpdateItemInfo = (itemId) => {
       setItems(prevItems => prevItems.map(item => {
           if (item.id === itemId) {
-              // Busca pelo código do sistema (cbaCode)
               const systemProd = products.find(p => String(p.cbaCode).trim() === String(item.systemSku).trim());
               if (systemProd) {
                   return {
@@ -350,35 +344,39 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
       }));
   };
 
-  const handleQuickCreate = (item) => {
+  // Cadastro Rápido (Imediato)
+  const handleQuickCreate = async (item) => {
       const codeToUse = item.systemSku || item.xmlProductCode;
       
       if (!codeToUse) {
-          alert("O item precisa ter um código do XML ou um código digitado para ser cadastrado.");
+          alert("O item precisa ter um código para ser cadastrado.");
           return;
       }
 
       const newProduct = {
-          id: `sys-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
           cbaCode: codeToUse,
           name: item.xmlProductName || 'Novo Produto',
           unit: item.unit,
           cost: item.unitPrice,
-          price: item.unitPrice * 1.5 // Margem padrão simulada
+          price: item.unitPrice * 1.5, 
+          stock: 0, // Será somado no final
+          createdAt: serverTimestamp()
       };
 
-      setProducts(prev => [...prev, newProduct]);
-      
-      // Atualiza no sistema global se a função existir
-      // Nota: A atualização real acontece no Salvar Final para evitar inconsistências
-      // Mas mantemos o estado local atualizado para a UI
-
-      setItems(prev => prev.map(i => i.id === item.id ? {
-          ...i,
-          productId: newProduct.id,
-          systemSku: newProduct.cbaCode,
-          productName: newProduct.name
-      } : i));
+      try {
+          const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'products'), newProduct);
+          const createdProduct = { ...newProduct, id: docRef.id };
+          setProducts(prev => [...prev, createdProduct]);
+          setItems(prev => prev.map(i => i.id === item.id ? {
+              ...i,
+              productId: createdProduct.id,
+              systemSku: createdProduct.cbaCode,
+              productName: createdProduct.name
+          } : i));
+      } catch (error) {
+          console.error("Erro ao cadastrar produto rápido:", error);
+          alert("Erro ao criar produto: " + error.message);
+      }
   };
 
   const generateFinancials = () => {
@@ -399,108 +397,103 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
 
   const handleRemoveInstallment = (id) => { setInstallments(installments.filter(i => i.id !== id)); };
 
+  // --- FUNÇÃO DE SALVAR CORRIGIDA E ROBUSTA ---
   const handleSave = async () => {
     setLoading(true);
     try {
-      // 1. Tenta vincular itens automaticamente antes de salvar (caso o usuário tenha digitado o código mas esquecido de clicar no botão de atualizar)
-      const finalItems = items.map(item => {
-          if (!item.productId && item.systemSku) {
-              const found = products.find(p => String(p.cbaCode).trim() === String(item.systemSku).trim());
+      const batch = writeBatch(db);
+      
+      // 1. Prepara os itens finais
+      const finalItems = [];
+      let productsUpdatedCount = 0;
+      let productsCreatedCount = 0;
+
+      for (const item of items) {
+          let newItem = { ...item };
+          
+          // Se não tem ID mas tem SKU, tenta achar na lista local
+          if (!newItem.productId && newItem.systemSku) {
+              const found = products.find(p => String(p.cbaCode).trim() === String(newItem.systemSku).trim());
               if (found) {
-                  return { 
-                      ...item, 
-                      productId: found.id, 
-                      productName: found.name, 
-                      unit: found.unit || item.unit 
-                  };
+                  newItem.productId = found.id;
+                  newItem.productName = found.name;
               }
           }
-          return item;
-      });
 
-      const batch = writeBatch(db);
-      const invoiceRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'invoices'));
-      batch.set(invoiceRef, {
-          header: headerData, type: selectedType, items: finalItems, financials: installments, totals,
-          status: 'CONFIRMADA', createdAt: serverTimestamp(), userId: auth.currentUser?.uid || 'anon_user'
-      });
+          // SE AINDA NÃO TEM PRODUCTID, CRIA O PRODUTO AGORA (Auto-Cadastro no Save)
+          if (!newItem.productId) {
+               const newProdRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'products'));
+               const codeToUse = newItem.systemSku || newItem.xmlProductCode || 'GEN-' + Date.now();
+               
+               const newProductData = {
+                   cbaCode: codeToUse,
+                   name: newItem.productName || newItem.xmlProductName || 'Produto Sem Nome',
+                   unit: newItem.unit || 'UN',
+                   cost: Number(newItem.unitPrice),
+                   price: Number(newItem.unitPrice) * 1.5, // Margem padrão
+                   stock: 0, // O estoque será somado no passo de atualização abaixo
+                   createdAt: serverTimestamp()
+               };
+               
+               batch.set(newProdRef, newProductData);
+               
+               newItem.productId = newProdRef.id; // Vincula o item ao novo ID gerado
+               productsCreatedCount++;
+          }
 
-      // --- ATUALIZAÇÃO DE ESTOQUE ---
-      let updatedCount = 0;
-      if (selectedType && selectedType.stockAction !== 'NEUTRO') {
-        const factor = selectedType.stockAction === 'SOMAR' ? 1 : -1;
-        
-        if (onSaveEntry && appProducts) {
-            // 1. Base na lista oficial
-            const newProductsList = JSON.parse(JSON.stringify(appProducts));
-            
-            // 2. Incorpora produtos novos criados nesta sessão (que estão no state local mas não no oficial)
-            const createdProducts = products.filter(p => !appProducts.some(ap => String(ap.id) === String(p.id)));
-            if (createdProducts.length > 0) {
-                newProductsList.push(...createdProducts);
-            }
-            
-            finalItems.forEach(item => {
-                if (item.productId && item.productId !== 'MANUAL') {
-                    // Busca pelo ID convertendo ambos para String para evitar erro de tipo (número vs texto)
-                    const idx = newProductsList.findIndex(p => String(p.id) === String(item.productId));
-                    
-                    if (idx > -1) {
-                        const product = newProductsList[idx];
-                        const qtyToUpdate = Number(item.quantity) || 0;
-                        
-                        if (qtyToUpdate > 0) {
-                            // Lógica Específica para Fardos/Packs (Atualiza a unidade filha)
-                            if (product.itemType === 'pack') {
-                                const unitProductIdx = newProductsList.findIndex(p => p.parentId === product.id);
-                                if (unitProductIdx > -1) {
-                                    const currentStock = Number(newProductsList[unitProductIdx].stock) || 0;
-                                    const conversion = Number(product.conversionFactor) || 1;
-                                    newProductsList[unitProductIdx].stock = currentStock + (qtyToUpdate * conversion * factor);
-                                } else {
-                                    // Fallback: se não achar filho, atualiza o próprio pack
-                                    product.stock = (Number(product.stock) || 0) + (qtyToUpdate * factor);
-                                }
-                            } else {
-                                // Produto Unitário Normal
-                                product.stock = (Number(product.stock) || 0) + (qtyToUpdate * factor);
-                            }
-                            updatedCount++;
+          // ATUALIZAÇÃO DE ESTOQUE (Se configurado na operação)
+          if (selectedType && selectedType.stockAction !== 'NEUTRO') {
+              const factor = selectedType.stockAction === 'SOMAR' ? 1 : -1;
+              const qtyChange = Number(newItem.quantity) * factor;
 
-                            if (item.acceptedSuggestion && item.suggestedPrice) {
-                                product.cost = item.unitPrice;
-                                product.price = item.suggestedPrice;
-                            }
-                        }
-                    }
-                }
-            });
-            
-            // Cria o objeto de transação para o histórico financeiro
-            const newTransaction = {
-                id: Date.now(),
-                type: selectedType.direction === 'ENTRADA' ? 'entry' : 'exit',
-                category: 'Revenda',
-                description: `NF ${headerData.number} - ${headerData.entityName}`,
-                value: totals.totalNote,
-                date: headerData.issueDate,
-                items: finalItems.map(i => ({
-                    productId: i.productId,
-                    name: i.productName,
-                    qty: i.quantity,
-                    total: i.total
-                }))
-            };
+              const productRef = doc(db, 'artifacts', appId, 'public', 'data', 'products', newItem.productId);
+              
+              // Atualiza Estoque (Increment) e Custo (Se for entrada)
+              const updateData = {
+                  stock: increment(qtyChange)
+              };
 
-            // Salva TUDO (Estoque + Transação) de uma vez no App.js
-            await onSaveEntry(newProductsList, newTransaction);
-        }
+              // Se for entrada e tiver sugestão aceita ou apenas entrada simples, atualiza custo
+              if (selectedType.direction === 'ENTRADA') {
+                  updateData.cost = Number(newItem.unitPrice);
+                  if (newItem.acceptedSuggestion && newItem.suggestedPrice) {
+                      updateData.price = Number(newItem.suggestedPrice);
+                  }
+              }
+
+              batch.update(productRef, updateData);
+              productsUpdatedCount++;
+          }
+
+          finalItems.push(newItem);
       }
 
+      // 2. Grava a Nota Fiscal (Invoice)
+      const invoiceRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'invoices'));
+      batch.set(invoiceRef, {
+          header: headerData, 
+          type: selectedType, 
+          items: finalItems, 
+          financials: installments, 
+          totals,
+          status: 'CONFIRMADA', 
+          createdAt: serverTimestamp(), 
+          userId: auth.currentUser?.uid || 'anon_user'
+      });
+
+      // 3. Comita tudo (Nota + Produtos Novos + Atualizações de Estoque)
       await batch.commit();
-      alert(`Nota Gravada! Estoque de ${updatedCount} produtos atualizado e lançado no financeiro.`);
+
+      // 4. Feedback e Limpeza
+      alert(`SUCESSO!\n\nNota Gravada.\nProdutos Atualizados: ${productsUpdatedCount}\nNovos Produtos Cadastrados: ${productsCreatedCount}`);
       
-      // Limpa o formulário para nova entrada sem recarregar a página (evita logout)
+      // Chama o callback do pai apenas para atualizar a tela se necessário, 
+      // mas não dependemos mais dele para salvar no banco.
+      if (onSaveEntry) {
+          onSaveEntry([], null); // Passa vazio pois já salvamos
+      }
+
+      // Reset
       setItems([]);
       setInstallments([]);
       setHeaderData({
@@ -521,7 +514,12 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
       });
       setCurrentStep(1);
       
-    } catch (e) { alert("Erro ao gravar: " + e); } finally { setLoading(false); }
+    } catch (e) { 
+        console.error(e);
+        alert("Erro fatal ao gravar: " + e.message); 
+    } finally { 
+        setLoading(false); 
+    }
   };
 
     const togglePriceSuggestion = (itemId) => {

@@ -7,7 +7,7 @@ import {
   ArrowRight, ArrowLeft, Clock, Eye, ClipboardList,
   PieChart, Save, UserPlus, Printer, Lock, Settings, CheckSquare, Square, Edit, Download, LogOut, Server, Beer, Minus, PlusCircle, Tags
 } from 'lucide-react';
-import { collection, query, where, getDocs, setDoc, doc, updateDoc, getDoc } from "firebase/firestore";
+import { collection, query, where, getDocs, setDoc, doc, updateDoc, getDoc, onSnapshot, increment, writeBatch, serverTimestamp } from "firebase/firestore";
 import logo from './img/LOGO-MAQUINA-PNG.png';
 import logoWhite from './img/logo-maquina-texto-branco.png';
 import * as firebase from './firebase';
@@ -691,7 +691,7 @@ const ClientsManager = ({ clients, setClients, showNotification }) => {
   );
 };
 
-const PDV = ({ products, groups, onUpdateProduct, clients, setClients, feeProfiles, onNewSale, showNotification, companyInfo, storeConfig }) => {
+const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClients, feeProfiles = [], onNewSale, showNotification, companyInfo, storeConfig}) => {
   const [cart, setCart] = useState([]);
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('');
@@ -2219,59 +2219,72 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
   const [activeModule, setActiveModule] = useState('dashboard');
   const [notification, setNotification] = useState(null);
 
-  const showNotification = (message, type) => {
-    setNotification({ message, type });
-    setTimeout(() => setNotification(null), 3000);
-  };
+  const showNotification = useCallback((message, type) => { setNotification({ message, type }); setTimeout(() => setNotification(null), 3000); }, []);
 
+  // --- 1. ESTADOS DO BANCO DE DADOS (REALTIME) ---
+  const [products, setProducts] = useState([]);      // Produtos do Banco
+  const [realtimeSales, setRealtimeSales] = useState([]); // Vendas do Banco
+
+  // --- 2. LISTENER DE PRODUTOS ---
   useEffect(() => {
-    if (!store.priceGroups) {
-        updateStore({ ...store, priceGroups: [] });
-    }
+    const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
+    const productsRef = collection(firebase.db, 'artifacts', appId, 'public', 'data', 'products');
+    
+    const unsubscribe = onSnapshot(productsRef, (snapshot) => {
+        const prods = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setProducts(prods);
+    }, (error) => console.error("Erro produtos:", error));
+    return () => unsubscribe();
   }, []);
 
-  const handleNewSale = (sale) => {
-    let newProducts = JSON.parse(JSON.stringify(store.products)); // Deep copy for mutation
+  // --- 3. LISTENER DE VENDAS (Novo!) ---
+  useEffect(() => {
+    const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
+    const salesRef = collection(firebase.db, 'artifacts', appId, 'public', 'data', 'sales');
     
-    for (const item of sale.items) {
-      // Se for item de atacado (virtual), usamos o originalId, senão o id normal
-      const targetId = item.originalId || item.id;
-      
-      const productSold = newProducts.find(p => p.id === targetId);
-      if (!productSold) continue;
+    // Ordenar ou limitar se necessário, aqui pegamos tudo
+    const unsubscribe = onSnapshot(salesRef, (snapshot) => {
+        const salesData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setRealtimeSales(salesData);
+    }, (error) => console.error("Erro vendas:", error));
+    return () => unsubscribe();
+  }, []);
 
-      // Quantas unidades reais estão saindo do estoque?
-      // Se tiver stockDeduction (Venda Atacado), usa ele. Senão é 1 (Varejo).
-      const unitsPerItem = item.stockDeduction || 1; 
-      const totalUnitsToDeduct = item.qty * unitsPerItem;
+  // --- 4. NOVA FUNÇÃO DE VENDA (Grava no Banco e Baixa Estoque) ---
+  const handleNewSale = async (sale) => {
+    try {
+        const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
+        const batch = writeBatch(firebase.db);
+        
+        // 1. Grava a Venda na coleção 'sales'
+        const saleRef = doc(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'sales'));
+        // Converte id para string para evitar erros
+        const saleData = { ...sale, id: saleRef.id, createdAt: serverTimestamp() }; 
+        batch.set(saleRef, saleData);
 
-      // Lógica de Baixa (Sempre na Unidade Base)
-      const itemType = productSold.itemType || 'unit';
+        // 2. Baixa o Estoque dos Produtos (Atômico)
+        sale.items.forEach(item => {
+            // Se for atacado, usa o ID original do produto pai
+            const targetId = item.originalId || item.id;
+            
+            // Quantidade a reduzir (se for atacado, multiplica pelo fator do pacote)
+            const unitsToDeduct = item.stockDeduction || item.qty; 
 
-      if (itemType === 'unit') {
-        // Produto Unitário (ou Pai do Atacado)
-        if (productSold.stock < totalUnitsToDeduct) {
-          showNotification(`Estoque insuficiente para ${productSold.name}. Necessário: ${totalUnitsToDeduct}`, 'error');
-          return; // Aborta venda
-        }
-        productSold.stock -= totalUnitsToDeduct;
-      } 
-      else if (itemType === 'pack') {
-        // Lógica Legada (Caso ainda existam produtos tipo 'pack' antigos)
-        const unitProductIndex = newProducts.findIndex(p => p.parentId === productSold.id);
-        if (unitProductIndex !== -1) {
-          const legacyUnitsToDecrement = item.qty * productSold.conversionFactor;
-          newProducts[unitProductIndex].stock -= legacyUnitsToDecrement;
-        } else {
-           // Se for pack isolado sem filho, baixa dele mesmo
-           productSold.stock -= item.qty;
-        }
-      }
+            // Referência ao produto no banco
+            const productRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'products', targetId);
+            
+            batch.update(productRef, {
+                stock: increment(-unitsToDeduct)
+            });
+        });
+
+        await batch.commit();
+        showNotification('Venda realizada e estoque atualizado!', 'success');
+
+    } catch (error) {
+        console.error("Erro na venda:", error);
+        showNotification('Erro ao processar venda: ' + error.message, 'error');
     }
-
-    const newSales = [...store.sales, sale];
-    updateStore({ ...store, sales: newSales, products: newProducts });
-    showNotification('Venda registrada com sucesso!', 'success');
   };
 
   const handleSaveTransaction = (transaction) => {
@@ -2460,32 +2473,49 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
 
         <div className="flex-1 overflow-auto p-6">
           <div className="max-w-7xl mx-auto animate-in fade-in duration-300">
-            {activeModule === 'dashboard' && <Dashboard sales={store.sales} products={store.products} />}
+            {activeModule === 'dashboard' && <Dashboard sales={realtimeSales} products={products} />}
             {activeModule === 'pdv' && (
               <PDV 
-                products={store.products} 
-                // --- NOVAS PROPS ---
-                groups={store.groups}
-                onUpdateProduct={(updatedProducts) => updateStore({...store, products: updatedProducts})}
-                // -------------------
-                clients={store.clients} 
-                setClients={(c) => updateStore({...store, clients: c})} 
-                feeProfiles={store.feeProfiles} 
+                products={products} // Produtos em Tempo Real (Firebase)
+                
+                // --- ADICIONE ESTAS LINHAS ---
+                groups={store.priceGroups || []}
+                clients={store.clients || []}
+                setClients={(c) => updateStore({...store, clients: c})}
+                feeProfiles={store.feeProfiles || []}
+                companyInfo={store.companyInfo}
+                onUpdateProduct={async (updatedList) => {
+                    // Função para salvar edição de produto direto no Firebase
+                    // Pega o produto editado (que mudou na lista) e salva
+                    // Isso é necessário pois 'products' agora é read-only do Firebase
+                    try {
+                        const batch = writeBatch(firebase.db);
+                        const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
+                        
+                        updatedList.forEach(p => {
+                            const ref = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'products', p.id);
+                            batch.set(ref, p, { merge: true });
+                        });
+                        await batch.commit();
+                        showNotification('Produto atualizado!', 'success');
+                    } catch (e) {
+                        console.error(e);
+                        showNotification('Erro ao salvar produto', 'error');
+                    }
+                }}
+                // -----------------------------
+
                 onNewSale={handleNewSale} 
                 showNotification={showNotification} 
-                storeConfig={store} // Já adicionado anteriormente
+                storeConfig={store} 
               />
             )}
             {activeModule === 'clients' && <ClientsManager clients={store.clients} setClients={(c) => updateStore({...store, clients: c})} showNotification={showNotification} />}
             {activeModule === 'transactions' && (
               <Transactions 
-                  products={store.products} 
+                  products={products} // <--- AQUI: Passa a lista real
                   priceGroups={store.priceGroups || []}
-                  onSaveEntry={async (newProducts, newTransaction) => {
-                      const newState = { ...store, products: newProducts };
-                      if (newTransaction) newState.transactions = [...store.transactions, newTransaction];
-                      await updateStore(newState);
-                  }}
+                  onSaveEntry={() => {}} 
               />
             )}
             {activeModule === 'priceGroups' && (
@@ -2497,8 +2527,13 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
                 showNotification={showNotification}
               />
             )}
-            {activeModule === 'finance' && <Finance sales={store.sales} transactions={store.transactions} transactionCategories={store.transactionCategories} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} />}
-            {activeModule === 'inventory' && <InventoryWMS products={store.products} setProducts={(p) => updateStore({...store, products: p})} groups={store.groups} setGroups={(g) => updateStore({...store, groups: g})} showNotification={showNotification} storeConfig={store} />}
+            {activeModule === 'finance' && <Finance sales={realtimeSales} transactions={store.transactions} transactionCategories={store.transactionCategories} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} />}
+            {activeModule === 'inventory' && (
+                <InventoryWMS 
+                    products={products} // <--- AQUI: Passa a lista real
+                    showNotification={showNotification} 
+                />
+            )}
             {activeModule === 'settings' && (
               <SettingsManager 
                 users={store.users} 
