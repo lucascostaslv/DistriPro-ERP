@@ -2559,10 +2559,68 @@ const App = () => {
   const [loginMode, setLoginMode] = useState('none'); // 'none' | 'user' | 'superadmin'
   const [currentStore, setCurrentStore] = useState(null);
   const [notification, setNotification] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+
+  // ALTERAÇÃO 2: Efeito para verificar e restaurar sessão ao iniciar
+  useEffect(() => {
+    const restoreSession = async () => {
+      const savedSession = localStorage.getItem('distripro_session');
+      
+      if (savedSession) {
+        try {
+          const { storeConfig, mode, timestamp } = JSON.parse(savedSession);
+          const now = new Date().getTime();
+          const twelveHours = 12 * 60 * 60 * 1000; // 12 horas em milissegundos
+
+          // Se a sessão tem menos de 12 horas
+          if (now - timestamp < twelveHours) {
+            if (mode === 'user') {
+               // Reconecta no banco para garantir dados frescos, usando a config salva
+               const storeData = await firebase.fetchStoreData(storeConfig);
+               setCurrentStore(storeData);
+               setLoginMode('user');
+            } else if (mode === 'superadmin') {
+               setLoginMode('superadmin');
+            }
+          } else {
+            // Sessão expirou
+            localStorage.removeItem('distripro_session');
+          }
+        } catch (e) {
+          console.error("Sessão inválida ou erro de conexão:", e);
+          localStorage.removeItem('distripro_session');
+        }
+      }
+      
+      // Termina o carregamento (seja logado ou não)
+      setIsLoading(false);
+    };
+
+    restoreSession();
+  }, []);
 
   const showNotification = useCallback((message, type) => { setNotification({ message, type }); setTimeout(() => setNotification(null), 3000); }, []);
-  const handleUserLogin = async (storeConfig) => { setIsLoading(true); try { const storeData = await firebase.fetchStoreData(storeConfig); setCurrentStore(storeData); setLoginMode('user'); } catch (error) { showNotification(error.message, 'error'); throw error; } finally { setIsLoading(false); } };
+  const handleUserLogin = async (storeConfig) => {
+    setIsLoading(true);
+    try {
+      const storeData = await firebase.fetchStoreData(storeConfig);
+      setCurrentStore(storeData);
+      setLoginMode('user');
+
+      // ALTERAÇÃO 3: Salva a sessão no LocalStorage
+      localStorage.setItem('distripro_session', JSON.stringify({
+        storeConfig: storeConfig, // Salva a config para poder reconectar depois
+        mode: 'user',
+        timestamp: new Date().getTime()
+      }));
+
+    } catch (error) {
+      showNotification(error.message, 'error');
+      // Não damos throw error aqui para não quebrar a UI, apenas paramos o loading
+    } finally {
+      setIsLoading(false);
+    }
+  };
   const handleSuperAdminLogin = () => { setLoginMode('superadmin'); };
 
   const handleLogout = () => {
