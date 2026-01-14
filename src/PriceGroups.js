@@ -1,81 +1,125 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   Tags, Plus, Trash2, Search, Save, 
   CheckCircle, AlertTriangle, RefreshCw, Edit, X 
 } from 'lucide-react';
+import { 
+  collection, doc, setDoc, deleteDoc, updateDoc, 
+  onSnapshot, writeBatch 
+} from "firebase/firestore";
+import { db } from './firebase'; // Importa a instância do banco
 
 const formatCurrency = (val) => 
   new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val);
 
 export default function PriceGroups({ 
-  products, 
-  priceGroups, 
-  onMergeChange, // <--- Nova Prop Única
+  products, // Recebe a lista de produtos (que já vem do realtime do App.js ou pode ser consultada aqui também)
   showNotification 
 }) {
+  const [priceGroups, setPriceGroups] = useState([]);
   const [activeGroup, setActiveGroup] = useState(null);
   const [newGroup, setNewGroup] = useState({ name: '', margin: '' });
   const [editingId, setEditingId] = useState(null); 
   const [searchTerm, setSearchTerm] = useState('');
+  const [isLoading, setIsLoading] = useState(true);
 
-  // --- CRUD GRUPOS ---
-  const handleSaveGroup = () => {
+  // Helper para pegar o ID da loja atual (mesma lógica do App.js)
+  const getAppId = () => typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
+
+  // --- 1. LISTENER REALTIME (Consultar Grupos do Banco) ---
+  useEffect(() => {
+    const appId = getAppId();
+    // Define a coleção 'priceGroups' dentro da estrutura de artifacts da loja
+    const groupsRef = collection(db, 'artifacts', appId, 'public', 'data', 'priceGroups');
+
+    const unsubscribe = onSnapshot(groupsRef, (snapshot) => {
+      const groupsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setPriceGroups(groupsData);
+      setIsLoading(false);
+    }, (error) => {
+      console.error("Erro ao buscar grupos:", error);
+      showNotification('Erro ao carregar grupos de preço.', 'error');
+      setIsLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, [showNotification]);
+
+  // --- CRUD GRUPOS (Escrita no Banco) ---
+  const handleSaveGroup = async () => {
     if (!newGroup.name || !newGroup.margin) return showNotification('Preencha nome e margem.', 'error');
     
     const marginValue = parseFloat(String(newGroup.margin).replace(',', '.'));
-    let updatedGroups;
+    const appId = getAppId();
 
-    if (editingId) {
-        // Edição
-        updatedGroups = priceGroups.map(g => 
-            g.id === editingId ? { ...g, name: newGroup.name, margin: marginValue } : g
-        );
-        
+    try {
+      if (editingId) {
+        // Edição: Atualiza documento existente
+        const groupRef = doc(db, 'artifacts', appId, 'public', 'data', 'priceGroups', editingId);
+        await updateDoc(groupRef, {
+          name: newGroup.name,
+          margin: marginValue
+        });
+
+        // Atualiza estado local de visualização se necessário
         if (activeGroup && activeGroup.id === editingId) {
             setActiveGroup({ ...activeGroup, name: newGroup.name, margin: marginValue });
         }
-        showNotification('Grupo atualizado!', 'success');
+        showNotification('Grupo atualizado com sucesso!', 'success');
         setEditingId(null);
-    } else {
-        // Criação
+      } else {
+        // Criação: Cria novo documento com ID gerado automaticamente ou timestamp
         const newId = Date.now().toString();
-        updatedGroups = [...priceGroups, {
-            id: newId,
-            name: newGroup.name,
-            margin: marginValue || 0
-        }];
-        showNotification('Grupo criado!', 'success');
-    }
+        const groupRef = doc(db, 'artifacts', appId, 'public', 'data', 'priceGroups', newId);
+        
+        await setDoc(groupRef, {
+          id: newId,
+          name: newGroup.name,
+          margin: marginValue || 0
+        });
+        showNotification('Grupo criado com sucesso!', 'success');
+      }
+      setNewGroup({ name: '', margin: '' });
 
-    // Salva usando a função de merge
-    onMergeChange({ priceGroups: updatedGroups });
-    setNewGroup({ name: '', margin: '' });
+    } catch (error) {
+      console.error("Erro ao salvar grupo:", error);
+      showNotification('Erro ao salvar no banco de dados.', 'error');
+    }
   };
 
-  const handleDeleteGroup = (id) => {
+  const handleDeleteGroup = async (id) => {
     if (!window.confirm("Ao excluir o grupo, os produtos vinculados perderão a automação. Continuar?")) return;
     
-    // 1. Remove o grupo da lista
-    const updatedGroups = priceGroups.filter(g => g.id !== id);
-    
-    // 2. Remove o vínculo dos produtos (limpa o ID do grupo)
-    const updatedProducts = products.map(p => 
-      p.priceGroupId === id ? { ...p, priceGroupId: null } : p
-    );
-    
-    // 3. SALVA AMBOS AO MESMO TEMPO (Correção do Erro)
-    onMergeChange({ 
-        priceGroups: updatedGroups, 
-        products: updatedProducts 
-    });
-    
-    if (activeGroup?.id === id) setActiveGroup(null);
-    if (editingId === id) {
-        setEditingId(null);
-        setNewGroup({ name: '', margin: '' });
-    }
+    const appId = getAppId();
+    const batch = writeBatch(db);
 
-    showNotification('Grupo removido e produtos desvinculados.', 'success');
+    try {
+      // 1. Deletar o grupo
+      const groupRef = doc(db, 'artifacts', appId, 'public', 'data', 'priceGroups', id);
+      batch.delete(groupRef);
+
+      // 2. Desvincular produtos que pertencem a este grupo
+      // Precisamos filtrar quais produtos tem esse ID e atualizar no banco
+      const productsInGroup = products.filter(p => p.priceGroupId === id);
+      
+      productsInGroup.forEach(p => {
+        const productRef = doc(db, 'artifacts', appId, 'public', 'data', 'products', p.id);
+        batch.update(productRef, { priceGroupId: null }); // Remove o campo ou seta null
+      });
+
+      await batch.commit(); // Executa tudo de uma vez
+      
+      if (activeGroup?.id === id) setActiveGroup(null);
+      if (editingId === id) {
+          setEditingId(null);
+          setNewGroup({ name: '', margin: '' });
+      }
+
+      showNotification('Grupo removido e produtos desvinculados.', 'success');
+    } catch (error) {
+      console.error("Erro ao excluir:", error);
+      showNotification('Erro ao excluir grupo.', 'error');
+    }
   };
 
   const handleEditClick = (group, e) => {
@@ -89,54 +133,66 @@ export default function PriceGroups({
     setEditingId(null);
   };
 
-  // --- VINCULAÇÃO DE PRODUTOS ---
-  const handleAddProductToGroup = (product) => {
+  // --- VINCULAÇÃO DE PRODUTOS (Escrita Direta na Coleção Products) ---
+  const handleAddProductToGroup = async (product) => {
     if (!activeGroup) return;
+    const appId = getAppId();
 
-    const updatedProducts = products.map(p => {
-      if (p.id === product.id) {
-        return { ...p, priceGroupId: activeGroup.id };
-      }
-      return p;
-    });
-
-    onMergeChange({ products: updatedProducts });
-    showNotification(`${product.name} adicionado ao grupo.`, 'success');
+    try {
+      const productRef = doc(db, 'artifacts', appId, 'public', 'data', 'products', product.id);
+      await updateDoc(productRef, { priceGroupId: activeGroup.id });
+      
+      showNotification(`${product.name} adicionado ao grupo.`, 'success');
+    } catch (error) {
+      console.error("Erro ao vincular produto:", error);
+      showNotification('Erro ao atualizar produto.', 'error');
+    }
   };
 
-  const handleRemoveProductFromGroup = (productId) => {
-    const updatedProducts = products.map(p => {
-      if (p.id === productId) {
-        const { priceGroupId, ...rest } = p; 
-        return { ...rest, priceGroupId: null };
-      }
-      return p;
-    });
-    onMergeChange({ products: updatedProducts });
+  const handleRemoveProductFromGroup = async (productId) => {
+    const appId = getAppId();
+    try {
+      const productRef = doc(db, 'artifacts', appId, 'public', 'data', 'products', productId);
+      await updateDoc(productRef, { priceGroupId: null });
+      showNotification('Produto removido do grupo.', 'success');
+    } catch (error) {
+      console.error("Erro ao desvincular:", error);
+      showNotification('Erro ao atualizar banco de dados.', 'error');
+    }
   };
 
-  // --- SINCRONIZAÇÃO EM LOTE ---
-  const handleBatchSync = () => {
+  // --- SINCRONIZAÇÃO EM LOTE (Batch Update) ---
+  const handleBatchSync = async () => {
     if (!activeGroup) return;
     if (!window.confirm(`Atualizar preço de TODOS os produtos deste grupo (Margem ${activeGroup.margin}%)?`)) return;
 
+    const appId = getAppId();
+    const batch = writeBatch(db);
     let updateCount = 0;
-    const updatedProducts = products.map(p => {
-      if (p.priceGroupId === activeGroup.id) {
-        const cost = Number(p.cost) || 0;
-        const newPrice = cost * (1 + (activeGroup.margin / 100));
-        
-        if (Math.abs(newPrice - p.price) > 0.01) {
-          updateCount++;
-          return { ...p, price: newPrice };
-        }
+
+    // Filtra produtos do grupo atual
+    const productsInGroup = products.filter(p => p.priceGroupId === activeGroup.id);
+
+    productsInGroup.forEach(p => {
+      const cost = Number(p.cost) || 0;
+      const newPrice = cost * (1 + (activeGroup.margin / 100));
+      
+      // Só atualiza se houver diferença de centavos
+      if (Math.abs(newPrice - p.price) > 0.01) {
+        const productRef = doc(db, 'artifacts', appId, 'public', 'data', 'products', p.id);
+        batch.update(productRef, { price: newPrice });
+        updateCount++;
       }
-      return p;
     });
 
     if (updateCount > 0) {
-        onMergeChange({ products: updatedProducts });
-        showNotification(`${updateCount} produtos atualizados!`, 'success');
+        try {
+          await batch.commit();
+          showNotification(`${updateCount} produtos atualizados com sucesso!`, 'success');
+        } catch (error) {
+          console.error("Erro no batch:", error);
+          showNotification('Erro ao sincronizar preços.', 'error');
+        }
     } else {
         showNotification('Todos os produtos já estão com o preço correto.', 'info');
     }
@@ -151,6 +207,7 @@ export default function PriceGroups({
   const searchResults = useMemo(() => {
     if (!searchTerm || !activeGroup) return [];
     const term = searchTerm.toLowerCase();
+    // Filtra produtos que NÃO estão no grupo atual e batem com a busca
     return products.filter(p => 
       p.priceGroupId !== activeGroup.id && 
       (p.name.toLowerCase().includes(term) || String(p.cbaCode).includes(term))
@@ -203,7 +260,9 @@ export default function PriceGroups({
         </div>
 
         <div className="flex-1 overflow-y-auto p-2 space-y-2">
-            {priceGroups.length === 0 && <p className="text-center text-slate-400 text-sm mt-4">Nenhum grupo criado.</p>}
+            {isLoading && <p className="text-center text-slate-400 text-sm mt-4">Carregando grupos...</p>}
+            {!isLoading && priceGroups.length === 0 && <p className="text-center text-slate-400 text-sm mt-4">Nenhum grupo criado.</p>}
+            
             {priceGroups.map(group => (
                 <div 
                   key={group.id}
@@ -288,7 +347,7 @@ export default function PriceGroups({
                             <tr>
                                 <th className="p-3">Produto</th>
                                 <th className="p-3 text-right">Custo</th>
-                                <th className="p-3 text-right">Venda</th>
+                                <th className="p-3 text-right">Venda Atual</th>
                                 <th className="p-3 text-right text-indigo-600">Sugerido</th>
                                 <th className="p-3 text-center">Status</th>
                                 <th className="p-3 w-10"></th>
@@ -312,7 +371,7 @@ export default function PriceGroups({
                                         </td>
                                         <td className="p-3 text-center">
                                             {isDivergent ? (
-                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold bg-amber-100 text-amber-700">
+                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold bg-amber-100 text-amber-700" title="Preço diferente da margem do grupo">
                                                     <AlertTriangle size={10}/> Divergente
                                                 </span>
                                             ) : (
@@ -325,6 +384,7 @@ export default function PriceGroups({
                                             <button 
                                                 onClick={() => handleRemoveProductFromGroup(p.id)}
                                                 className="text-slate-300 hover:text-red-500"
+                                                title="Desvincular do grupo"
                                             >
                                                 <Trash2 size={16}/>
                                             </button>

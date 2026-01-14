@@ -5,7 +5,8 @@ import {
   AlertTriangle, CheckCircle, X,
   Search, FileText,
   ArrowRight, ArrowLeft, Clock, Eye, ClipboardList,
-  PieChart, Save, UserPlus, Printer, Lock, Settings, CheckSquare, Square, Edit, Download, LogOut, Server, Beer, Minus, PlusCircle, Tags
+  PieChart, Save, UserPlus, Printer, Lock, Settings, CheckSquare, Square, Edit, Download, LogOut, Server, Beer, Minus, PlusCircle, Tags,
+  ChevronLeft, ChevronRight
 } from 'lucide-react';
 import { collection, query, where, getDocs, setDoc, doc, updateDoc, getDoc, onSnapshot, increment, writeBatch, serverTimestamp } from "firebase/firestore";
 import logo from './img/LOGO-MAQUINA-PNG.png';
@@ -2092,101 +2093,120 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
     showNotification(`Modo Atacado ${newState ? 'ATIVADO' : 'DESATIVADO'}`, 'success');
   };
 
+  // Componente Switch Reutilizável (Interno para consistência visual)
+  const Switch = ({ active, onClick, colorClass = "bg-indigo-600" }) => (
+    <button 
+      onClick={onClick}
+      className={`relative w-12 h-6 flex items-center rounded-full p-1 transition-colors duration-300 ease-in-out focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${active ? colorClass : 'bg-slate-300'}`}
+    >
+      <div 
+        className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-transform duration-300 ease-in-out ${active ? 'translate-x-6' : 'translate-x-0'}`} 
+      />
+    </button>
+  );
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-8">
+       {/* --- SEÇÃO: PREFERÊNCIAS DO SISTEMA --- */}
        <div className="bg-white p-6 rounded border border-slate-200 shadow-sm">
          <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Settings size={20}/> Preferências do Sistema</h3>
          
-         <div className="flex items-center justify-between p-4 bg-slate-50 rounded border border-slate-200">
-            <div>
-              <h4 className="font-bold text-slate-800">Habilitar Venda por Atacado</h4>
-              <p className="text-xs text-slate-500">Habilita campos de "Qtd no Fardo" no estoque e botões de venda atacado no PDV.</p>
+         <div className="space-y-4">
+            {/* Opção 1: Atacado */}
+            <div className="flex items-center justify-between p-4 bg-slate-50 rounded border border-slate-200">
+                <div>
+                  <h4 className="font-bold text-slate-800 text-sm">Habilitar Venda por Atacado</h4>
+                  <p className="text-xs text-slate-500 mt-1">Habilita campos de "Qtd no Fardo" no estoque e botões de venda atacado no PDV.</p>
+                </div>
+                <Switch 
+                    active={storeConfig.enableWholesale} 
+                    onClick={toggleWholesale} 
+                />
             </div>
-            
-            {/* Toggle Switch Personalizado com Tailwind */}
-            <button 
-              onClick={toggleWholesale}
-              className={`relative w-14 h-7 rounded-full transition-colors duration-200 ease-in-out focus:outline-none ${storeConfig.enableWholesale ? 'bg-indigo-600' : 'bg-slate-300'}`}
-            >
-              <span 
-                className={`block w-5 h-5 bg-white rounded-full shadow transform transition-transform duration-200 ease-in-out mt-1 ml-1 ${storeConfig.enableWholesale ? 'translate-x-7' : 'translate-x-0'}`} 
-              />
-            </button>
+
+            {/* Opção 2: Edição no PDV */}
+            <div className="flex items-center justify-between p-4 bg-slate-50 rounded border border-slate-200">
+                <div>
+                  <h4 className="font-bold text-slate-800 text-sm">Permitir Edição Rápida no PDV</h4>
+                  <p className="text-xs text-slate-500 mt-1">Exibe botão de editar nos produtos direto na tela de vendas.</p>
+                </div>
+                <Switch 
+                    active={storeConfig.enablePDVEditing} 
+                    onClick={() => {
+                        const newState = !storeConfig.enablePDVEditing;
+                        setStoreConfig({ ...storeConfig, enablePDVEditing: newState });
+                        showNotification(`Edição no PDV ${newState ? 'LIBERADA' : 'BLOQUEADA'}`, 'success');
+                    }}
+                    colorClass="bg-emerald-600" 
+                />
+            </div>
          </div>
        </div>
 
-      <div className="flex items-center justify-between p-4 bg-slate-50 rounded border border-slate-200 mt-2">
-        <div>
-          <h4 className="font-bold text-slate-800">Permitir Edição Rápida no PDV</h4>
-          <p className="text-xs text-slate-500">Exibe botão de editar nos produtos direto na tela de vendas.</p>
-        </div>
-        <button 
-          onClick={() => {
-              const newState = !storeConfig.enablePDVEditing;
-              setStoreConfig({ ...storeConfig, enablePDVEditing: newState });
-              showNotification(`Edição no PDV ${newState ? 'LIBERADA' : 'BLOQUEADA'}`, 'success');
-          }}
-          className={`relative w-14 h-7 rounded-full transition-colors duration-200 ease-in-out focus:outline-none ${storeConfig.enablePDVEditing ? 'bg-emerald-600' : 'bg-slate-300'}`}>
-          <span className={`block w-5 h-5 bg-white rounded-full shadow transform transition-transform duration-200 ease-in-out mt-1 ml-1 ${storeConfig.enablePDVEditing ? 'translate-x-7' : 'translate-x-0'}`} />
-        </button>
-      </div>
-       {/* FIM DA NOVA SEÇÃO */}
-
+       {/* --- SEÇÃO: DADOS DA EMPRESA --- */}
        <div className="bg-white p-6 rounded border border-slate-200 shadow-sm">
          <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Package size={20}/> Dados da Empresa (para Cupons)</h3>
          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
            <div>
              <label className="block text-xs font-bold text-slate-500 mb-1">Nome da Empresa</label>
-             <input className="w-full border p-2 rounded text-sm" value={editingCompanyInfo.name} onChange={e => setEditingCompanyInfo({...editingCompanyInfo, name: e.target.value})} />
+             <input className="w-full border p-2 rounded text-sm focus:ring-2 focus:ring-indigo-500 outline-none" value={editingCompanyInfo.name} onChange={e => setEditingCompanyInfo({...editingCompanyInfo, name: e.target.value})} />
            </div>
            <div>
              <label className="block text-xs font-bold text-slate-500 mb-1">CNPJ</label>
-             <input className="w-full border p-2 rounded text-sm" value={editingCompanyInfo.cnpj} onChange={e => setEditingCompanyInfo({...editingCompanyInfo, cnpj: e.target.value})} />
+             <input className="w-full border p-2 rounded text-sm focus:ring-2 focus:ring-indigo-500 outline-none" value={editingCompanyInfo.cnpj} onChange={e => setEditingCompanyInfo({...editingCompanyInfo, cnpj: e.target.value})} />
            </div>
            <div className="md:col-span-2">
              <label className="block text-xs font-bold text-slate-500 mb-1">Endereço</label>
-             <input className="w-full border p-2 rounded text-sm" value={editingCompanyInfo.address} onChange={e => setEditingCompanyInfo({...editingCompanyInfo, address: e.target.value})} />
+             <input className="w-full border p-2 rounded text-sm focus:ring-2 focus:ring-indigo-500 outline-none" value={editingCompanyInfo.address} onChange={e => setEditingCompanyInfo({...editingCompanyInfo, address: e.target.value})} />
            </div>
            <div>
              <label className="block text-xs font-bold text-slate-500 mb-1">Telefone</label>
-             <input className="w-full border p-2 rounded text-sm" value={editingCompanyInfo.phone} onChange={e => setEditingCompanyInfo({...editingCompanyInfo, phone: e.target.value})} />
+             <input className="w-full border p-2 rounded text-sm focus:ring-2 focus:ring-indigo-500 outline-none" value={editingCompanyInfo.phone} onChange={e => setEditingCompanyInfo({...editingCompanyInfo, phone: e.target.value})} />
            </div>
          </div>
-         <button onClick={handleSaveCompanyInfo} className="bg-slate-800 text-white px-4 py-2 rounded text-sm font-bold hover:bg-slate-700">Salvar Dados da Empresa</button>
+         <button onClick={handleSaveCompanyInfo} className="bg-slate-800 text-white px-4 py-2 rounded text-sm font-bold hover:bg-slate-700 transition-colors">Salvar Dados da Empresa</button>
        </div>
 
+       {/* --- SEÇÃO: USUÁRIOS --- */}
        <div className="bg-white p-6 rounded border border-slate-200 shadow-sm">
          <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Settings size={20}/> Gerenciar Usuários</h3>
-         <div className="flex gap-4 items-end">
+         <div className="flex gap-4 items-end mb-6">
            <div className="flex-1">
              <label className="block text-xs font-bold text-slate-500 mb-1">Nome de Usuário</label>
-             <input className="w-full border p-2 rounded text-sm" value={newUser.username} onChange={e => setNewUser({...newUser, username: e.target.value})} placeholder="Novo usuário" />
+             <input className="w-full border p-2 rounded text-sm focus:ring-2 focus:ring-indigo-500 outline-none" value={newUser.username} onChange={e => setNewUser({...newUser, username: e.target.value})} placeholder="Novo usuário" />
            </div>
            <div className="flex-1">
              <label className="block text-xs font-bold text-slate-500 mb-1">Senha</label>
-             <input className="w-full border p-2 rounded text-sm" type="password" value={newUser.password} onChange={e => setNewUser({...newUser, password: e.target.value})} placeholder="Senha" />
+             <input className="w-full border p-2 rounded text-sm focus:ring-2 focus:ring-indigo-500 outline-none" type="password" value={newUser.password} onChange={e => setNewUser({...newUser, password: e.target.value})} placeholder="Senha" />
            </div>
-           <button onClick={handleAddUser} className="bg-slate-800 text-white px-4 py-2 rounded text-sm font-bold hover:bg-slate-700 h-10 flex items-center gap-2"><Plus size={16}/> Adicionar</button>
+           <button onClick={handleAddUser} className="bg-slate-800 text-white px-4 py-2 rounded text-sm font-bold hover:bg-slate-700 h-10 flex items-center gap-2 transition-colors"><Plus size={16}/> Adicionar</button>
+         </div>
+
+         <div className="border rounded overflow-hidden">
+            <table className="w-full text-left text-sm">
+            <thead className="bg-slate-50 text-slate-500 uppercase text-xs font-semibold">
+                <tr><th className="p-4">Usuário</th><th className="p-4">Senha</th><th className="p-4 text-right">Ação</th></tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+                {users.map(u => (
+                <tr key={u.id} className="hover:bg-slate-50">
+                    <td className="p-4 font-medium">{u.username}</td>
+                    <td className="p-4 text-slate-500">••••••</td>
+                    <td className="p-4 text-right">
+                    <button onClick={() => handleDeleteUser(u.id)} className="text-slate-400 hover:text-red-500 transition-colors"><Trash2 size={18}/></button>
+                    </td>
+                </tr>
+                ))}
+            </tbody>
+            </table>
          </div>
        </div>
 
-       <div className="bg-white rounded border border-slate-200 shadow-sm overflow-hidden">
-         <table className="w-full text-left text-sm">
-           <thead className="bg-slate-50 text-slate-500 uppercase text-xs font-semibold">
-             <tr><th className="p-4">Usuário</th><th className="p-4">Senha</th><th className="p-4 text-right">Ação</th></tr>
-           </thead>
-           <tbody className="divide-y divide-slate-100">
-             {users.map(u => (
-               <tr key={u.id} className="hover:bg-slate-50">
-                 <td className="p-4 font-medium">{u.username}</td>
-                 <td className="p-4 text-slate-500">••••••</td>
-                 <td className="p-4 text-right">
-                   <button onClick={() => handleDeleteUser(u.id)} className="text-slate-400 hover:text-red-500"><Trash2 size={18}/></button>
-                 </td>
-               </tr>
-             ))}
-           </tbody>
-         </table>
+       {/* --- RODAPÉ DA MARCA (Solicitado) --- */}
+       <div className="pt-8 pb-4 flex flex-col items-center justify-center opacity-60 hover:opacity-100 transition-opacity">
+            <img src={logo} alt="Máquina Software" className="h-10 mb-2 grayscale" />
+            <p className="text-xs font-bold text-slate-500">Made by Máquina Software</p>
+            <p className="text-[10px] text-slate-400">DistriPro ERP v2.1</p>
        </div>
     </div>
   );
@@ -2218,18 +2238,18 @@ const usePersistedState = (key, initialValue) => {
 const StoreApp = ({ store, onLogout, updateStore }) => {
   const [activeModule, setActiveModule] = useState('dashboard');
   const [notification, setNotification] = useState(null);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
   const showNotification = useCallback((message, type) => { setNotification({ message, type }); setTimeout(() => setNotification(null), 3000); }, []);
 
-  // --- 1. ESTADOS DO BANCO DE DADOS (REALTIME) ---
-  const [products, setProducts] = useState([]);      // Produtos do Banco
-  const [realtimeSales, setRealtimeSales] = useState([]); // Vendas do Banco
+  // --- ESTADOS DO BANCO DE DADOS ---
+  const [products, setProducts] = useState([]);
+  const [realtimeSales, setRealtimeSales] = useState([]);
 
-  // --- 2. LISTENER DE PRODUTOS ---
+  // Listener Produtos
   useEffect(() => {
     const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
     const productsRef = collection(firebase.db, 'artifacts', appId, 'public', 'data', 'products');
-    
     const unsubscribe = onSnapshot(productsRef, (snapshot) => {
         const prods = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         setProducts(prods);
@@ -2237,12 +2257,10 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
     return () => unsubscribe();
   }, []);
 
-  // --- 3. LISTENER DE VENDAS (Novo!) ---
+  // Listener Vendas
   useEffect(() => {
     const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
     const salesRef = collection(firebase.db, 'artifacts', appId, 'public', 'data', 'sales');
-    
-    // Ordenar ou limitar se necessário, aqui pegamos tudo
     const unsubscribe = onSnapshot(salesRef, (snapshot) => {
         const salesData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         setRealtimeSales(salesData);
@@ -2250,297 +2268,231 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
     return () => unsubscribe();
   }, []);
 
-  // --- 4. NOVA FUNÇÃO DE VENDA (Grava no Banco e Baixa Estoque) ---
+  // Função de Venda (com baixa de estoque)
   const handleNewSale = async (sale) => {
     try {
         const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
         const batch = writeBatch(firebase.db);
-        
-        // 1. Grava a Venda na coleção 'sales'
         const saleRef = doc(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'sales'));
-        // Converte id para string para evitar erros
         const saleData = { ...sale, id: saleRef.id, createdAt: serverTimestamp() }; 
         batch.set(saleRef, saleData);
 
-        // 2. Baixa o Estoque dos Produtos (Atômico)
         sale.items.forEach(item => {
-            // Se for atacado, usa o ID original do produto pai
             const targetId = item.originalId || item.id;
-            
-            // Quantidade a reduzir (se for atacado, multiplica pelo fator do pacote)
             const unitsToDeduct = item.stockDeduction || item.qty; 
-
-            // Referência ao produto no banco
             const productRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'products', targetId);
-            
-            batch.update(productRef, {
-                stock: increment(-unitsToDeduct)
-            });
+            batch.update(productRef, { stock: increment(-unitsToDeduct) });
         });
 
         await batch.commit();
         showNotification('Venda realizada e estoque atualizado!', 'success');
-
     } catch (error) {
         console.error("Erro na venda:", error);
         showNotification('Erro ao processar venda: ' + error.message, 'error');
     }
   };
 
-  const handleSaveTransaction = (transaction) => {
-    const newTransactions = [...store.transactions, transaction];
-
-    // Atualiza Estoque se for Revenda
-    if (transaction.category === 'Revenda' && transaction.items.length > 0) {
-      let newProducts = JSON.parse(JSON.stringify(store.products)); // Deep copy
-
-      transaction.items.forEach(item => {
-        const stockChangeQty = transaction.type === 'entry' ? item.qty : -item.qty;
-        const productInTransaction = newProducts.find(p => p.id === item.productId);
-
-        if (productInTransaction) {
-          let unitProductIndex = -1;
-          // Stock operations must always target the UNIT product.
-          if (productInTransaction.itemType === 'pack') {
-            unitProductIndex = newProducts.findIndex(p => p.parentId === productInTransaction.id);
-          } else { // 'unit' or legacy
-            unitProductIndex = newProducts.findIndex(p => p.id === productInTransaction.id);
-          }
-
-          if (unitProductIndex !== -1) {
-            const currentStock = newProducts[unitProductIndex].stock || 0;
-            newProducts[unitProductIndex].stock = currentStock + stockChangeQty;
-          }
-        }
-      });
-      updateStore({ ...store, products: newProducts, transactions: newTransactions });
-    } else {
-      updateStore({ ...store, transactions: newTransactions });
-    }
-  };
-
-  const handleDeleteTransaction = (id) => {
-    const transaction = store.transactions.find(t => t.id === id);
-    if (!transaction) return;
-
-    let newProducts = JSON.parse(JSON.stringify(store.products));
-
-    if (transaction.category === 'Revenda' && transaction.items.length > 0) {
-      transaction.items.forEach(item => {
-        const stockChangeQty = transaction.type === 'entry' ? -item.qty : item.qty; // Reverse the operation
-        const productInTransaction = newProducts.find(p => p.id === item.productId);
-
-        if (productInTransaction) {
-          let unitProductIndex = -1;
-          if (productInTransaction.itemType === 'pack') {
-            unitProductIndex = newProducts.findIndex(p => p.parentId === productInTransaction.id);
-          } else { // 'unit' or legacy
-            unitProductIndex = newProducts.findIndex(p => p.id === productInTransaction.id);
-          }
-
-          if (unitProductIndex !== -1) {
-            const currentStock = newProducts[unitProductIndex].stock || 0;
-            newProducts[unitProductIndex].stock = currentStock + stockChangeQty;
-          }
-        }
-      });
-      updateStore({ ...store, products: newProducts, transactions: store.transactions.filter(t => t.id !== id) });
-    } else {
-      updateStore({ ...store, transactions: store.transactions.filter(t => t.id !== id) });
-    }
-    showNotification('Transação removida e estoque revertido.', 'success');
-  };
-
-  const handleUpdateTransaction = (updatedTransaction) => {
-    const oldTransaction = store.transactions.find(t => t.id === updatedTransaction.id);
-    if (oldTransaction) {
-      const tempTransactions = store.transactions.filter(t => t.id !== updatedTransaction.id);
-      const newTransactions = [...tempTransactions, updatedTransaction];
-      updateStore({ ...store, transactions: newTransactions });
-      showNotification('Transação atualizada com sucesso.', 'success');
-    }
-  };
-
-  const MenuButton = ({ id, icon: Icon, label }) => (
-    <button 
-      onClick={() => setActiveModule(id)} 
-      className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-colors ${activeModule === id ? 'bg-slate-800 text-white' : 'text-slate-400 hover:bg-slate-800/50 hover:text-white'}`}
-    >
-      <Icon size={20}/> {label}
-    </button>
-  );
-
-  // --- SISTEMA DE NOTIFICAÇÃO DE CONTAS A PAGAR ---
+  // Notificação de Contas a Pagar
   useEffect(() => {
     const checkBillNotifications = async () => {
        const todayStr = new Date().toISOString().split('T')[0];
        const lastCheck = localStorage.getItem('last_bill_check_date');
-       
        const alreadyCheckedToday = lastCheck === todayStr;
 
        try {
          const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
          const q = query(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'invoices'), where('status', '!=', 'CANCELADA')); 
-         
          const snap = await getDocs(q);
          const invoices = snap.docs.map(d => d.data());
          
          let urgentCount = 0;
-         let warningFiveDays = 0;
-
          invoices.forEach(inv => {
              if (!inv.financials) return;
              inv.financials.forEach(inst => {
                  if (inst.status !== 'PENDENTE') return;
-
                  const due = new Date(inst.dueDate);
-                 const today = new Date();
-                 const diffTime = due - today;
-                 const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
+                 const diffDays = Math.ceil((due - new Date()) / (1000 * 60 * 60 * 24)); 
                  
                  const warningKey = `warn_5d_${inv.header.number}_${inst.number}`;
                  if (diffDays === 5 && !localStorage.getItem(warningKey)) {
-                     showNotification(`Conta vence em 5 dias: ${inv.header.entityName} (${formatCurrency(inst.value)})`, 'warning');
+                     showNotification(`Conta vence em 5 dias: ${inv.header.entityName}`, 'warning');
                      localStorage.setItem(warningKey, 'true');
-                     warningFiveDays++;
                  }
-
-                 if (diffDays <= 3 && diffDays > 0) {
-                     urgentCount++;
-                 }
+                 if (diffDays <= 3 && diffDays > 0) urgentCount++;
              });
          });
 
          if (urgentCount > 0 && !alreadyCheckedToday) {
-             showNotification(`ATENÇÃO: Existem ${urgentCount} contas vencendo nos próximos 3 dias!`, 'error');
+             showNotification(`ATENÇÃO: Existem ${urgentCount} contas vencendo em breve!`, 'error');
              localStorage.setItem('last_bill_check_date', todayStr);
          }
-
-       } catch (e) {
-           console.error("Erro ao verificar notificações:", e);
-       }
+       } catch (e) { console.error(e); }
     };
-
-    const timer = setTimeout(() => {
-        if(store) checkBillNotifications();
-    }, 2000);
-    
+    const timer = setTimeout(() => { if(store) checkBillNotifications(); }, 2000);
     return () => clearTimeout(timer);
-  }, [store]);
+  }, [store, showNotification]);
+
+  const MenuButton = ({ id, icon: Icon, label }) => (
+    <button 
+      onClick={() => setActiveModule(id)} 
+      title={isSidebarCollapsed ? label : ''}
+      className={`
+        w-full flex items-center py-3 transition-all duration-300 relative group
+        ${activeModule === id ? 'bg-slate-800 text-white' : 'text-slate-400 hover:bg-slate-800/50 hover:text-white'}
+        ${isSidebarCollapsed ? 'justify-center px-0' : 'gap-3 px-4'}
+      `}
+    >
+      <Icon size={20} className="shrink-0"/> 
+      <span className={`whitespace-nowrap overflow-hidden transition-all duration-300 ${isSidebarCollapsed ? 'w-0 opacity-0' : 'w-auto opacity-100'}`}>
+        {label}
+      </span>
+      {isSidebarCollapsed && (
+        <div className="absolute left-full ml-2 px-2 py-1 bg-slate-800 text-white text-xs rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-50 shadow-lg">
+          {label}
+        </div>
+      )}
+    </button>
+  );
 
   return (
-    <div className="flex h-screen bg-slate-100 font-sans text-slate-900">
-      {/* Sidebar */}
-      <aside className="w-64 bg-slate-900 flex flex-col shadow-xl z-10">
-        <div className="p-6 border-b border-slate-800 flex flex-col items-center">
-          <h1 className="text-xl font-bold text-white flex items-center gap-2"><Package className="text-indigo-500"/> DistriPro <Beer className="text-amber-500" size={20}/> <span className="text-xs bg-indigo-600 px-1.5 py-0.5 rounded">ERP</span></h1>
-          <div className="mt-4 flex flex-col items-center">
-            <img src={logoWhite} alt="Máquina Software" className="h-14 mb-1" />
-            <span className="text-xs text-slate-500">By Máquina software</span>
-          </div>
+    <div className="flex h-screen bg-slate-100 font-sans text-slate-900 overflow-hidden">
+      {/* --- SIDEBAR --- */}
+      <aside 
+        className={`
+          bg-slate-900 flex flex-col shadow-xl z-20 transition-all duration-300 ease-in-out relative
+          ${isSidebarCollapsed ? 'w-20' : 'w-64'}
+        `}
+      >
+        <button 
+          onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+          className="absolute -right-3 top-6 bg-slate-800 text-slate-400 border border-slate-700 rounded-full p-1 hover:text-white hover:bg-slate-700 transition-colors z-30 shadow-sm"
+        >
+          {isSidebarCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+        </button>
+
+        {/* Header */}
+        <div className={`p-4 border-b border-slate-800 flex flex-col items-center justify-center transition-all duration-300 ${isSidebarCollapsed ? 'h-20' : 'h-32'}`}>
+           {isSidebarCollapsed ? (
+             <div className="p-2 bg-indigo-600 rounded-lg animate-in fade-in zoom-in duration-300">
+               <Package className="text-white" size={24}/>
+             </div>
+           ) : (
+             <div className="flex flex-col items-center animate-in fade-in slide-in-from-left duration-300">
+                <div className="flex items-center gap-2 text-xl font-bold text-white">
+                  <Package className="text-indigo-500"/> 
+                  <span>DistriPro</span>
+                  {/* ÍCONE DA CERVEJA VOLTOU AQUI */}
+                  <Beer className="text-amber-500" size={20}/>
+                </div>
+                <span className="text-xs bg-indigo-600 px-1.5 py-0.5 rounded text-white mt-2">ERP Enterprise</span>
+             </div>
+           )}
         </div>
-        <nav className="flex-1 py-6 space-y-1">
+
+        {/* Navegação (Com no-scrollbar) */}
+        <nav className="flex-1 py-4 space-y-1 overflow-y-auto overflow-x-hidden no-scrollbar">
           <MenuButton id="dashboard" icon={BarChart3} label="Dashboard" />
           <MenuButton id="pdv" icon={ShoppingCart} label="PDV & Vendas" />
           <MenuButton id="clients" icon={Users} label="Clientes" />
           <MenuButton id="transactions" icon={ClipboardList} label="Notas & Gastos" />
           <MenuButton id="finance" icon={DollarSign} label="Financeiro" />
-          <MenuButton id="priceGroups" icon={Tags} label="Precificação (Grupos)" />
+          <MenuButton id="priceGroups" icon={Tags} label="Precificação" />
           <MenuButton id="inventory" icon={Package} label="Estoque (WMS)" />
           <MenuButton id="settings" icon={Settings} label="Configurações" />
         </nav>
-        <div className="p-4 border-t border-slate-800">
-          <button onClick={onLogout} className="w-full flex items-center gap-3 px-4 py-2 text-sm font-medium text-red-400 hover:bg-slate-800/80 hover:text-red-300 rounded transition-colors">
-            <LogOut size={20}/> Sair
+
+        {/* Rodapé (Fluido com mt-auto) */}
+        <div className="mt-auto p-4 border-t border-slate-800 bg-slate-900/50">
+          <button 
+            onClick={onLogout} 
+            title={isSidebarCollapsed ? "Sair do Sistema" : ""}
+            className={`
+              w-full flex items-center rounded text-sm font-medium text-red-400 hover:bg-slate-800 hover:text-red-300 transition-colors
+              ${isSidebarCollapsed ? 'justify-center p-2' : 'gap-3 px-4 py-2'}
+            `}
+          >
+            <LogOut size={20}/> 
+            <span className={`whitespace-nowrap overflow-hidden transition-all duration-300 ${isSidebarCollapsed ? 'w-0 opacity-0' : 'w-auto opacity-100'}`}>
+              Sair
+            </span>
           </button>
-        </div>
-        <div className="p-4 border-t border-slate-800 text-slate-500 text-xs text-center">
-          v2.0 Enterprise
+
+          <div className={`mt-4 flex flex-col items-center transition-all duration-500 ${isSidebarCollapsed ? 'opacity-50' : 'opacity-100'}`}>
+             {isSidebarCollapsed ? (
+                <img src={logoWhite} alt="M" className="h-6 w-auto opacity-50" />
+             ) : (
+                <>
+                  <img src={logoWhite} alt="Máquina Software" className="h-10 mb-2 opacity-80" />
+                  <span className="text-[10px] text-slate-500">Made by Máquina Software</span>
+                  <span className="text-[9px] text-slate-600">v2.1</span>
+                </>
+             )}
+          </div>
         </div>
       </aside>
 
-      {/* Main Content */}
-      <main className="flex-1 flex flex-col overflow-hidden">
-        <header className="bg-white border-b border-slate-200 h-16 flex items-center justify-between px-6 shadow-sm">
-          <h2 className="text-lg font-bold text-slate-800 capitalize">{activeModule === 'pdv' ? 'Ponto de Venda' : activeModule}</h2>
+      {/* --- CONTEÚDO PRINCIPAL --- */}
+      <main className="flex-1 flex flex-col overflow-hidden relative transition-all duration-300">
+        <header className="bg-white border-b border-slate-200 h-16 flex items-center justify-between px-6 shadow-sm z-10">
+          <h2 className="text-lg font-bold text-slate-800 capitalize flex items-center gap-2">
+             {activeModule === 'pdv' && <ShoppingCart className="text-indigo-600" size={20}/>}
+             {activeModule === 'inventory' && <Package className="text-indigo-600" size={20}/>}
+             {activeModule === 'dashboard' && <BarChart3 className="text-indigo-600" size={20}/>}
+             
+             {activeModule === 'pdv' ? 'Ponto de Venda' : 
+              activeModule === 'inventory' ? 'Gerenciamento de Estoque' : 
+              activeModule === 'priceGroups' ? 'Precificação Automática' :
+              activeModule}
+          </h2>
           <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2 text-sm text-slate-600 bg-slate-50 px-3 py-1.5 rounded-full border">
+            <div className="hidden md:flex items-center gap-2 text-sm text-slate-600 bg-slate-50 px-3 py-1.5 rounded-full border">
               <Calendar size={14}/> {new Date().toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' })}
             </div>
-            <div className="w-8 h-8 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-700 font-bold text-xs">AD</div>
+            <div className="w-8 h-8 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-700 font-bold text-xs border border-indigo-200">
+              {store.companyInfo?.name?.substring(0,2).toUpperCase() || 'AD'}
+            </div>
           </div>
         </header>
 
-        <div className="flex-1 overflow-auto p-6">
+        <div className="flex-1 overflow-auto p-4 md:p-6 bg-slate-100">
           <div className="max-w-7xl mx-auto animate-in fade-in duration-300">
             {activeModule === 'dashboard' && <Dashboard sales={realtimeSales} products={products} />}
             {activeModule === 'pdv' && (
               <PDV 
-                products={products} // Produtos em Tempo Real (Firebase)
-                
-                // --- ADICIONE ESTAS LINHAS ---
+                products={products}
                 groups={store.priceGroups || []}
                 clients={store.clients || []}
                 setClients={(c) => updateStore({...store, clients: c})}
                 feeProfiles={store.feeProfiles || []}
                 companyInfo={store.companyInfo}
                 onUpdateProduct={async (updatedList) => {
-                    // Função para salvar edição de produto direto no Firebase
-                    // Pega o produto editado (que mudou na lista) e salva
-                    // Isso é necessário pois 'products' agora é read-only do Firebase
                     try {
                         const batch = writeBatch(firebase.db);
                         const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
-                        
                         updatedList.forEach(p => {
                             const ref = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'products', p.id);
                             batch.set(ref, p, { merge: true });
                         });
                         await batch.commit();
                         showNotification('Produto atualizado!', 'success');
-                    } catch (e) {
-                        console.error(e);
-                        showNotification('Erro ao salvar produto', 'error');
-                    }
+                    } catch (e) { console.error(e); showNotification('Erro ao salvar produto', 'error'); }
                 }}
-                // -----------------------------
-
                 onNewSale={handleNewSale} 
                 showNotification={showNotification} 
                 storeConfig={store} 
               />
             )}
             {activeModule === 'clients' && <ClientsManager clients={store.clients} setClients={(c) => updateStore({...store, clients: c})} showNotification={showNotification} />}
-            {activeModule === 'transactions' && (
-              <Transactions 
-                  products={products} // <--- AQUI: Passa a lista real
-                  priceGroups={store.priceGroups || []}
-                  onSaveEntry={() => {}} 
-              />
-            )}
-            {activeModule === 'priceGroups' && (
-              <PriceGroups 
-                products={store.products}
-                priceGroups={store.priceGroups || []}
-                // ESTA É A NOVA FUNÇÃO QUE PERMITE ATUALIZAR TUDO DE UMA VEZ
-                onMergeChange={(updates) => updateStore({ ...store, ...updates })}
-                showNotification={showNotification}
-              />
-            )}
+            {activeModule === 'transactions' && <Transactions products={products} priceGroups={store.priceGroups || []} onSaveEntry={() => {}} />}
+            {activeModule === 'priceGroups' && <PriceGroups products={products} showNotification={showNotification} />}
             {activeModule === 'finance' && <Finance sales={realtimeSales} transactions={store.transactions} transactionCategories={store.transactionCategories} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} />}
-            {activeModule === 'inventory' && (
-                <InventoryWMS 
-                    products={products} // <--- AQUI: Passa a lista real
-                    showNotification={showNotification} 
-                />
-            )}
+            {activeModule === 'inventory' && <InventoryWMS products={products} showNotification={showNotification} />}
             {activeModule === 'settings' && (
               <SettingsManager 
                 users={store.users} 
                 setUsers={(u) => updateStore({...store, users: u})} 
                 companyInfo={store.companyInfo} 
                 setCompanyInfo={(ci) => updateStore({...store, companyInfo: ci})}
-                /* NOVAS PROPS CONECTADAS AO ESTADO GLOBAL */
                 storeConfig={store}
                 setStoreConfig={updateStore} 
                 showNotification={showNotification} 
