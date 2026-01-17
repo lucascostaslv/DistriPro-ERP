@@ -6,7 +6,8 @@ import {
   Search, FileText,
   ArrowRight, ArrowLeft, Clock, Eye, ClipboardList,
   PieChart, Save, UserPlus, Printer, Lock, Settings, CheckSquare, Square, Edit, Download, LogOut, Server, Beer, Minus, PlusCircle, Tags,
-  ChevronLeft, ChevronRight
+  ChevronLeft, ChevronRight,
+  MapPin
 } from 'lucide-react';
 import { collection, query, where, getDocs, setDoc, doc, updateDoc, getDoc, onSnapshot, increment, writeBatch, serverTimestamp } from "firebase/firestore";
 import logo from './img/LOGO-MAQUINA-PNG.png';
@@ -15,6 +16,7 @@ import * as firebase from './firebase';
 import EntradaNotas from './EntradaNotas/EntradaNotas';
 import Transactions from './EntradaNotas/Transactions';
 import PriceGroups from './PriceGroups';
+import { supabase } from './supabaseClient';
 
 // --- UTILS ---
 const formatCurrency = (value) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
@@ -2063,150 +2065,480 @@ const Finance = ({ sales, transactions, transactionCategories, feeProfiles, setF
   );
 };
 
-const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeConfig, setStoreConfig, showNotification }) => {
-  const [newUser, setNewUser] = useState({ username: '', password: '' });
-  const [editingCompanyInfo, setEditingCompanyInfo] = useState(companyInfo);
+// --- UTILITÁRIOS DE MÁSCARA (Adicione isso ANTES do SettingsManager ou dentro dele, no topo) ---
+const masks = {
+  cnpj: (value) => {
+    return value
+      .replace(/\D/g, '') // Remove tudo o que não é dígito
+      .replace(/^(\d{2})(\d)/, '$1.$2') // Coloca ponto entre o segundo e o terceiro dígitos
+      .replace(/^(\d{2})\.(\d{3})(\d)/, '$1.$2.$3') // Coloca ponto entre o quinto e o sexto dígitos
+      .replace(/\.(\d{3})(\d)/, '.$1/$2') // Coloca uma barra entre o oitavo e o nono dígitos
+      .replace(/(\d{4})(\d)/, '$1-$2') // Coloca um hífen depois do bloco de quatro dígitos
+      .substring(0, 18); // Limita tamanho máximo
+  },
+  cpf: (value) => {
+    return value
+      .replace(/\D/g, '')
+      .replace(/(\d{3})(\d)/, '$1.$2')
+      .replace(/(\d{3})(\d)/, '$1.$2')
+      .replace(/(\d{3})(\d{1,2})/, '$1-$2')
+      .replace(/(-\d{2})\d+?$/, '$1');
+  },
+  cep: (value) => {
+    return value
+      .replace(/\D/g, '')
+      .replace(/^(\d{5})(\d)/, '$1-$2')
+      .substring(0, 9);
+  },
+  phone: (value) => {
+    let r = value.replace(/\D/g, "");
+    r = r.replace(/^0/, "");
+    if (r.length > 10) {
+      r = r.replace(/^(\d\d)(\d{5})(\d{4}).*/, "($1) $2-$3");
+    } else if (r.length > 5) {
+      r = r.replace(/^(\d\d)(\d{4})(\d{0,4}).*/, "($1) $2-$3");
+    } else if (r.length > 2) {
+      r = r.replace(/^(\d\d)(\d{0,5}).*/, "($1) $2");
+    } else {
+      r = r.replace(/^(\d*)/, "($1");
+    }
+    return r.substring(0, 15);
+  },
+  numbersOnly: (value) => {
+    return value.replace(/\D/g, ''); // Apenas números (útil para IE, CNAE)
+  },
+  // Formato CNAE visual: 0000-0/00
+  cnae: (value) => {
+     return value
+      .replace(/\D/g, '')
+      .replace(/^(\d{4})(\d)/, '$1-$2')
+      .replace(/(\d)(\d{2})$/, '$1/$2')
+      .substring(0, 9); 
+  }
+};
 
+// --- MANTENHA O OBJETO 'masks' ONDE JÁ ESTAVA (FORA DO COMPONENTE) ---
+
+const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeConfig, setStoreConfig, showNotification }) => {
+  const [activeTab, setActiveTab] = useState('general');
+  const [newUser, setNewUser] = useState({ username: '', password: '' });
+  
+  // Estado para Perfis Tributários (Fase 2)
+  const [taxProfiles, setTaxProfiles] = useState([]);
+  const [newProfile, setNewProfile] = useState({ 
+    name: '', 
+    origin: '0', 
+    cst_nfe: '102', // Padrão Simples Nacional
+    cst_pis_cofins: '49' 
+  });
+
+  const [formData, setFormData] = useState({
+    name: companyInfo?.name || '',
+    cnpj: companyInfo?.cnpj || '',
+    email: companyInfo?.email || '',
+    phone: companyInfo?.phone || '',
+    ie: companyInfo?.ie || '',
+    crt: companyInfo?.crt || '1',
+    cnae: companyInfo?.cnae || '',
+    address: typeof companyInfo?.address === 'object' ? companyInfo.address : {
+      zip: '', street: '', number: '', complement: '', neighborhood: '', city: '', state: '', ibgeCode: ''
+    }
+  });
+
+  const [isLoadingCep, setIsLoadingCep] = useState(false);
+
+  // --- CARREGAMENTO INICIAL (Empresa + Perfis) ---
+  useEffect(() => {
+    const loadAllData = async () => {
+        if (!storeConfig?.id) return;
+        
+        // 1. Carregar Dados da Empresa
+        const { data: companyData } = await supabase
+            .from('fiscal_emitters')
+            .select('*')
+            .eq('firebase_store_id', storeConfig.id)
+            .single();
+            
+        if (companyData) {
+            setFormData(prev => ({
+                ...prev,
+                name: companyData.x_nome,
+                cnpj: masks.cnpj(companyData.cnpj),
+                ie: companyData.ie,
+                crt: String(companyData.crt),
+                cnae: companyData.cnae,
+                address: {
+                    zip: masks.cep(companyData.cep),
+                    street: companyData.x_lgr,
+                    number: companyData.nro,
+                    complement: companyData.xcpl,
+                    neighborhood: companyData.xbairro,
+                    city: companyData.xmun,
+                    state: companyData.uf,
+                    ibgeCode: companyData.cmun
+                }
+            }));
+        }
+
+        // 2. Carregar Perfis Tributários
+        const { data: profilesData } = await supabase
+            .from('fiscal_tax_profiles')
+            .select('*')
+            .eq('firebase_store_id', storeConfig.id);
+            
+        if (profilesData) setTaxProfiles(profilesData);
+    };
+    loadAllData();
+  }, [storeConfig.id]);
+
+  // --- MANIPULADORES DE FORMULÁRIO (Mantidos da Fase 1) ---
+  const handleChange = (field, value) => {
+    let finalValue = value;
+    if (field === 'cnpj') finalValue = masks.cnpj(value);
+    if (field === 'phone') finalValue = masks.phone(value);
+    if (field === 'ie') finalValue = masks.numbersOnly(value).substring(0, 14);
+    if (field === 'cnae') finalValue = masks.numbersOnly(value).substring(0, 7);
+    setFormData(prev => ({ ...prev, [field]: finalValue }));
+  };
+
+  const handleAddressChange = (field, value) => {
+    let finalValue = value;
+    if (field === 'zip') finalValue = masks.cep(value);
+    setFormData(prev => ({
+      ...prev,
+      address: { ...prev.address, [field]: finalValue }
+    }));
+  };
+
+  const handleCepBlur = async () => {
+    const cep = formData.address.zip.replace(/\D/g, '');
+    if (cep.length !== 8) return;
+    setIsLoadingCep(true);
+    try {
+      const response = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
+      const data = await response.json();
+      if (!data.erro) {
+        setFormData(prev => ({
+          ...prev,
+          address: { ...prev.address, street: data.logradouro, neighborhood: data.bairro, city: data.localidade, state: data.uf, ibgeCode: data.ibge }
+        }));
+        showNotification('Endereço encontrado!', 'success');
+      } else {
+        showNotification('CEP não encontrado.', 'error');
+      }
+    } catch (error) {
+      showNotification('Erro ao buscar CEP.', 'error');
+    } finally {
+      setIsLoadingCep(false);
+    }
+  };
+
+  const handleSaveCompanyInfo = async () => {
+    if (!formData.address.ibgeCode) return showNotification('Atenção: Código IBGE obrigatório.', 'error');
+    
+    const fiscalPayload = {
+        firebase_store_id: storeConfig.id,
+        x_nome: formData.name,
+        cnpj: formData.cnpj.replace(/\D/g, ''),
+        ie: formData.ie.replace(/\D/g, ''),
+        crt: parseInt(formData.crt),
+        cnae: formData.cnae.replace(/\D/g, ''),
+        x_lgr: formData.address.street,
+        nro: formData.address.number,
+        xcpl: formData.address.complement,
+        xbairro: formData.address.neighborhood,
+        cmun: formData.address.ibgeCode,
+        xmun: formData.address.city,
+        uf: formData.address.state,
+        cep: formData.address.zip.replace(/\D/g, '')
+    };
+
+    try {
+        const { error } = await supabase.from('fiscal_emitters').upsert(fiscalPayload, { onConflict: 'firebase_store_id' });
+        if (error) throw error;
+        setCompanyInfo(formData); 
+        showNotification('Dados Fiscais salvos!', 'success');
+    } catch (error) {
+        showNotification('Erro ao salvar: ' + error.message, 'error');
+    }
+  };
+
+  // --- LÓGICA DE PERFIS TRIBUTÁRIOS (FASE 2) ---
+  const handleAddProfile = async () => {
+    if (!newProfile.name) return showNotification('Dê um nome ao perfil (Ex: Revenda Padrão)', 'error');
+
+    try {
+      const payload = {
+        firebase_store_id: storeConfig.id,
+        name: newProfile.name,
+        origin: parseInt(newProfile.origin),
+        cst_nfe: newProfile.cst_nfe,
+        cst_pis_cofins: newProfile.cst_pis_cofins
+      };
+
+      const { data, error } = await supabase.from('fiscal_tax_profiles').insert(payload).select();
+      if (error) throw error;
+
+      setTaxProfiles([...taxProfiles, data[0]]);
+      setNewProfile({ name: '', origin: '0', cst_nfe: '102', cst_pis_cofins: '49' }); // Reset
+      showNotification('Perfil tributário criado!', 'success');
+    } catch (error) {
+      console.error(error);
+      showNotification('Erro ao criar perfil.', 'error');
+    }
+  };
+
+  const handleDeleteProfile = async (id) => {
+    if (!window.confirm("Tem certeza? Produtos usando este perfil ficarão sem regra.")) return;
+    try {
+      const { error } = await supabase.from('fiscal_tax_profiles').delete().eq('id', id);
+      if (error) throw error;
+      setTaxProfiles(taxProfiles.filter(p => p.id !== id));
+      showNotification('Perfil removido.', 'success');
+    } catch (error) {
+      showNotification('Erro ao remover.', 'error');
+    }
+  };
+
+  // --- LÓGICA DE USUÁRIOS E SWITCH ---
   const handleAddUser = () => {
     if (!newUser.username || !newUser.password) return showNotification('Preencha usuário e senha', 'error');
     if (users.some(u => u.username === newUser.username)) return showNotification('Usuário já existe', 'error');
-    
     setUsers([...users, { id: Date.now(), ...newUser }]);
     setNewUser({ username: '', password: '' });
     showNotification('Usuário cadastrado', 'success');
   };
-
   const handleDeleteUser = (id) => {
     if (users.length <= 1) return showNotification('Não é possível remover o último usuário', 'error');
     setUsers(users.filter(u => u.id !== id));
     showNotification('Usuário removido', 'success');
   };
-
-  const handleSaveCompanyInfo = () => {
-    setCompanyInfo(editingCompanyInfo);
-    showNotification('Dados da empresa atualizados!', 'success');
-  };
-
-  const toggleWholesale = () => {
-    const newState = !storeConfig.enableWholesale;
-    setStoreConfig({ ...storeConfig, enableWholesale: newState });
-    showNotification(`Modo Atacado ${newState ? 'ATIVADO' : 'DESATIVADO'}`, 'success');
-  };
-
-  // Componente Switch Reutilizável (Interno para consistência visual)
   const Switch = ({ active, onClick, colorClass = "bg-indigo-600" }) => (
-    <button 
-      onClick={onClick}
-      className={`relative w-12 h-6 flex items-center rounded-full p-1 transition-colors duration-300 ease-in-out focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${active ? colorClass : 'bg-slate-300'}`}
-    >
-      <div 
-        className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-transform duration-300 ease-in-out ${active ? 'translate-x-6' : 'translate-x-0'}`} 
-      />
+    <button onClick={onClick} className={`relative w-12 h-6 flex items-center rounded-full p-1 transition-colors duration-300 ${active ? colorClass : 'bg-slate-300'}`}>
+      <div className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-transform duration-300 ${active ? 'translate-x-6' : 'translate-x-0'}`} />
     </button>
   );
 
   return (
     <div className="space-y-6 pb-8">
-       {/* --- SEÇÃO: PREFERÊNCIAS DO SISTEMA --- */}
-       <div className="bg-white p-6 rounded border border-slate-200 shadow-sm">
-         <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Settings size={20}/> Preferências do Sistema</h3>
-         
-         <div className="space-y-4">
-            {/* Opção 1: Atacado */}
-            <div className="flex items-center justify-between p-4 bg-slate-50 rounded border border-slate-200">
-                <div>
-                  <h4 className="font-bold text-slate-800 text-sm">Habilitar Venda por Atacado</h4>
-                  <p className="text-xs text-slate-500 mt-1">Habilita campos de "Qtd no Fardo" no estoque e botões de venda atacado no PDV.</p>
-                </div>
-                <Switch 
-                    active={storeConfig.enableWholesale} 
-                    onClick={toggleWholesale} 
-                />
+       {/* MENU DE ABAS */}
+       <div className="flex gap-2 border-b border-slate-200 pb-1 overflow-x-auto">
+          <button onClick={() => setActiveTab('general')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors whitespace-nowrap ${activeTab === 'general' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>🏢 Dados Fiscais</button>
+          <button onClick={() => setActiveTab('address')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors whitespace-nowrap ${activeTab === 'address' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>📍 Endereço</button>
+          {/* NOVA ABA AQUI */}
+          <button onClick={() => setActiveTab('tax_profiles')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors whitespace-nowrap ${activeTab === 'tax_profiles' ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>🏷️ Perfis Fiscais</button>
+          
+          <button onClick={() => setActiveTab('system')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors whitespace-nowrap ${activeTab === 'system' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>⚙️ Sistema</button>
+          <button onClick={() => setActiveTab('users')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors whitespace-nowrap ${activeTab === 'users' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>👥 Usuários</button>
+       </div>
+
+       {/* ABA GERAL (Mantida) */}
+       {activeTab === 'general' && (
+         <div className="bg-white p-6 rounded-b border border-t-0 border-slate-200 shadow-sm animate-in fade-in">
+           <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Package size={20}/> Identificação do Emitente</h3>
+           <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+             <div className="md:col-span-6">
+               <label className="block text-xs font-bold text-slate-500 mb-1">Razão Social</label>
+               <input className="w-full border p-2 rounded text-sm bg-slate-50 font-medium uppercase" value={formData.name} onChange={e => handleChange('name', e.target.value)} />
+             </div>
+             <div className="md:col-span-3">
+               <label className="block text-xs font-bold text-slate-500 mb-1">CNPJ</label>
+               <input className="w-full border p-2 rounded text-sm font-mono" value={formData.cnpj} onChange={e => handleChange('cnpj', e.target.value)} placeholder="00.000.000/0000-00" maxLength={18} />
+             </div>
+             <div className="md:col-span-3">
+               <label className="block text-xs font-bold text-slate-500 mb-1">Inscrição Estadual</label>
+               <input className="w-full border p-2 rounded text-sm" value={formData.ie} onChange={e => handleChange('ie', e.target.value)} placeholder="Somente números" maxLength={14} />
+             </div>
+             <div className="md:col-span-12 border-t my-2"></div>
+             <div className="md:col-span-4">
+               <label className="block text-xs font-bold text-indigo-600 mb-1">Regime Tributário (CRT)</label>
+               <select className="w-full border p-2 rounded text-sm bg-indigo-50" value={formData.crt} onChange={e => handleChange('crt', e.target.value)}>
+                 <option value="1">1 - Simples Nacional</option>
+                 <option value="3">3 - Regime Normal</option>
+               </select>
+             </div>
+             <div className="md:col-span-4">
+               <label className="block text-xs font-bold text-slate-500 mb-1">CNAE Principal</label>
+               <input className="w-full border p-2 rounded text-sm" value={formData.cnae} onChange={e => handleChange('cnae', e.target.value)} placeholder="7 dígitos" maxLength={7} />
+             </div>
+             <div className="md:col-span-4">
+               <label className="block text-xs font-bold text-slate-500 mb-1">E-mail Fiscal</label>
+               <input className="w-full border p-2 rounded text-sm" value={formData.email} onChange={e => handleChange('email', e.target.value)} />
+             </div>
+           </div>
+           <div className="mt-6 flex justify-end">
+             <button onClick={handleSaveCompanyInfo} className="bg-indigo-600 text-white px-6 py-2 rounded text-sm font-bold hover:bg-indigo-700 shadow-sm flex items-center gap-2"><Save size={18}/> Salvar Dados Fiscais</button>
+           </div>
+         </div>
+       )}
+
+       {/* ABA ENDEREÇO (Mantida) */}
+       {activeTab === 'address' && (
+         <div className="bg-white p-6 rounded-b border border-t-0 border-slate-200 shadow-sm animate-in fade-in">
+           <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><MapPin size={20}/> Endereço Fiscal</h3>
+           <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+             <div className="md:col-span-3">
+               <label className="block text-xs font-bold text-slate-500 mb-1">CEP</label>
+               <div className="relative">
+                 <input className="w-full border p-2 rounded text-sm font-bold text-slate-700" value={formData.address.zip} onChange={e => handleAddressChange('zip', e.target.value)} onBlur={handleCepBlur} placeholder="00000-000" maxLength={9} />
+                  {isLoadingCep && <div className="absolute right-2 top-2.5 animate-spin rounded-full h-4 w-4 border-b-2 border-indigo-600"></div>}
+               </div>
+             </div>
+             <div className="md:col-span-7">
+               <label className="block text-xs font-bold text-slate-500 mb-1">Logradouro</label>
+               <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.street} onChange={e => handleAddressChange('street', e.target.value)} />
+             </div>
+             <div className="md:col-span-2">
+               <label className="block text-xs font-bold text-slate-500 mb-1">Número</label>
+               <input className="w-full border p-2 rounded text-sm" value={formData.address.number} onChange={e => handleAddressChange('number', e.target.value)} />
+             </div>
+             <div className="md:col-span-4">
+               <label className="block text-xs font-bold text-slate-500 mb-1">Bairro</label>
+               <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.neighborhood} onChange={e => handleAddressChange('neighborhood', e.target.value)} />
+             </div>
+             <div className="md:col-span-4">
+               <label className="block text-xs font-bold text-slate-500 mb-1">Cidade</label>
+               <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.city} onChange={e => handleAddressChange('city', e.target.value)} readOnly />
+             </div>
+             <div className="md:col-span-2">
+               <label className="block text-xs font-bold text-slate-500 mb-1">UF</label>
+               <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.state} onChange={e => handleAddressChange('state', e.target.value)} readOnly />
+             </div>
+             <div className="md:col-span-2">
+               <label className="block text-xs font-bold text-indigo-600 mb-1">Cód. IBGE</label>
+               <input className="w-full border p-2 rounded text-sm bg-indigo-50 font-mono text-xs" value={formData.address.ibgeCode} readOnly />
+             </div>
+             <div className="md:col-span-12">
+               <label className="block text-xs font-bold text-slate-500 mb-1">Complemento</label>
+               <input className="w-full border p-2 rounded text-sm" value={formData.address.complement} onChange={e => handleAddressChange('complement', e.target.value)} />
+             </div>
+           </div>
+           <div className="mt-6 flex justify-end">
+             <button onClick={handleSaveCompanyInfo} className="bg-slate-800 text-white px-6 py-2 rounded text-sm font-bold hover:bg-slate-700 shadow-sm flex items-center gap-2"><Save size={18}/> Atualizar Endereço</button>
+           </div>
+         </div>
+       )}
+
+       {/* --- NOVA ABA: PERFIS TRIBUTÁRIOS (FASE 2) --- */}
+       {activeTab === 'tax_profiles' && (
+         <div className="bg-white p-6 rounded-b border border-t-0 border-slate-200 shadow-sm animate-in fade-in">
+           <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Tags size={20}/> Perfis de Tributação (Tax Groups)</h3>
+           <p className="text-sm text-slate-500 mb-6">Crie perfis para agrupar produtos com a mesma regra de imposto (Ex: Revenda Padrão, Bebida Fria, etc). Depois, basta vincular o produto ao perfil.</p>
+           
+           {/* Formulário de Criação */}
+           <div className="bg-emerald-50 p-4 rounded-lg border border-emerald-100 mb-6">
+              <h4 className="text-sm font-bold text-emerald-800 mb-3">Novo Perfil Tributário</h4>
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+                  <div className="md:col-span-4">
+                      <label className="block text-xs font-bold text-emerald-700 mb-1">Nome do Perfil</label>
+                      <input className="w-full border border-emerald-200 p-2 rounded text-sm" placeholder="Ex: Revenda Padrão" value={newProfile.name} onChange={e => setNewProfile({...newProfile, name: e.target.value})} />
+                  </div>
+                  <div className="md:col-span-2">
+                      <label className="block text-xs font-bold text-emerald-700 mb-1">Origem</label>
+                      <select className="w-full border border-emerald-200 p-2 rounded text-sm" value={newProfile.origin} onChange={e => setNewProfile({...newProfile, origin: e.target.value})}>
+                          <option value="0">0 - Nacional</option>
+                          <option value="1">1 - Imp. Direta</option>
+                          <option value="2">2 - Estrangeira (Merc. Int)</option>
+                      </select>
+                  </div>
+                  <div className="md:col-span-3">
+                      <label className="block text-xs font-bold text-emerald-700 mb-1">CSOSN / CST (Vendas)</label>
+                      <select className="w-full border border-emerald-200 p-2 rounded text-sm" value={newProfile.cst_nfe} onChange={e => setNewProfile({...newProfile, cst_nfe: e.target.value})}>
+                          <option value="102">102 - Tributada (Simples)</option>
+                          <option value="500">500 - Subst. Tributária (Simples)</option>
+                          <option value="900">900 - Outros (Simples)</option>
+                          <option value="00">00 - Tributada Integral (Normal)</option>
+                          <option value="60">60 - Subst. Tributária (Normal)</option>
+                      </select>
+                  </div>
+                  <div className="md:col-span-2">
+                      <label className="block text-xs font-bold text-emerald-700 mb-1">PIS/COFINS</label>
+                      <select className="w-full border border-emerald-200 p-2 rounded text-sm" value={newProfile.cst_pis_cofins} onChange={e => setNewProfile({...newProfile, cst_pis_cofins: e.target.value})}>
+                          <option value="49">49 - Outras (Simples)</option>
+                          <option value="01">01 - Tributável (Normal)</option>
+                      </select>
+                  </div>
+                  <div className="md:col-span-1">
+                      <button onClick={handleAddProfile} className="w-full bg-emerald-600 text-white p-2 rounded hover:bg-emerald-700 flex justify-center items-center"><Plus size={20}/></button>
+                  </div>
+              </div>
+           </div>
+
+           {/* Lista de Perfis */}
+           <div className="border rounded-lg overflow-hidden">
+             <table className="w-full text-left text-sm">
+               <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
+                 <tr>
+                   <th className="p-3">Nome do Perfil</th>
+                   <th className="p-3">Origem</th>
+                   <th className="p-3">Situação (CSOSN)</th>
+                   <th className="p-3 text-right">Ações</th>
+                 </tr>
+               </thead>
+               <tbody className="divide-y divide-slate-100">
+                 {taxProfiles.length === 0 ? (
+                     <tr><td colSpan={4} className="p-6 text-center text-slate-400">Nenhum perfil criado. Crie o primeiro acima.</td></tr>
+                 ) : (
+                     taxProfiles.map(profile => (
+                        <tr key={profile.id} className="hover:bg-slate-50">
+                            <td className="p-3 font-bold text-slate-700">{profile.name}</td>
+                            <td className="p-3 text-slate-500">{profile.origin}</td>
+                            <td className="p-3"><span className="bg-slate-100 text-slate-600 px-2 py-1 rounded text-xs font-bold">{profile.cst_nfe}</span></td>
+                            <td className="p-3 text-right">
+                                <button onClick={() => handleDeleteProfile(profile.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={16}/></button>
+                            </td>
+                        </tr>
+                     ))
+                 )}
+               </tbody>
+             </table>
+           </div>
+         </div>
+       )}
+
+       {/* SISTEMA e USUÁRIOS (Mantidos) */}
+       {activeTab === 'system' && (
+         <div className="bg-white p-6 rounded-b border border-t-0 border-slate-200 shadow-sm">
+            <h3 className="font-bold text-slate-800 mb-4">Preferências Operacionais</h3>
+            <div className="space-y-4">
+               <div className="flex items-center justify-between p-4 bg-slate-50 rounded border border-slate-200">
+                  <div><h4 className="font-bold text-slate-800 text-sm">Habilitar Venda por Atacado</h4></div>
+                  <Switch active={storeConfig.enableWholesale} onClick={() => setStoreConfig({ ...storeConfig, enableWholesale: !storeConfig.enableWholesale })} />
+               </div>
+               <div className="flex items-center justify-between p-4 bg-slate-50 rounded border border-slate-200">
+                  <div><h4 className="font-bold text-slate-800 text-sm">Permitir Edição Rápida no PDV</h4></div>
+                  <Switch active={storeConfig.enablePDVEditing} onClick={() => setStoreConfig({ ...storeConfig, enablePDVEditing: !storeConfig.enablePDVEditing })} colorClass="bg-emerald-600" />
+               </div>
             </div>
-
-            {/* Opção 2: Edição no PDV */}
-            <div className="flex items-center justify-between p-4 bg-slate-50 rounded border border-slate-200">
-                <div>
-                  <h4 className="font-bold text-slate-800 text-sm">Permitir Edição Rápida no PDV</h4>
-                  <p className="text-xs text-slate-500 mt-1">Exibe botão de editar nos produtos direto na tela de vendas.</p>
-                </div>
-                <Switch 
-                    active={storeConfig.enablePDVEditing} 
-                    onClick={() => {
-                        const newState = !storeConfig.enablePDVEditing;
-                        setStoreConfig({ ...storeConfig, enablePDVEditing: newState });
-                        showNotification(`Edição no PDV ${newState ? 'LIBERADA' : 'BLOQUEADA'}`, 'success');
-                    }}
-                    colorClass="bg-emerald-600" 
-                />
-            </div>
          </div>
-       </div>
+       )}
 
-       {/* --- SEÇÃO: DADOS DA EMPRESA --- */}
-       <div className="bg-white p-6 rounded border border-slate-200 shadow-sm">
-         <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Package size={20}/> Dados da Empresa (para Cupons)</h3>
-         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-           <div>
-             <label className="block text-xs font-bold text-slate-500 mb-1">Nome da Empresa</label>
-             <input className="w-full border p-2 rounded text-sm focus:ring-2 focus:ring-indigo-500 outline-none" value={editingCompanyInfo.name} onChange={e => setEditingCompanyInfo({...editingCompanyInfo, name: e.target.value})} />
+       {activeTab === 'users' && (
+         <div className="bg-white p-6 rounded-b border border-t-0 border-slate-200 shadow-sm">
+           <h3 className="font-bold text-slate-800 mb-4">Gerenciar Usuários</h3>
+           <div className="flex gap-4 items-end mb-6">
+             <div className="flex-1"><label className="block text-xs font-bold text-slate-500 mb-1">Usuário</label><input className="w-full border p-2 rounded text-sm" value={newUser.username} onChange={e => setNewUser({...newUser, username: e.target.value})} /></div>
+             <div className="flex-1"><label className="block text-xs font-bold text-slate-500 mb-1">Senha</label><input className="w-full border p-2 rounded text-sm" type="password" value={newUser.password} onChange={e => setNewUser({...newUser, password: e.target.value})} /></div>
+             <button onClick={handleAddUser} className="bg-slate-800 text-white px-4 py-2 rounded text-sm font-bold h-10 flex items-center gap-2"><Plus size={16}/> Adicionar</button>
            </div>
-           <div>
-             <label className="block text-xs font-bold text-slate-500 mb-1">CNPJ</label>
-             <input className="w-full border p-2 rounded text-sm focus:ring-2 focus:ring-indigo-500 outline-none" value={editingCompanyInfo.cnpj} onChange={e => setEditingCompanyInfo({...editingCompanyInfo, cnpj: e.target.value})} />
-           </div>
-           <div className="md:col-span-2">
-             <label className="block text-xs font-bold text-slate-500 mb-1">Endereço</label>
-             <input className="w-full border p-2 rounded text-sm focus:ring-2 focus:ring-indigo-500 outline-none" value={editingCompanyInfo.address} onChange={e => setEditingCompanyInfo({...editingCompanyInfo, address: e.target.value})} />
-           </div>
-           <div>
-             <label className="block text-xs font-bold text-slate-500 mb-1">Telefone</label>
-             <input className="w-full border p-2 rounded text-sm focus:ring-2 focus:ring-indigo-500 outline-none" value={editingCompanyInfo.phone} onChange={e => setEditingCompanyInfo({...editingCompanyInfo, phone: e.target.value})} />
+           <div className="border rounded overflow-hidden">
+              <table className="w-full text-left text-sm">
+              <thead className="bg-slate-50 text-slate-500 text-xs font-semibold"><tr><th className="p-4">Usuário</th><th className="p-4">Senha</th><th className="p-4 text-right">Ação</th></tr></thead>
+              <tbody className="divide-y divide-slate-100">
+                  {users.map(u => (
+                  <tr key={u.id}>
+                      <td className="p-4 font-medium">{u.username}</td><td className="p-4 text-slate-500">••••••</td>
+                      <td className="p-4 text-right"><button onClick={() => handleDeleteUser(u.id)} className="text-slate-400 hover:text-red-500"><Trash2 size={18}/></button></td>
+                  </tr>))}
+              </tbody></table>
            </div>
          </div>
-         <button onClick={handleSaveCompanyInfo} className="bg-slate-800 text-white px-4 py-2 rounded text-sm font-bold hover:bg-slate-700 transition-colors">Salvar Dados da Empresa</button>
-       </div>
+       )}
 
-       {/* --- SEÇÃO: USUÁRIOS --- */}
-       <div className="bg-white p-6 rounded border border-slate-200 shadow-sm">
-         <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Settings size={20}/> Gerenciar Usuários</h3>
-         <div className="flex gap-4 items-end mb-6">
-           <div className="flex-1">
-             <label className="block text-xs font-bold text-slate-500 mb-1">Nome de Usuário</label>
-             <input className="w-full border p-2 rounded text-sm focus:ring-2 focus:ring-indigo-500 outline-none" value={newUser.username} onChange={e => setNewUser({...newUser, username: e.target.value})} placeholder="Novo usuário" />
-           </div>
-           <div className="flex-1">
-             <label className="block text-xs font-bold text-slate-500 mb-1">Senha</label>
-             <input className="w-full border p-2 rounded text-sm focus:ring-2 focus:ring-indigo-500 outline-none" type="password" value={newUser.password} onChange={e => setNewUser({...newUser, password: e.target.value})} placeholder="Senha" />
-           </div>
-           <button onClick={handleAddUser} className="bg-slate-800 text-white px-4 py-2 rounded text-sm font-bold hover:bg-slate-700 h-10 flex items-center gap-2 transition-colors"><Plus size={16}/> Adicionar</button>
-         </div>
-
-         <div className="border rounded overflow-hidden">
-            <table className="w-full text-left text-sm">
-            <thead className="bg-slate-50 text-slate-500 uppercase text-xs font-semibold">
-                <tr><th className="p-4">Usuário</th><th className="p-4">Senha</th><th className="p-4 text-right">Ação</th></tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-                {users.map(u => (
-                <tr key={u.id} className="hover:bg-slate-50">
-                    <td className="p-4 font-medium">{u.username}</td>
-                    <td className="p-4 text-slate-500">••••••</td>
-                    <td className="p-4 text-right">
-                    <button onClick={() => handleDeleteUser(u.id)} className="text-slate-400 hover:text-red-500 transition-colors"><Trash2 size={18}/></button>
-                    </td>
-                </tr>
-                ))}
-            </tbody>
-            </table>
-         </div>
-       </div>
-
-       {/* --- RODAPÉ DA MARCA (Solicitado) --- */}
-       <div className="pt-8 pb-4 flex flex-col items-center justify-center opacity-60 hover:opacity-100 transition-opacity">
+       <div className="pt-8 pb-4 flex flex-col items-center justify-center opacity-60">
             <img src={logo} alt="Máquina Software" className="h-10 mb-2 grayscale" />
             <p className="text-xs font-bold text-slate-500">Made by Máquina Software</p>
-            <p className="text-[10px] text-slate-400">DistriPro ERP v2.1</p>
+            <p className="text-[10px] text-slate-400">DistriPro ERP v2.3 - Fiscal Ready</p>
        </div>
     </div>
   );

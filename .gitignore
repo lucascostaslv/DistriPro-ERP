@@ -26,3 +26,6 @@ firebase-debug.log*
 
 # Firebase
 .firebase/
+
+#Supabase
+.env
