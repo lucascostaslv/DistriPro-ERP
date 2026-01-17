@@ -252,6 +252,9 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
         const vUnCom = parseFloat(getTagContent(prod, "vUnCom") || "0");
         const cProd = getTagContent(prod, "cProd");
         const xProd = getTagContent(prod, "xProd");
+        const ncm = getTagContent(prod, "NCM");
+        const cEAN = getTagContent(prod, "cEAN");
+        const uCom = getTagContent(prod, "uCom");
         
         // ... (Lógica de busca de produto existente) ...
         let existingProd = products.find(p => String(p.cbaCode) === String(cProd) || String(p.manufacturingCode) === String(cProd));
@@ -266,6 +269,8 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
             productId: existingProd ? existingProd.id : '',
             systemSku: existingProd ? existingProd.cbaCode : '',
             xmlProductCode: cProd, 
+            ncm: ncm || '',
+            ean: (cEAN && cEAN !== "SEM GTIN") ? cEAN : '',
             xmlProductName: xProd,
             productName: existingProd ? existingProd.name : xProd,
             unit: getTagContent(prod, "uCom"),
@@ -466,6 +471,11 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
                    unit: newItem.unit || 'UN',
                    cost: Number(newItem.unitPrice),
                    price: Number(newItem.unitPrice) * 1.5, // Margem padrão
+                   unit: newItem.unit || 'UN', // Garante que usa a unidade do XML se disponível
+                    ncm: newItem.ncm ? String(newItem.ncm).replace(/\D/g, '') : '', 
+                    ean: newItem.ean || '',
+                    origin: '0', // Padrão Nacional
+                    taxProfileId: null, // Deixa null para forçar você a conferir no Estoque depois
                    stock: 0, // O estoque será somado no passo de atualização abaixo
                    createdAt: serverTimestamp()
                };

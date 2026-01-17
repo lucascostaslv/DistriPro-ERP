@@ -17,6 +17,7 @@ import EntradaNotas from './EntradaNotas/EntradaNotas';
 import Transactions from './EntradaNotas/Transactions';
 import PriceGroups from './PriceGroups';
 import { supabase } from './supabaseClient';
+import InventoryWMS from './InventoryWMS';
 
 // --- UTILS ---
 const formatCurrency = (value) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
@@ -1181,335 +1182,6 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
   );
 };
 
-const InventoryWMS = ({ products, setProducts, groups, setGroups, showNotification, storeConfig }) => {
-  const [activeTab, setActiveTab] = useState('products');
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [editingProduct, setEditingProduct] = useState(null);
-  const [filter, setFilter] = useState('all');
-  const [searchTerm, setSearchTerm] = useState('');
-  const [showGroupSuggestions, setShowGroupSuggestions] = useState(false);
-  const [newGroupName, setNewGroupName] = useState('');
-  const [confirmModal, setConfirmModal] = useState({ isOpen: false, onConfirm: null, title: '', message: '' });
-
-  // Verifica se o modo atacado está ativo nas configurações
-  const isWholesaleEnabled = storeConfig?.enableWholesale;
-
-  const handleSave = (product) => {
-    const productWithNumbers = {
-      ...product,
-      cost: parseFloat(String(product.cost || '0').replace(',', '.')) || 0,
-      price: parseFloat(String(product.price || '0').replace(',', '.')) || 0,
-      minStock: parseInt(product.minStock, 10) || 0,
-      // Novos campos de atacado
-      wholesalePrice: parseFloat(String(product.wholesalePrice || '0').replace(',', '.')) || 0,
-      packQuantity: parseInt(product.packQuantity, 10) || 0,
-      // Mantendo compatibilidade com lógica antiga de fardo separado, se houver
-      conversionFactor: parseInt(product.conversionFactor, 10) || 1,
-    };
-    
-    // Se o modo atacado estiver desligado, zera os valores para evitar sujeira no banco
-    if (!isWholesaleEnabled) {
-        productWithNumbers.wholesalePrice = 0;
-        productWithNumbers.packQuantity = 0;
-    }
-
-    const { childId, ...productData } = productWithNumbers;
-
-    // Lógica Unificada (Simples) ou Legada (Pack)
-    if (productData.itemType === 'unit' || !productData.itemType) {
-        productData.conversionFactor = 1;
-        productData.itemType = 'unit'; // Garante tipo unitário padrão
-
-        if (productData.id) {
-            setProducts(products.map(p => p.id === productData.id ? productData : p));
-            showNotification('Produto atualizado.', 'success');
-        } else {
-            const maxCba = products.reduce((max, p) => { const code = parseInt(p.cbaCode, 10); return !isNaN(code) && code > max ? code : max; }, 999);
-            const nextCba = String(maxCba + 1);
-            setProducts([...products, { ...productData, id: Date.now(), cbaCode: nextCba, stock: 0, batches: [] }]);
-            showNotification('Produto cadastrado.', 'success');
-        }
-    } else {
-        // Fallback para lógica antiga de 'pack' separado, se ainda for usada
-        // (Mantivemos sua lógica original aqui para não quebrar cadastros antigos de Fardos isolados)
-        if (productData.id) {
-           setProducts(products.map(p => p.id === productData.id ? productData : p));
-        } else {
-           const maxCba = products.reduce((max, p) => { const code = parseInt(p.cbaCode, 10); return !isNaN(code) && code > max ? code : max; }, 999);
-           setProducts([...products, { ...productData, id: Date.now(), cbaCode: String(maxCba+1), stock: 0, batches: [] }]);
-        }
-        showNotification('Item tipo Fardo/Pack salvo.', 'success');
-    }
-
-    setIsModalOpen(false);
-    setEditingProduct(null);
-  };
-
-  const deleteProduct = (id) => {
-    setConfirmModal({
-      isOpen: true,
-      title: 'Confirmar Exclusão',
-      message: 'Tem certeza que deseja remover este produto? Esta ação não pode ser desfeita.',
-      onConfirm: () => {
-        setProducts(products.filter(p => p.id !== id));
-        showNotification('Produto removido.', 'success');
-        setConfirmModal({ isOpen: false });
-      }
-    });
-  };
-
-  const deleteGroup = (id) => {
-    setConfirmModal({
-      isOpen: true,
-      title: 'Confirmar Exclusão',
-      message: 'Tem certeza que deseja remover este grupo?',
-      onConfirm: () => {
-        setGroups(groups.filter(gr => gr.id !== id));
-        showNotification('Grupo removido.', 'success');
-        setConfirmModal({ isOpen: false });
-      }
-    });
-  };
-
-  const handleSaveGroup = () => {
-    if (!newGroupName) return showNotification('Nome do grupo obrigatório', 'error');
-    const maxCode = groups.reduce((max, g) => Math.max(max, parseInt(g.code, 10) || 0), 0);
-    const nextCode = String(maxCode + 1);
-    setGroups([...groups, { id: Date.now(), code: nextCode, name: newGroupName }]);
-    setNewGroupName('');
-    showNotification(`Grupo ${nextCode} - ${newGroupName} criado!`, 'success');
-  };
-
-  const filteredProducts = products.filter(p => {
-    const term = searchTerm.toLowerCase();
-    const matchesSearch = 
-      p.name.toLowerCase().includes(term) ||
-      (p.cbaCode && p.cbaCode.toLowerCase().includes(term)) ||
-      (p.manufacturingCode && p.manufacturingCode.toLowerCase().includes(term));
-
-    if (!matchesSearch) return false;
-    if (filter === 'critical') return p.stock <= p.minStock;
-    return true;
-  });
-
-  return (
-    <div className="space-y-4">
-      <div className="flex gap-2 border-b border-slate-200 pb-2">
-        <button onClick={() => setActiveTab('products')} className={`px-4 py-2 text-sm font-medium rounded ${activeTab === 'products' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Produtos</button>
-        <button onClick={() => setActiveTab('groups')} className={`px-4 py-2 text-sm font-medium rounded ${activeTab === 'groups' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Grupos de Itens</button>
-      </div>
-
-      {activeTab === 'products' && (
-      <>
-      <div className="flex justify-between items-center bg-white p-4 rounded border border-slate-200 shadow-sm">
-        <div className="flex gap-2">
-          <button onClick={() => setFilter('all')} className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${filter === 'all' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>Todos</button>
-          <button onClick={() => setFilter('critical')} className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${filter === 'critical' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-50'}`}>Críticos</button>
-        </div>
-        <div className="relative mx-4 flex-1">
-          <Search className="absolute left-3 top-2.5 text-slate-400" size={16}/>
-          <input className="w-full pl-9 pr-4 py-1.5 border rounded text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Buscar no estoque (Nome, Item, Fab)..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
-        </div>
-        <button onClick={() => { setEditingProduct({ itemType: 'unit' }); setIsModalOpen(true); }} className="bg-slate-800 text-white px-4 py-2 rounded text-sm font-medium hover:bg-slate-700 flex items-center gap-2">
-          <Plus size={16} /> Novo Item
-        </button>
-      </div>
-
-      <div className="bg-white rounded border border-slate-200 shadow-sm overflow-hidden">
-        <table className="w-full text-left text-sm">
-          <thead className="bg-slate-50 text-slate-500 uppercase text-xs font-semibold">
-            <tr>
-              <th className="p-4">Produto</th>
-              <th className="p-4">Códigos</th>
-              <th className="p-4">Cat</th>
-              <th className="p-4 text-right">Custo</th>
-              <th className="p-4 text-right">Venda (V/A)</th>
-              <th className="p-4 text-center">Estoque</th>
-              <th className="p-4 text-right">Ação</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {filteredProducts.map(p => (
-              <tr key={p.id} className="hover:bg-slate-50">
-                <td className="p-4 font-medium text-slate-800">
-                    {p.name}
-                    {p.packQuantity > 1 && <span className="ml-2 text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded border border-indigo-200">Atacado: {p.packQuantity}un</span>}
-                </td>
-                <td className="p-4 text-xs text-slate-500">
-                  <div title="Código Item (Sistema)">Item: {p.cbaCode || '-'}</div>
-                  <div title="Código Fabricação">FAB: {p.manufacturingCode || '-'}</div>
-                </td>
-                <td className="p-4 text-slate-500">{p.category}</td>
-                <td className="p-4 text-right text-slate-600">{formatCurrency(p.cost)}</td>
-                <td className="p-4 text-right">
-                  <div className="font-bold text-slate-700">{formatCurrency(p.price)}</div>
-                  {p.wholesalePrice > 0 && <div className="text-xs text-emerald-600 font-bold" title={`Preço Atacado (Fardo de ${p.packQuantity})`}>{formatCurrency(p.wholesalePrice)}</div>}
-                </td>
-                <td className="p-4 text-center">
-                  <span className={`px-2 py-1 rounded text-xs font-bold ${getDisplayStock(p, products) <= p.minStock ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
-                    {getDisplayStock(p, products)} un.
-                  </span>
-                </td>
-                <td className="p-4 text-right flex justify-end gap-2">
-                  <button onClick={() => { setEditingProduct(p); setIsModalOpen(true); }} className="text-slate-400 hover:text-indigo-600"><FileText size={18}/></button>
-                  <button onClick={() => deleteProduct(p.id)} className="text-slate-400 hover:text-red-500"><Trash2 size={18}/></button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title={editingProduct?.id ? "Editar Produto" : "Novo Produto"}>
-        <form onSubmit={(e) => { e.preventDefault(); handleSave(editingProduct); }} className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Código Item (Sistema)</label>
-              <input className="w-full border p-2 rounded text-sm bg-slate-100 text-slate-500" value={editingProduct?.id ? editingProduct.cbaCode : 'Automático'} disabled />
-            </div>
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Cód. Fabricação</label>
-              <input className="w-full border p-2 rounded text-sm" value={editingProduct?.manufacturingCode || ''} onChange={e => setEditingProduct({...editingProduct, manufacturingCode: e.target.value})} placeholder="Ex: 789..." />
-            </div>
-            
-            <div className="col-span-2">
-              <label className="block text-xs font-bold text-slate-700 mb-1">Nome do Produto</label>
-              <input className="w-full border p-2 rounded text-sm" value={editingProduct?.name || ''} onChange={e => setEditingProduct({...editingProduct, name: e.target.value})} required/>
-            </div>
-            
-            <div className="col-span-2">
-              <label className="block text-xs font-bold text-slate-700 mb-1">Categoria</label>
-              <div className="relative">
-                <input 
-                  className="w-full border p-2 rounded text-sm" 
-                  value={editingProduct?.category || ''} 
-                  onChange={e => setEditingProduct({...editingProduct, category: e.target.value})}
-                  onFocus={() => setShowGroupSuggestions(true)}
-                  onBlur={() => setTimeout(() => setShowGroupSuggestions(false), 200)}
-                  placeholder="Selecione ou digite..."
-                />
-                {showGroupSuggestions && (
-                  <div className="absolute z-10 w-full bg-white border border-slate-200 rounded shadow-lg max-h-40 overflow-y-auto mt-1">
-                    {groups.filter(g => g.name.toLowerCase().includes((editingProduct?.category || '').toLowerCase())).map(g => (
-                      <div key={g.id} className="p-2 text-sm hover:bg-slate-100 cursor-pointer" onMouseDown={() => setEditingProduct({...editingProduct, category: g.name})}>
-                        {g.name}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Estoque Mínimo</label>
-              <input type="text" inputMode="numeric" className="w-full border p-2 rounded text-sm" value={editingProduct?.minStock || ''} onChange={e => setEditingProduct({...editingProduct, minStock: e.target.value})}/>
-            </div>
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Preço Custo (Un)</label>
-              <input type="text" inputMode="decimal" className="w-full border p-2 rounded text-sm" value={editingProduct?.cost || ''} onChange={e => setEditingProduct({...editingProduct, cost: e.target.value})}/>
-            </div>
-            
-            {/* PREÇO VAREJO */}
-            <div className="col-span-2 bg-slate-50 p-3 rounded border border-slate-200">
-               <label className="block text-xs font-bold text-slate-700 mb-1">Venda Varejo (Unitário)</label>
-               <input type="text" inputMode="decimal" className="w-full border p-2 rounded text-sm text-lg font-bold text-slate-800" value={editingProduct?.price || ''} onChange={e => setEditingProduct({...editingProduct, price: e.target.value})} placeholder="R$ 0,00"/>
-            </div>
-
-            {/* ÁREA ATACADO (CONDICIONAL) */}
-            <div className={`col-span-2 p-3 rounded border ${isWholesaleEnabled ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-100 border-slate-200 opacity-70'}`} title={!isWholesaleEnabled ? "Habilite 'Venda por Atacado' nas configurações para editar." : ""}>
-               <div className="flex items-center gap-2 mb-2">
-                  <h4 className={`text-xs font-bold uppercase ${isWholesaleEnabled ? 'text-indigo-700' : 'text-slate-500'}`}>Venda Atacado / Caixa Fechada</h4>
-                  {!isWholesaleEnabled && <span className="text-[10px] bg-slate-200 px-1 rounded text-slate-500">Desabilitado</span>}
-               </div>
-               <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-bold text-slate-600 mb-1">Qtd no Pacote/Fardo</label>
-                    <input 
-                        type="number" 
-                        className="w-full border p-2 rounded text-sm disabled:cursor-not-allowed" 
-                        value={editingProduct?.packQuantity || ''} 
-                        onChange={e => setEditingProduct({...editingProduct, packQuantity: e.target.value})}
-                        disabled={!isWholesaleEnabled}
-                        placeholder="Ex: 12"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-slate-600 mb-1">Preço do Pacote (R$)</label>
-                    <input 
-                        type="text" 
-                        inputMode="decimal" 
-                        className="w-full border p-2 rounded text-sm disabled:cursor-not-allowed font-bold" 
-                        value={editingProduct?.wholesalePrice || ''} 
-                        onChange={e => setEditingProduct({...editingProduct, wholesalePrice: e.target.value})}
-                        disabled={!isWholesaleEnabled}
-                        placeholder="R$ 0,00"
-                    />
-                  </div>
-               </div>
-               {isWholesaleEnabled && editingProduct?.packQuantity > 0 && editingProduct?.wholesalePrice > 0 && (
-                   <p className="text-[10px] text-indigo-600 mt-1 text-right">
-                       Sai a {formatCurrency(editingProduct.wholesalePrice / editingProduct.packQuantity)} por unidade
-                   </p>
-               )}
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Estoque Atual (Unidades)</label>
-              <input type="number" className="w-full border p-2 rounded text-sm bg-slate-50" value={editingProduct?.stock || ''} disabled title="Faça entradas/saídas pela aba Notas & Gastos"/>
-            </div>
-          </div>
-
-          <div className="flex justify-end gap-2 pt-4">
-            <button type="button" onClick={() => setIsModalOpen(false)} className="px-4 py-2 text-slate-500 hover:bg-slate-50 rounded text-sm">Cancelar</button>
-            <button type="submit" className="px-4 py-2 bg-slate-800 text-white rounded text-sm font-medium hover:bg-slate-700">Salvar Produto</button>
-          </div>
-        </form>
-      </Modal>
-      <ModalConfirm
-        isOpen={confirmModal.isOpen}
-        onClose={() => setConfirmModal({ isOpen: false })}
-        onConfirm={confirmModal.onConfirm}
-        title={confirmModal.title}
-      >
-        {confirmModal.message}
-      </ModalConfirm>
-      </>
-      )}
-
-      {activeTab === 'groups' && (
-        <div className="space-y-6">
-          <div className="bg-white p-6 rounded border border-slate-200 shadow-sm flex gap-4 items-end">
-            <div className="flex-1">
-              <label className="block text-xs font-bold text-slate-700 mb-1">Nome do Novo Grupo</label>
-              <input className="w-full border p-2 rounded text-sm" value={newGroupName} onChange={e => setNewGroupName(e.target.value)} placeholder="Ex: Bebidas, Mercearia..." />
-            </div>
-            <button onClick={handleSaveGroup} className="bg-slate-800 text-white px-4 py-2 rounded text-sm font-medium hover:bg-slate-700 flex items-center gap-2 h-10">
-              <Plus size={16} /> Adicionar Grupo
-            </button>
-          </div>
-
-          <div className="bg-white rounded border border-slate-200 shadow-sm overflow-hidden">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-slate-50 text-slate-500 uppercase text-xs font-semibold">
-                <tr><th className="p-4 w-32">Código</th><th className="p-4">Nome do Grupo</th><th className="p-4 text-right">Ação</th></tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {groups.map(g => (
-                  <tr key={g.id} className="hover:bg-slate-50">
-                    <td className="p-4 font-mono text-slate-500">{g.code}</td>
-                    <td className="p-4 font-medium text-slate-800">{g.name}</td>
-                    <td className="p-4 text-right"><button onClick={() => deleteGroup(g.id)} className="text-slate-400 hover:text-red-500"><Trash2 size={18}/></button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
-
 const FinanceSettings = ({ feeProfiles, setFeeProfiles, showNotification }) => {
   const [newProfile, setNewProfile] = useState({ 
     name: '', debit: '', pix: '', 
@@ -2117,26 +1789,18 @@ const masks = {
   }
 };
 
-// --- MANTENHA O OBJETO 'masks' ONDE JÁ ESTAVA (FORA DO COMPONENTE) ---
-
 const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeConfig, setStoreConfig, showNotification }) => {
   const [activeTab, setActiveTab] = useState('general');
   const [newUser, setNewUser] = useState({ username: '', password: '' });
   
-  // Estado para Perfis Tributários (Fase 2)
+  // Estado Fase 2: Perfis
   const [taxProfiles, setTaxProfiles] = useState([]);
-  const [newProfile, setNewProfile] = useState({ 
-    name: '', 
-    origin: '0', 
-    cst_nfe: '102', // Padrão Simples Nacional
-    cst_pis_cofins: '49' 
-  });
+  const [newProfile, setNewProfile] = useState({ name: '', origin: '0', cst_nfe: '102', cst_pis_cofins: '49' });
 
   const [formData, setFormData] = useState({
     name: companyInfo?.name || '',
     cnpj: companyInfo?.cnpj || '',
     email: companyInfo?.email || '',
-    phone: companyInfo?.phone || '',
     ie: companyInfo?.ie || '',
     crt: companyInfo?.crt || '1',
     cnae: companyInfo?.cnae || '',
@@ -2145,104 +1809,56 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
     }
   });
 
-  const [isLoadingCep, setIsLoadingCep] = useState(false);
-
-  // --- CARREGAMENTO INICIAL (Empresa + Perfis) ---
+  // Carregamento de Dados (Supabase)
   useEffect(() => {
-    const loadAllData = async () => {
+    const loadData = async () => {
         if (!storeConfig?.id) return;
+        const storeIdStr = String(storeConfig.id); // Força String
         
-        // 1. Carregar Dados da Empresa
-        const { data: companyData } = await supabase
-            .from('fiscal_emitters')
-            .select('*')
-            .eq('firebase_store_id', storeConfig.id)
-            .single();
+        try {
+            // 1. Dados da Empresa
+            const { data: companyData, error: companyError } = await supabase.from('fiscal_emitters').select('*').eq('firebase_store_id', storeIdStr).single();
             
-        if (companyData) {
-            setFormData(prev => ({
-                ...prev,
-                name: companyData.x_nome,
-                cnpj: masks.cnpj(companyData.cnpj),
-                ie: companyData.ie,
-                crt: String(companyData.crt),
-                cnae: companyData.cnae,
-                address: {
-                    zip: masks.cep(companyData.cep),
-                    street: companyData.x_lgr,
-                    number: companyData.nro,
-                    complement: companyData.xcpl,
-                    neighborhood: companyData.xbairro,
-                    city: companyData.xmun,
-                    state: companyData.uf,
-                    ibgeCode: companyData.cmun
-                }
-            }));
+            // Só preenche se achou e não deu erro (ignora erro 406 se a tabela estiver vazia)
+            if (companyData && !companyError) {
+                setFormData(prev => ({
+                    ...prev,
+                    name: companyData.x_nome,
+                    cnpj: companyData.cnpj,
+                    ie: companyData.ie,
+                    crt: String(companyData.crt),
+                    cnae: companyData.cnae,
+                    address: {
+                        zip: companyData.cep, street: companyData.x_lgr, number: companyData.nro, 
+                        complement: companyData.xcpl, neighborhood: companyData.xbairro, 
+                        city: companyData.xmun, state: companyData.uf, ibgeCode: companyData.cmun
+                    }
+                }));
+            }
+
+            // 2. Perfis Fiscais
+            const { data: profiles, error: profilesError } = await supabase.from('fiscal_tax_profiles').select('*').eq('firebase_store_id', storeIdStr);
+            if (profiles && !profilesError) setTaxProfiles(profiles);
+            
+        } catch (err) {
+            console.error("Erro ao carregar dados fiscais:", err);
         }
-
-        // 2. Carregar Perfis Tributários
-        const { data: profilesData } = await supabase
-            .from('fiscal_tax_profiles')
-            .select('*')
-            .eq('firebase_store_id', storeConfig.id);
-            
-        if (profilesData) setTaxProfiles(profilesData);
     };
-    loadAllData();
-  }, [storeConfig.id]);
+    loadData();
+  }, [storeConfig]);
 
-  // --- MANIPULADORES DE FORMULÁRIO (Mantidos da Fase 1) ---
-  const handleChange = (field, value) => {
-    let finalValue = value;
-    if (field === 'cnpj') finalValue = masks.cnpj(value);
-    if (field === 'phone') finalValue = masks.phone(value);
-    if (field === 'ie') finalValue = masks.numbersOnly(value).substring(0, 14);
-    if (field === 'cnae') finalValue = masks.numbersOnly(value).substring(0, 7);
-    setFormData(prev => ({ ...prev, [field]: finalValue }));
-  };
-
-  const handleAddressChange = (field, value) => {
-    let finalValue = value;
-    if (field === 'zip') finalValue = masks.cep(value);
-    setFormData(prev => ({
-      ...prev,
-      address: { ...prev.address, [field]: finalValue }
-    }));
-  };
-
-  const handleCepBlur = async () => {
-    const cep = formData.address.zip.replace(/\D/g, '');
-    if (cep.length !== 8) return;
-    setIsLoadingCep(true);
-    try {
-      const response = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
-      const data = await response.json();
-      if (!data.erro) {
-        setFormData(prev => ({
-          ...prev,
-          address: { ...prev.address, street: data.logradouro, neighborhood: data.bairro, city: data.localidade, state: data.uf, ibgeCode: data.ibge }
-        }));
-        showNotification('Endereço encontrado!', 'success');
-      } else {
-        showNotification('CEP não encontrado.', 'error');
-      }
-    } catch (error) {
-      showNotification('Erro ao buscar CEP.', 'error');
-    } finally {
-      setIsLoadingCep(false);
-    }
-  };
-
-  const handleSaveCompanyInfo = async () => {
-    if (!formData.address.ibgeCode) return showNotification('Atenção: Código IBGE obrigatório.', 'error');
-    
-    const fiscalPayload = {
-        firebase_store_id: storeConfig.id,
+  const handleSaveCompany = async () => {
+      if (!formData.address.ibgeCode) return showNotification('Código IBGE inválido. Busque o CEP novamente.', 'error');
+      
+      const storeIdStr = String(storeConfig.id);
+      
+      const fiscalPayload = {
+        firebase_store_id: storeIdStr,
         x_nome: formData.name,
-        cnpj: formData.cnpj.replace(/\D/g, ''),
-        ie: formData.ie.replace(/\D/g, ''),
+        cnpj: formData.cnpj ? String(formData.cnpj).replace(/\D/g, '') : '',
+        ie: formData.ie ? String(formData.ie).replace(/\D/g, '') : '',
         crt: parseInt(formData.crt),
-        cnae: formData.cnae.replace(/\D/g, ''),
+        cnae: formData.cnae ? String(formData.cnae).replace(/\D/g, '') : '',
         x_lgr: formData.address.street,
         nro: formData.address.number,
         xcpl: formData.address.complement,
@@ -2250,296 +1866,200 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
         cmun: formData.address.ibgeCode,
         xmun: formData.address.city,
         uf: formData.address.state,
-        cep: formData.address.zip.replace(/\D/g, '')
-    };
+        cep: formData.address.zip ? String(formData.address.zip).replace(/\D/g, '') : ''
+      };
 
-    try {
-        const { error } = await supabase.from('fiscal_emitters').upsert(fiscalPayload, { onConflict: 'firebase_store_id' });
-        if (error) throw error;
-        setCompanyInfo(formData); 
-        showNotification('Dados Fiscais salvos!', 'success');
-    } catch (error) {
-        showNotification('Erro ao salvar: ' + error.message, 'error');
-    }
+      try {
+          const { error } = await supabase.from('fiscal_emitters').upsert(fiscalPayload, { onConflict: 'firebase_store_id' });
+          if (error) throw error;
+          
+          setCompanyInfo(formData); // Atualiza no firebase também
+          showNotification('Dados Fiscais salvos com sucesso!', 'success');
+      } catch (error) {
+          console.error(error);
+          showNotification('Erro ao salvar: ' + error.message, 'error');
+      }
   };
 
-  // --- LÓGICA DE PERFIS TRIBUTÁRIOS (FASE 2) ---
   const handleAddProfile = async () => {
-    if (!newProfile.name) return showNotification('Dê um nome ao perfil (Ex: Revenda Padrão)', 'error');
+      if (!newProfile.name) return showNotification('Nome obrigatório', 'error');
+      const storeIdStr = String(storeConfig.id);
 
-    try {
       const payload = {
-        firebase_store_id: storeConfig.id,
+        firebase_store_id: storeIdStr,
         name: newProfile.name,
         origin: parseInt(newProfile.origin),
         cst_nfe: newProfile.cst_nfe,
         cst_pis_cofins: newProfile.cst_pis_cofins
       };
-
-      const { data, error } = await supabase.from('fiscal_tax_profiles').insert(payload).select();
-      if (error) throw error;
-
-      setTaxProfiles([...taxProfiles, data[0]]);
-      setNewProfile({ name: '', origin: '0', cst_nfe: '102', cst_pis_cofins: '49' }); // Reset
-      showNotification('Perfil tributário criado!', 'success');
-    } catch (error) {
-      console.error(error);
-      showNotification('Erro ao criar perfil.', 'error');
-    }
+      
+      try {
+          const { data, error } = await supabase.from('fiscal_tax_profiles').insert(payload).select();
+          if (error) throw error;
+          
+          setTaxProfiles([...taxProfiles, data[0]]);
+          setNewProfile({ name: '', origin: '0', cst_nfe: '102', cst_pis_cofins: '49' });
+          showNotification('Perfil criado!', 'success');
+      } catch (error) {
+          showNotification('Erro ao criar: ' + error.message, 'error');
+      }
   };
 
   const handleDeleteProfile = async (id) => {
-    if (!window.confirm("Tem certeza? Produtos usando este perfil ficarão sem regra.")) return;
-    try {
-      const { error } = await supabase.from('fiscal_tax_profiles').delete().eq('id', id);
-      if (error) throw error;
-      setTaxProfiles(taxProfiles.filter(p => p.id !== id));
-      showNotification('Perfil removido.', 'success');
-    } catch (error) {
-      showNotification('Erro ao remover.', 'error');
-    }
+      try {
+          const { error } = await supabase.from('fiscal_tax_profiles').delete().eq('id', id);
+          if (error) throw error;
+          setTaxProfiles(taxProfiles.filter(p => p.id !== id));
+          showNotification('Perfil removido', 'success');
+      } catch (error) {
+          showNotification('Erro ao remover: ' + error.message, 'error');
+      }
   };
-
-  // --- LÓGICA DE USUÁRIOS E SWITCH ---
-  const handleAddUser = () => {
-    if (!newUser.username || !newUser.password) return showNotification('Preencha usuário e senha', 'error');
-    if (users.some(u => u.username === newUser.username)) return showNotification('Usuário já existe', 'error');
-    setUsers([...users, { id: Date.now(), ...newUser }]);
-    setNewUser({ username: '', password: '' });
-    showNotification('Usuário cadastrado', 'success');
-  };
-  const handleDeleteUser = (id) => {
-    if (users.length <= 1) return showNotification('Não é possível remover o último usuário', 'error');
-    setUsers(users.filter(u => u.id !== id));
-    showNotification('Usuário removido', 'success');
-  };
-  const Switch = ({ active, onClick, colorClass = "bg-indigo-600" }) => (
-    <button onClick={onClick} className={`relative w-12 h-6 flex items-center rounded-full p-1 transition-colors duration-300 ${active ? colorClass : 'bg-slate-300'}`}>
-      <div className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-transform duration-300 ${active ? 'translate-x-6' : 'translate-x-0'}`} />
-    </button>
-  );
 
   return (
     <div className="space-y-6 pb-8">
-       {/* MENU DE ABAS */}
-       <div className="flex gap-2 border-b border-slate-200 pb-1 overflow-x-auto">
-          <button onClick={() => setActiveTab('general')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors whitespace-nowrap ${activeTab === 'general' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>🏢 Dados Fiscais</button>
-          <button onClick={() => setActiveTab('address')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors whitespace-nowrap ${activeTab === 'address' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>📍 Endereço</button>
-          {/* NOVA ABA AQUI */}
-          <button onClick={() => setActiveTab('tax_profiles')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors whitespace-nowrap ${activeTab === 'tax_profiles' ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>🏷️ Perfis Fiscais</button>
-          
-          <button onClick={() => setActiveTab('system')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors whitespace-nowrap ${activeTab === 'system' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>⚙️ Sistema</button>
-          <button onClick={() => setActiveTab('users')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors whitespace-nowrap ${activeTab === 'users' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>👥 Usuários</button>
+       <div className="flex gap-2 border-b pb-1 overflow-x-auto">
+          <button onClick={() => setActiveTab('general')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors ${activeTab === 'general' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Dados Fiscais</button>
+          <button onClick={() => setActiveTab('tax_profiles')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors ${activeTab === 'tax_profiles' ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Perfis Tributários</button>
+          <button onClick={() => setActiveTab('users')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors ${activeTab === 'users' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Usuários</button>
        </div>
 
-       {/* ABA GERAL (Mantida) */}
        {activeTab === 'general' && (
-         <div className="bg-white p-6 rounded-b border border-t-0 border-slate-200 shadow-sm animate-in fade-in">
-           <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Package size={20}/> Identificação do Emitente</h3>
-           <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
-             <div className="md:col-span-6">
-               <label className="block text-xs font-bold text-slate-500 mb-1">Razão Social</label>
-               <input className="w-full border p-2 rounded text-sm bg-slate-50 font-medium uppercase" value={formData.name} onChange={e => handleChange('name', e.target.value)} />
-             </div>
-             <div className="md:col-span-3">
-               <label className="block text-xs font-bold text-slate-500 mb-1">CNPJ</label>
-               <input className="w-full border p-2 rounded text-sm font-mono" value={formData.cnpj} onChange={e => handleChange('cnpj', e.target.value)} placeholder="00.000.000/0000-00" maxLength={18} />
-             </div>
-             <div className="md:col-span-3">
-               <label className="block text-xs font-bold text-slate-500 mb-1">Inscrição Estadual</label>
-               <input className="w-full border p-2 rounded text-sm" value={formData.ie} onChange={e => handleChange('ie', e.target.value)} placeholder="Somente números" maxLength={14} />
-             </div>
-             <div className="md:col-span-12 border-t my-2"></div>
-             <div className="md:col-span-4">
-               <label className="block text-xs font-bold text-indigo-600 mb-1">Regime Tributário (CRT)</label>
-               <select className="w-full border p-2 rounded text-sm bg-indigo-50" value={formData.crt} onChange={e => handleChange('crt', e.target.value)}>
-                 <option value="1">1 - Simples Nacional</option>
-                 <option value="3">3 - Regime Normal</option>
-               </select>
-             </div>
-             <div className="md:col-span-4">
-               <label className="block text-xs font-bold text-slate-500 mb-1">CNAE Principal</label>
-               <input className="w-full border p-2 rounded text-sm" value={formData.cnae} onChange={e => handleChange('cnae', e.target.value)} placeholder="7 dígitos" maxLength={7} />
-             </div>
-             <div className="md:col-span-4">
-               <label className="block text-xs font-bold text-slate-500 mb-1">E-mail Fiscal</label>
-               <input className="w-full border p-2 rounded text-sm" value={formData.email} onChange={e => handleChange('email', e.target.value)} />
-             </div>
-           </div>
-           <div className="mt-6 flex justify-end">
-             <button onClick={handleSaveCompanyInfo} className="bg-indigo-600 text-white px-6 py-2 rounded text-sm font-bold hover:bg-indigo-700 shadow-sm flex items-center gap-2"><Save size={18}/> Salvar Dados Fiscais</button>
-           </div>
-         </div>
-       )}
-
-       {/* ABA ENDEREÇO (Mantida) */}
-       {activeTab === 'address' && (
-         <div className="bg-white p-6 rounded-b border border-t-0 border-slate-200 shadow-sm animate-in fade-in">
-           <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><MapPin size={20}/> Endereço Fiscal</h3>
-           <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
-             <div className="md:col-span-3">
-               <label className="block text-xs font-bold text-slate-500 mb-1">CEP</label>
-               <div className="relative">
-                 <input className="w-full border p-2 rounded text-sm font-bold text-slate-700" value={formData.address.zip} onChange={e => handleAddressChange('zip', e.target.value)} onBlur={handleCepBlur} placeholder="00000-000" maxLength={9} />
-                  {isLoadingCep && <div className="absolute right-2 top-2.5 animate-spin rounded-full h-4 w-4 border-b-2 border-indigo-600"></div>}
+           <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
+               <h3 className="font-bold mb-4 text-slate-800 flex items-center gap-2"><Package size={20}/> Dados do Emitente (Sua Empresa)</h3>
+               
+               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                   <div>
+                       <label className="text-xs font-bold text-slate-500">Razão Social</label>
+                       <input className="w-full border p-2 rounded text-sm" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} />
+                   </div>
+                   <div>
+                       <label className="text-xs font-bold text-slate-500">CNPJ</label>
+                       <input className="w-full border p-2 rounded text-sm" value={formData.cnpj} onChange={e => setFormData({...formData, cnpj: masks.cnpj(e.target.value)})} placeholder="00.000.000/0000-00" maxLength={18}/>
+                   </div>
+                   <div>
+                       <label className="text-xs font-bold text-slate-500">Inscrição Estadual</label>
+                       <input className="w-full border p-2 rounded text-sm" value={formData.ie} onChange={e => setFormData({...formData, ie: masks.numbersOnly(e.target.value)})} />
+                   </div>
+                   <div>
+                       <label className="text-xs font-bold text-slate-500">Regime Tributário</label>
+                       <select className="w-full border p-2 rounded text-sm" value={formData.crt} onChange={e => setFormData({...formData, crt: e.target.value})}>
+                           <option value="1">Simples Nacional</option>
+                           <option value="3">Regime Normal</option>
+                       </select>
+                   </div>
                </div>
-             </div>
-             <div className="md:col-span-7">
-               <label className="block text-xs font-bold text-slate-500 mb-1">Logradouro</label>
-               <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.street} onChange={e => handleAddressChange('street', e.target.value)} />
-             </div>
-             <div className="md:col-span-2">
-               <label className="block text-xs font-bold text-slate-500 mb-1">Número</label>
-               <input className="w-full border p-2 rounded text-sm" value={formData.address.number} onChange={e => handleAddressChange('number', e.target.value)} />
-             </div>
-             <div className="md:col-span-4">
-               <label className="block text-xs font-bold text-slate-500 mb-1">Bairro</label>
-               <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.neighborhood} onChange={e => handleAddressChange('neighborhood', e.target.value)} />
-             </div>
-             <div className="md:col-span-4">
-               <label className="block text-xs font-bold text-slate-500 mb-1">Cidade</label>
-               <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.city} onChange={e => handleAddressChange('city', e.target.value)} readOnly />
-             </div>
-             <div className="md:col-span-2">
-               <label className="block text-xs font-bold text-slate-500 mb-1">UF</label>
-               <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.state} onChange={e => handleAddressChange('state', e.target.value)} readOnly />
-             </div>
-             <div className="md:col-span-2">
-               <label className="block text-xs font-bold text-indigo-600 mb-1">Cód. IBGE</label>
-               <input className="w-full border p-2 rounded text-sm bg-indigo-50 font-mono text-xs" value={formData.address.ibgeCode} readOnly />
-             </div>
-             <div className="md:col-span-12">
-               <label className="block text-xs font-bold text-slate-500 mb-1">Complemento</label>
-               <input className="w-full border p-2 rounded text-sm" value={formData.address.complement} onChange={e => handleAddressChange('complement', e.target.value)} />
-             </div>
+
+               {/* Endereço */}
+               <div className="border-t pt-4 mt-4">
+                   <h4 className="font-bold text-sm text-slate-700 mb-3">Endereço Fiscal</h4>
+                   <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+                       <div className="md:col-span-3">
+                           <label className="text-xs font-bold text-slate-500">CEP</label>
+                           <input className="w-full border p-2 rounded text-sm" value={formData.address.zip} onChange={e => setFormData({...formData, address: {...formData.address, zip: masks.cep(e.target.value)}})} onBlur={async () => {
+                               if(formData.address.zip.length >= 8) {
+                                   const r = await fetch(`https://viacep.com.br/ws/${formData.address.zip.replace(/\D/g,'')}/json/`);
+                                   const d = await r.json();
+                                   if(!d.erro) setFormData(prev => ({...prev, address: {...prev.address, street: d.logradouro, neighborhood: d.bairro, city: d.localidade, state: d.uf, ibgeCode: d.ibge}}));
+                               }
+                           }} placeholder="00000-000"/>
+                       </div>
+                       <div className="md:col-span-7">
+                           <label className="text-xs font-bold text-slate-500">Rua</label>
+                           <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.street} readOnly />
+                       </div>
+                       <div className="md:col-span-2">
+                           <label className="text-xs font-bold text-slate-500">Número</label>
+                           <input className="w-full border p-2 rounded text-sm" value={formData.address.number} onChange={e => setFormData({...formData, address: {...formData.address, number: e.target.value}})} />
+                       </div>
+                       <div className="md:col-span-4">
+                           <label className="text-xs font-bold text-slate-500">Bairro</label>
+                           <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.neighborhood} readOnly />
+                       </div>
+                       <div className="md:col-span-4">
+                           <label className="text-xs font-bold text-slate-500">Cidade</label>
+                           <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.city} readOnly />
+                       </div>
+                       <div className="md:col-span-2">
+                           <label className="text-xs font-bold text-slate-500">UF</label>
+                           <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.state} readOnly />
+                       </div>
+                       <div className="md:col-span-2">
+                           <label className="text-xs font-bold text-indigo-600">IBGE</label>
+                           <input className="w-full border p-2 rounded text-sm bg-indigo-50 font-mono text-xs" value={formData.address.ibgeCode} readOnly />
+                       </div>
+                   </div>
+               </div>
+
+               <div className="mt-6 flex justify-end">
+                   <button onClick={handleSaveCompany} className="bg-indigo-600 text-white px-6 py-2 rounded text-sm font-bold hover:bg-indigo-700 flex items-center gap-2">
+                       <Save size={18}/> Salvar Alterações
+                   </button>
+               </div>
            </div>
-           <div className="mt-6 flex justify-end">
-             <button onClick={handleSaveCompanyInfo} className="bg-slate-800 text-white px-6 py-2 rounded text-sm font-bold hover:bg-slate-700 shadow-sm flex items-center gap-2"><Save size={18}/> Atualizar Endereço</button>
-           </div>
-         </div>
        )}
 
-       {/* --- NOVA ABA: PERFIS TRIBUTÁRIOS (FASE 2) --- */}
        {activeTab === 'tax_profiles' && (
-         <div className="bg-white p-6 rounded-b border border-t-0 border-slate-200 shadow-sm animate-in fade-in">
-           <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Tags size={20}/> Perfis de Tributação (Tax Groups)</h3>
-           <p className="text-sm text-slate-500 mb-6">Crie perfis para agrupar produtos com a mesma regra de imposto (Ex: Revenda Padrão, Bebida Fria, etc). Depois, basta vincular o produto ao perfil.</p>
-           
-           {/* Formulário de Criação */}
-           <div className="bg-emerald-50 p-4 rounded-lg border border-emerald-100 mb-6">
-              <h4 className="text-sm font-bold text-emerald-800 mb-3">Novo Perfil Tributário</h4>
-              <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+           <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
+               <h3 className="font-bold mb-4 flex items-center gap-2"><Tags size={20}/> Perfis de Imposto (Inteligência Fiscal)</h3>
+               <p className="text-sm text-slate-500 mb-6">Crie regras automáticas para seus produtos. Ao cadastrar um item, basta selecionar o perfil (ex: "Revenda Padrão") e o sistema preencherá os impostos na nota.</p>
+               
+               <div className="bg-emerald-50 p-4 rounded border border-emerald-100 mb-6 grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
                   <div className="md:col-span-4">
-                      <label className="block text-xs font-bold text-emerald-700 mb-1">Nome do Perfil</label>
-                      <input className="w-full border border-emerald-200 p-2 rounded text-sm" placeholder="Ex: Revenda Padrão" value={newProfile.name} onChange={e => setNewProfile({...newProfile, name: e.target.value})} />
+                      <label className="text-xs font-bold text-emerald-700">Nome (Ex: Revenda Padrão)</label>
+                      <input className="w-full border p-2 rounded text-sm" value={newProfile.name} onChange={e => setNewProfile({...newProfile, name: e.target.value})} />
                   </div>
-                  <div className="md:col-span-2">
-                      <label className="block text-xs font-bold text-emerald-700 mb-1">Origem</label>
-                      <select className="w-full border border-emerald-200 p-2 rounded text-sm" value={newProfile.origin} onChange={e => setNewProfile({...newProfile, origin: e.target.value})}>
+                  <div className="md:col-span-3">
+                      <label className="text-xs font-bold text-emerald-700">Origem</label>
+                      <select className="w-full border p-2 rounded text-sm" value={newProfile.origin} onChange={e => setNewProfile({...newProfile, origin: e.target.value})}>
                           <option value="0">0 - Nacional</option>
-                          <option value="1">1 - Imp. Direta</option>
-                          <option value="2">2 - Estrangeira (Merc. Int)</option>
+                          <option value="1">1 - Importado Direta</option>
+                          <option value="2">2 - Estrangeira (Merc. Interno)</option>
                       </select>
                   </div>
                   <div className="md:col-span-3">
-                      <label className="block text-xs font-bold text-emerald-700 mb-1">CSOSN / CST (Vendas)</label>
-                      <select className="w-full border border-emerald-200 p-2 rounded text-sm" value={newProfile.cst_nfe} onChange={e => setNewProfile({...newProfile, cst_nfe: e.target.value})}>
-                          <option value="102">102 - Tributada (Simples)</option>
-                          <option value="500">500 - Subst. Tributária (Simples)</option>
-                          <option value="900">900 - Outros (Simples)</option>
-                          <option value="00">00 - Tributada Integral (Normal)</option>
-                          <option value="60">60 - Subst. Tributária (Normal)</option>
+                      <label className="text-xs font-bold text-emerald-700">CSOSN (Simples)</label>
+                      <select className="w-full border p-2 rounded text-sm" value={newProfile.cst_nfe} onChange={e => setNewProfile({...newProfile, cst_nfe: e.target.value})}>
+                          <option value="102">102 - Tributado</option>
+                          <option value="500">500 - ST (Subst. Trib)</option>
+                          <option value="900">900 - Outros</option>
                       </select>
                   </div>
                   <div className="md:col-span-2">
-                      <label className="block text-xs font-bold text-emerald-700 mb-1">PIS/COFINS</label>
-                      <select className="w-full border border-emerald-200 p-2 rounded text-sm" value={newProfile.cst_pis_cofins} onChange={e => setNewProfile({...newProfile, cst_pis_cofins: e.target.value})}>
-                          <option value="49">49 - Outras (Simples)</option>
-                          <option value="01">01 - Tributável (Normal)</option>
-                      </select>
+                      <button onClick={handleAddProfile} className="w-full bg-emerald-600 text-white p-2 rounded font-bold hover:bg-emerald-700 text-sm h-[38px]">Criar</button>
                   </div>
-                  <div className="md:col-span-1">
-                      <button onClick={handleAddProfile} className="w-full bg-emerald-600 text-white p-2 rounded hover:bg-emerald-700 flex justify-center items-center"><Plus size={20}/></button>
-                  </div>
-              </div>
-           </div>
-
-           {/* Lista de Perfis */}
-           <div className="border rounded-lg overflow-hidden">
-             <table className="w-full text-left text-sm">
-               <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
-                 <tr>
-                   <th className="p-3">Nome do Perfil</th>
-                   <th className="p-3">Origem</th>
-                   <th className="p-3">Situação (CSOSN)</th>
-                   <th className="p-3 text-right">Ações</th>
-                 </tr>
-               </thead>
-               <tbody className="divide-y divide-slate-100">
-                 {taxProfiles.length === 0 ? (
-                     <tr><td colSpan={4} className="p-6 text-center text-slate-400">Nenhum perfil criado. Crie o primeiro acima.</td></tr>
-                 ) : (
-                     taxProfiles.map(profile => (
-                        <tr key={profile.id} className="hover:bg-slate-50">
-                            <td className="p-3 font-bold text-slate-700">{profile.name}</td>
-                            <td className="p-3 text-slate-500">{profile.origin}</td>
-                            <td className="p-3"><span className="bg-slate-100 text-slate-600 px-2 py-1 rounded text-xs font-bold">{profile.cst_nfe}</span></td>
-                            <td className="p-3 text-right">
-                                <button onClick={() => handleDeleteProfile(profile.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={16}/></button>
-                            </td>
-                        </tr>
-                     ))
-                 )}
-               </tbody>
-             </table>
-           </div>
-         </div>
-       )}
-
-       {/* SISTEMA e USUÁRIOS (Mantidos) */}
-       {activeTab === 'system' && (
-         <div className="bg-white p-6 rounded-b border border-t-0 border-slate-200 shadow-sm">
-            <h3 className="font-bold text-slate-800 mb-4">Preferências Operacionais</h3>
-            <div className="space-y-4">
-               <div className="flex items-center justify-between p-4 bg-slate-50 rounded border border-slate-200">
-                  <div><h4 className="font-bold text-slate-800 text-sm">Habilitar Venda por Atacado</h4></div>
-                  <Switch active={storeConfig.enableWholesale} onClick={() => setStoreConfig({ ...storeConfig, enableWholesale: !storeConfig.enableWholesale })} />
                </div>
-               <div className="flex items-center justify-between p-4 bg-slate-50 rounded border border-slate-200">
-                  <div><h4 className="font-bold text-slate-800 text-sm">Permitir Edição Rápida no PDV</h4></div>
-                  <Switch active={storeConfig.enablePDVEditing} onClick={() => setStoreConfig({ ...storeConfig, enablePDVEditing: !storeConfig.enablePDVEditing })} colorClass="bg-emerald-600" />
-               </div>
-            </div>
-         </div>
-       )}
 
+               <div className="border rounded overflow-hidden">
+                   <table className="w-full text-sm text-left">
+                       <thead className="bg-slate-50 uppercase text-xs text-slate-500">
+                           <tr><th className="p-3">Nome</th><th className="p-3">Origem</th><th className="p-3">CSOSN</th><th className="p-3 text-right">Ação</th></tr>
+                       </thead>
+                       <tbody className="divide-y divide-slate-100">
+                           {taxProfiles.map(p => (
+                               <tr key={p.id} className="hover:bg-slate-50">
+                                   <td className="p-3 font-bold text-slate-700">{p.name}</td>
+                                   <td className="p-3">{p.origin}</td>
+                                   <td className="p-3"><span className="bg-slate-200 px-2 py-1 rounded text-xs font-mono">{p.cst_nfe}</span></td>
+                                   <td className="p-3 text-right"><button onClick={() => handleDeleteProfile(p.id)} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button></td>
+                               </tr>
+                           ))}
+                           {taxProfiles.length === 0 && <tr><td colSpan={4} className="p-8 text-center text-slate-400">Nenhum perfil cadastrado.</td></tr>}
+                       </tbody>
+                   </table>
+               </div>
+           </div>
+       )}
+       
+       {/* Usuários (Mantido simples) */}
        {activeTab === 'users' && (
-         <div className="bg-white p-6 rounded-b border border-t-0 border-slate-200 shadow-sm">
-           <h3 className="font-bold text-slate-800 mb-4">Gerenciar Usuários</h3>
-           <div className="flex gap-4 items-end mb-6">
-             <div className="flex-1"><label className="block text-xs font-bold text-slate-500 mb-1">Usuário</label><input className="w-full border p-2 rounded text-sm" value={newUser.username} onChange={e => setNewUser({...newUser, username: e.target.value})} /></div>
-             <div className="flex-1"><label className="block text-xs font-bold text-slate-500 mb-1">Senha</label><input className="w-full border p-2 rounded text-sm" type="password" value={newUser.password} onChange={e => setNewUser({...newUser, password: e.target.value})} /></div>
-             <button onClick={handleAddUser} className="bg-slate-800 text-white px-4 py-2 rounded text-sm font-bold h-10 flex items-center gap-2"><Plus size={16}/> Adicionar</button>
+           <div className="p-6 bg-white border rounded-b shadow-sm">
+               <h3 className="font-bold mb-4">Gerenciar Usuários da Loja</h3>
+               <div className="bg-slate-50 p-4 rounded text-center text-slate-500 text-sm">
+                   Funcionalidade gerenciada pelo Super Admin. Contate o suporte para adicionar usuários.
+               </div>
            </div>
-           <div className="border rounded overflow-hidden">
-              <table className="w-full text-left text-sm">
-              <thead className="bg-slate-50 text-slate-500 text-xs font-semibold"><tr><th className="p-4">Usuário</th><th className="p-4">Senha</th><th className="p-4 text-right">Ação</th></tr></thead>
-              <tbody className="divide-y divide-slate-100">
-                  {users.map(u => (
-                  <tr key={u.id}>
-                      <td className="p-4 font-medium">{u.username}</td><td className="p-4 text-slate-500">••••••</td>
-                      <td className="p-4 text-right"><button onClick={() => handleDeleteUser(u.id)} className="text-slate-400 hover:text-red-500"><Trash2 size={18}/></button></td>
-                  </tr>))}
-              </tbody></table>
-           </div>
-         </div>
        )}
-
-       <div className="pt-8 pb-4 flex flex-col items-center justify-center opacity-60">
-            <img src={logo} alt="Máquina Software" className="h-10 mb-2 grayscale" />
-            <p className="text-xs font-bold text-slate-500">Made by Máquina Software</p>
-            <p className="text-[10px] text-slate-400">DistriPro ERP v2.3 - Fiscal Ready</p>
-       </div>
     </div>
   );
 };
@@ -2818,7 +2338,13 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
             {activeModule === 'transactions' && <Transactions products={products} priceGroups={store.priceGroups || []} onSaveEntry={() => {}} />}
             {activeModule === 'priceGroups' && <PriceGroups products={products} showNotification={showNotification} />}
             {activeModule === 'finance' && <Finance sales={realtimeSales} transactions={store.transactions} transactionCategories={store.transactionCategories} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} />}
-            {activeModule === 'inventory' && <InventoryWMS products={products} showNotification={showNotification} />}
+            {activeModule === 'inventory' && (
+                <InventoryWMS 
+                    storeConfig={store} 
+                    products={products} // <--- O SEGREDO ESTÁ AQUI
+                    showNotification={showNotification} 
+                />
+            )}
             {activeModule === 'settings' && (
               <SettingsManager 
                 users={store.users} 
@@ -2889,6 +2415,7 @@ const App = () => {
     try {
       const storeData = await firebase.fetchStoreData(storeConfig);
       setCurrentStore(storeData);
+      window.__app_id = String(storeData.id);
       setLoginMode('user');
 
       // ALTERAÇÃO 3: Salva a sessão no LocalStorage
