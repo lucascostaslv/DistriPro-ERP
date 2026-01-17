@@ -7,7 +7,8 @@ import {
   ArrowRight, ArrowLeft, Clock, Eye, ClipboardList,
   PieChart, Save, UserPlus, Printer, Lock, Settings, CheckSquare, Square, Edit, Download, LogOut, Server, Beer, Minus, PlusCircle, Tags,
   ChevronLeft, ChevronRight,
-  MapPin
+  MapPin,
+  Upload
 } from 'lucide-react';
 import { collection, query, where, getDocs, setDoc, doc, updateDoc, getDoc, onSnapshot, increment, writeBatch, serverTimestamp } from "firebase/firestore";
 import logo from './img/LOGO-MAQUINA-PNG.png';
@@ -18,6 +19,8 @@ import Transactions from './EntradaNotas/Transactions';
 import PriceGroups from './PriceGroups';
 import { supabase } from './supabaseClient';
 import InventoryWMS from './InventoryWMS';
+import ClientsManager from './ClientsManager';
+import { calculateItemTaxes } from './utils/TaxCalculator';
 
 // --- UTILS ---
 const formatCurrency = (value) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
@@ -637,64 +640,6 @@ const Dashboard = ({ sales, products }) => {
   );
 };
 
-const ClientsManager = ({ clients, setClients, showNotification }) => {
-  const [newClient, setNewClient] = useState({ name: '', phone: '', type: 'PF' });
-
-  const addClient = () => {
-    if (!newClient.name) return showNotification('Nome obrigatório', 'error');
-    setClients([...clients, { ...newClient, id: Date.now(), debt: 0 }]);
-    setNewClient({ name: '', phone: '', type: 'PF' });
-    showNotification('Cliente adicionado', 'success');
-  };
-
-  const removeClient = (id) => {
-    setClients(clients.filter(c => c.id !== id));
-    showNotification('Cliente removido', 'success');
-  };
-
-  return (
-    <div className="space-y-4">
-      <div className="bg-white p-4 rounded border border-slate-200 shadow-sm flex gap-4 items-end">
-        <div className="flex-1">
-          <label className="text-xs font-bold text-slate-500">Nome</label>
-          <input className="w-full border p-2 rounded text-sm" value={newClient.name} onChange={e => setNewClient({...newClient, name: e.target.value})} />
-        </div>
-        <div className="w-40">
-          <label className="text-xs font-bold text-slate-500">Telefone</label>
-          <input className="w-full border p-2 rounded text-sm" value={newClient.phone} onChange={e => setNewClient({...newClient, phone: e.target.value})} />
-        </div>
-        <div className="w-32">
-          <label className="text-xs font-bold text-slate-500">Tipo</label>
-          <select className="w-full border p-2 rounded text-sm" value={newClient.type} onChange={e => setNewClient({...newClient, type: e.target.value})}>
-            <option>PF</option>
-            <option>PJ</option>
-          </select>
-        </div>
-        <button onClick={addClient} className="bg-slate-800 text-white px-4 py-2 rounded text-sm font-bold hover:bg-slate-700">Adicionar</button>
-      </div>
-
-      <div className="bg-white rounded border border-slate-200 shadow-sm overflow-hidden">
-        <table className="w-full text-left text-sm">
-          <thead className="bg-slate-50 text-slate-500 uppercase text-xs font-semibold">
-            <tr><th className="p-4">Nome</th><th className="p-4">Telefone</th><th className="p-4">Tipo</th><th className="p-4">Dívida</th><th className="p-4 text-right">Ação</th></tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {clients.map(c => (
-              <tr key={c.id} className="hover:bg-slate-50">
-                <td className="p-4 font-medium">{c.name}</td>
-                <td className="p-4 text-slate-500">{c.phone}</td>
-                <td className="p-4"><span className="bg-slate-100 px-2 py-1 rounded text-xs">{c.type}</span></td>
-                <td className={`p-4 font-bold ${c.debt > 0 ? 'text-red-600' : 'text-emerald-600'}`}>{formatCurrency(c.debt)}</td>
-                <td className="p-4 text-right"><button onClick={() => removeClient(c.id)} className="text-slate-400 hover:text-red-500"><Trash2 size={18}/></button></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-};
-
 const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClients, feeProfiles = [], onNewSale, showNotification, companyInfo, storeConfig}) => {
   const [cart, setCart] = useState([]);
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
@@ -717,6 +662,22 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState(null);
   const [showGroupSuggestions, setShowGroupSuggestions] = useState(false);
+  
+  // --- NOVO: Estado para Perfis Fiscais ---
+  const [taxProfiles, setTaxProfiles] = useState([]);
+
+  // --- NOVO: Buscar Perfis Fiscais do Supabase ---
+  useEffect(() => {
+    const fetchProfiles = async () => {
+      if (!storeConfig?.id) return;
+      const { data } = await supabase
+        .from('fiscal_tax_profiles')
+        .select('*')
+        .eq('firebase_store_id', String(storeConfig.id));
+      if (data) setTaxProfiles(data);
+    };
+    fetchProfiles();
+  }, [storeConfig]);
   
   // Configurações
   const isWholesaleEnabled = storeConfig?.enableWholesale;
@@ -883,10 +844,35 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
       }
     }
 
+    // --- CÁLCULO FISCAL AUTOMÁTICO (INTEGRAÇÃO FASE 6) ---
+    const clientData = clients.find(c => c.id === finalClientId) || null;
+    
+    const itemsWithTax = cart.map(item => {
+        // Encontra o produto original para ler NCM e Perfil
+        const originalProduct = products.find(p => p.id === (item.originalId || item.id));
+        
+        // Encontra o perfil fiscal correspondente
+        const taxProfile = taxProfiles.find(tp => tp.id === originalProduct?.taxProfileId);
+        
+        // Calcula!
+        const taxDetails = calculateItemTaxes(
+            { ...item, ...originalProduct }, 
+            clientData, 
+            companyInfo, 
+            taxProfile
+        );
+
+        return {
+            ...item,
+            taxDetails: taxDetails // Guarda o cálculo pronto no item
+        };
+    });
+    // -----------------------------------------------------
+
     const sale = {
       id: Date.now(),
       date: new Date().toISOString(),
-      items: cart,
+      items: itemsWithTax, // Salva os itens JÁ com impostos calculados
       total: totalCart,
       cost: totalCost,
       fee: feeAmount,
@@ -1847,6 +1833,69 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
     loadData();
   }, [storeConfig]);
 
+  // --- ESTADOS FASE 5: CERTIFICADO ---
+  const [certData, setCertData] = useState({ 
+    password: '', api_token: '', environment: 'HOMOLOG', fileName: '', base64: '' 
+  });
+
+  // --- NOVO USE EFFECT (Não apague o anterior) ---
+  // Este carrega apenas as configs do certificado/API
+  useEffect(() => {
+    const loadCertConfig = async () => {
+      if (!storeConfig?.id) return;
+      const { data } = await supabase
+        .from('fiscal_settings')
+        .select('*')
+        .eq('firebase_store_id', String(storeConfig.id))
+        .single();
+      
+      if (data) {
+        setCertData({
+          password: data.cert_password || '',
+          api_token: data.api_token || '',
+          environment: data.environment || 'HOMOLOG',
+          fileName: data.cert_base64 ? 'Certificado Salvo (Oculto)' : '',
+          base64: '' // Não trazemos o base64 de volta para a tela por segurança/peso
+        });
+      }
+    };
+    loadCertConfig();
+  }, [storeConfig]); // Roda quando a loja muda
+
+  // Função para ler o arquivo .pfx
+  const handleCertFile = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = function(evt) {
+        // Remove o cabeçalho "data:application/..." para pegar só o base64 puro
+        const b64 = evt.target.result.split(',')[1]; 
+        setCertData(prev => ({ ...prev, base64: b64, fileName: file.name }));
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  // Função para Salvar Configurações
+  const handleSaveCertSettings = async () => {
+    const storeIdStr = String(storeConfig.id);
+    const payload = {
+        firebase_store_id: storeIdStr,
+        cert_password: certData.password,
+        api_token: certData.api_token,
+        environment: certData.environment
+    };
+    // Só atualiza o arquivo se o usuário fez upload de um novo
+    if (certData.base64) payload.cert_base64 = certData.base64;
+
+    const { error } = await supabase
+        .from('fiscal_settings')
+        .upsert(payload, { onConflict: 'firebase_store_id' });
+
+    if (!error) showNotification('Configurações de API/Certificado salvas!', 'success');
+    else showNotification('Erro ao salvar: ' + error.message, 'error');
+  };
+
   const handleSaveCompany = async () => {
       if (!formData.address.ibgeCode) return showNotification('Código IBGE inválido. Busque o CEP novamente.', 'error');
       
@@ -1921,6 +1970,7 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
        <div className="flex gap-2 border-b pb-1 overflow-x-auto">
           <button onClick={() => setActiveTab('general')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors ${activeTab === 'general' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Dados Fiscais</button>
           <button onClick={() => setActiveTab('tax_profiles')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors ${activeTab === 'tax_profiles' ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Perfis Tributários</button>
+          <button onClick={() => setActiveTab('certificate')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors whitespace-nowrap ${activeTab === 'certificate' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Certificado | NFe</button>
           <button onClick={() => setActiveTab('users')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors ${activeTab === 'users' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Usuários</button>
        </div>
 
@@ -2048,7 +2098,132 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
                        </tbody>
                    </table>
                </div>
+              {/* --- SIMULADOR DE CÁLCULO (NOVO) --- */}
+               <div className="mt-8 pt-6 border-t border-slate-200">
+                    <h4 className="font-bold text-slate-700 flex items-center gap-2 mb-4">
+                        <div className="bg-indigo-100 p-1 rounded text-indigo-600"><CheckCircle size={16}/></div>
+                        Simulador de Regra Fiscal (Teste)
+                    </h4>
+                    
+                    <div className="bg-slate-50 p-4 rounded border border-slate-200 grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                        {/* Escolha o Perfil */}
+                        <div className="md:col-span-1">
+                            <label className="text-xs font-bold text-slate-500 mb-1">Perfil para Testar</label>
+                            <select id="sim_profile" className="w-full border p-2 rounded text-sm bg-white">
+                                {taxProfiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                            </select>
+                        </div>
+
+                        {/* Cenário do Cliente */}
+                        <div className="md:col-span-1">
+                            <label className="text-xs font-bold text-slate-500 mb-1">Local do Cliente</label>
+                            <select id="sim_location" className="w-full border p-2 rounded text-sm bg-white">
+                                <option value="INTERNAL">Mesmo Estado (Interna)</option>
+                                <option value="EXTERNAL">Outro Estado (Interestadual)</option>
+                            </select>
+                        </div>
+
+                        <div className="md:col-span-1">
+                            <label className="text-xs font-bold text-slate-500 mb-1">Tipo de Cliente</label>
+                            <select id="sim_type" className="w-full border p-2 rounded text-sm bg-white">
+                                <option value="1">Contribuinte (Revenda/Ind)</option>
+                                <option value="9">Não Contribuinte (Consumidor)</option>
+                            </select>
+                        </div>
+
+                        <div className="md:col-span-1">
+                            <button 
+                                onClick={() => {
+                                    const profileId = document.getElementById('sim_profile').value;
+                                    const location = document.getElementById('sim_location').value;
+                                    const type = document.getElementById('sim_type').value;
+                                    
+                                    const profile = taxProfiles.find(p => p.id == profileId);
+                                    
+                                    // Objetos Mock para teste
+                                    const mockProduct = { price: 100, qty: 1, ncm: '00000000' };
+                                    
+                                    // Simula empresa em SP (Pode ajustar conforme seu estado real ou pegar de companyInfo)
+                                    const mockCompany = { address: { state: 'SP' }, ...companyInfo }; 
+                                    
+                                    const mockClient = { 
+                                        address: { state: location === 'INTERNAL' ? mockCompany.address.state : 'XX' },
+                                        ie_indicator: type 
+                                    };
+
+                                    try {
+                                        const result = calculateItemTaxes(mockProduct, mockClient, mockCompany, profile);
+                                        
+                                        alert(`RESULTADO DA SIMULAÇÃO:\n\n` + 
+                                              `CFOP: ${result.cfop}\n` +
+                                              `CSOSN: ${result.csosn}\n` +
+                                              `Origem: ${result.origin}\n` +
+                                              `----------------\n` +
+                                              `Lógica:\n${result.auditLog ? result.auditLog.join('\n') : ''}`);
+                                    } catch (e) {
+                                        alert("Erro ao simular: " + e.message);
+                                    }
+                                }}
+                                className="w-full bg-slate-800 text-white px-4 py-2 rounded text-sm font-bold hover:bg-slate-700 h-[38px]"
+                            >
+                                Simular Cálculo
+                            </button>
+                        </div>
+                    </div>
+                    <p className="text-[10px] text-slate-400 mt-2">
+                        Use este simulador para garantir que o CFOP (5102/5405/6102) está sendo escolhido corretamente antes de emitir notas.
+                    </p>
+               </div>
            </div>
+       )}
+
+       {activeTab === 'certificate' && (
+         <div className="bg-white p-6 rounded-b border border-t-0 border-slate-200 shadow-sm animate-in fade-in">
+           <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><Lock size={20}/> Configuração de Emissão (NF-e)</h3>
+           
+           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+             {/* Lado Esquerdo: API */}
+             <div className="space-y-4">
+                <h4 className="font-bold text-sm text-indigo-600 border-b pb-2">1. Conexão com Gateway</h4>
+                <div>
+                    <label className="block text-xs font-bold text-slate-500 mb-1">Token da API</label>
+                    <input className="w-full border p-2 rounded text-sm" type="password" value={certData.api_token} onChange={e => setCertData({...certData, api_token: e.target.value})} placeholder="Cole seu token aqui"/>
+                </div>
+                <div>
+                    <label className="block text-xs font-bold text-slate-500 mb-1">Ambiente</label>
+                    <select className="w-full border p-2 rounded text-sm" value={certData.environment} onChange={e => setCertData({...certData, environment: e.target.value})}>
+                        <option value="HOMOLOG">Homologação (Testes)</option>
+                        <option value="PRODUCAO">Produção (Valendo)</option>
+                    </select>
+                </div>
+             </div>
+
+             {/* Lado Direito: Certificado */}
+             <div className="space-y-4">
+                <h4 className="font-bold text-sm text-indigo-600 border-b pb-2">2. Certificado Digital A1</h4>
+                <div>
+                    <label className="block text-xs font-bold text-slate-500 mb-1">Arquivo .pfx</label>
+                    <div className="flex gap-2 items-center">
+                        <label className="cursor-pointer bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded text-sm font-bold flex items-center gap-2">
+                            <Upload size={16}/> Escolher Arquivo
+                            <input type="file" accept=".pfx" className="hidden" onChange={handleCertFile} />
+                        </label>
+                        <span className="text-xs text-slate-400 italic truncate max-w-[150px]">{certData.fileName || 'Nenhum selecionado'}</span>
+                    </div>
+                </div>
+                <div>
+                    <label className="block text-xs font-bold text-slate-500 mb-1">Senha do Certificado</label>
+                    <input className="w-full border p-2 rounded text-sm" type="password" value={certData.password} onChange={e => setCertData({...certData, password: e.target.value})} />
+                </div>
+             </div>
+           </div>
+
+           <div className="mt-8 pt-4 border-t flex justify-end">
+             <button onClick={handleSaveCertSettings} className="bg-emerald-600 text-white px-6 py-2 rounded text-sm font-bold hover:bg-emerald-700 flex items-center gap-2">
+                <Save size={18}/> Salvar Configurações
+             </button>
+           </div>
+         </div>
        )}
        
        {/* Usuários (Mantido simples) */}
@@ -2334,7 +2509,12 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
                 storeConfig={store} 
               />
             )}
-            {activeModule === 'clients' && <ClientsManager clients={store.clients} setClients={(c) => updateStore({...store, clients: c})} showNotification={showNotification} />}
+            {activeModule === 'clients' && (
+              <ClientsManager 
+                  storeConfig={store} 
+                  showNotification={showNotification} 
+              />
+            )}
             {activeModule === 'transactions' && <Transactions products={products} priceGroups={store.priceGroups || []} onSaveEntry={() => {}} />}
             {activeModule === 'priceGroups' && <PriceGroups products={products} showNotification={showNotification} />}
             {activeModule === 'finance' && <Finance sales={realtimeSales} transactions={store.transactions} transactionCategories={store.transactionCategories} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} />}
