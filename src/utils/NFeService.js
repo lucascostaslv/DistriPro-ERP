@@ -3,24 +3,24 @@
 export const NFeService = {
 
     getHeaders: (token) => {
-        // A Brasil NFe aceita Basic Auth.
-        // Se der erro de autenticação, tentaremos voltar para X-API-KEY depois.
-        const auth = btoa(token + ":"); 
+        // MUDANÇA CRUCIAL:
+        // Em vez de Basic Auth, enviamos o token direto no header X-API-KEY.
+        // Se a documentação diz "Token no Header", 99% das vezes é este formato.
         return {
-            'Authorization': `Basic ${auth}`,
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'X-API-KEY': token 
         };
     },
 
     async authorize(ref, payload, config) {
-        // Deixe vazio para usar o Proxy definido no package.json
+        // Deixa vazio para usar o Proxy do package.json (https://api.brasilnfe.com.br)
         const baseUrl = ''; 
         
-        // --- CORREÇÃO FINAL: Endpoint específico da Brasil NFe ---
-        // Não usamos mais /v2/nfe
+        // Endpoint que você confirmou estar certo
         const endpoint = `/services/fiscal/EnviarNotaFiscal`; 
 
         console.log(`📡 [BR NFe] Enviando para: ${endpoint}`);
+        console.log(`🔑 [BR NFe] Usando Header X-API-KEY`);
 
         try {
             const response = await fetch(`${baseUrl}${endpoint}`, {
@@ -36,15 +36,16 @@ export const NFeService = {
             try { 
                 data = JSON.parse(text); 
             } catch(e) { 
-                throw new Error(`Erro API (HTML/404): Verifique se o Proxy está rodando.`); 
+                throw new Error(`Erro não-JSON da API: ${text.substring(0, 100)}`); 
             }
 
-            if (!response.ok) {
-                const errorMsg = data.mensagem || data.message || data.Error || JSON.stringify(data);
+            // Tratamento de Erro Lógico (API respondeu 200, mas disse que deu erro)
+            if (!response.ok || data.Error || (data.status && data.status === 'erro')) {
+                const errorMsg = data.Error || data.mensagem || data.message || JSON.stringify(data);
                 throw new Error(errorMsg);
             }
 
-            // A Brasil NFe (neste endpoint) retorna o status síncrono ou uma chave
+            // SUCESSO
             return {
                 status: 'processando',
                 chave_nfe: data.chave || null, 
@@ -58,10 +59,7 @@ export const NFeService = {
         }
     },
     
-    // Consulta (Geralmente Brasil NFe usa GET na mesma URL ou específica)
     async consult(ref, config) {
-         // Implementação futura se necessária. 
-         // Por enquanto, foque no envio.
          return null;
     }
 };

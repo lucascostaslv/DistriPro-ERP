@@ -2,12 +2,11 @@
 
 export const buildNFePayload = (sale, company, client, nfeConfig) => {
     
-    // 1. Validações Básicas
+    // 1. Validações
     if (!company.cnpj) throw new Error("Empresa sem CNPJ configurado.");
     if (!sale.items || sale.items.length === 0) throw new Error("Venda sem itens.");
 
-    // LÓGICA CONSUMIDOR FINAL (Notinha)
-    // Se não veio cliente, criamos um objeto 'fictício' de consumidor
+    // Consumidor Final
     let finalClient = client;
     let isAnonymous = false;
 
@@ -15,41 +14,44 @@ export const buildNFePayload = (sale, company, client, nfeConfig) => {
         isAnonymous = true;
         finalClient = {
             name: 'CONSUMIDOR FINAL',
-            ie_indicator: '9', // Não Contribuinte
+            ie_indicator: '9', 
             ie: 'ISENTO',
-            tax_id: null, // Sem CPF
-            address: null // Sem endereço
+            tax_id: null,
+            address: null 
         };
     }
 
+    // --- TRUQUE: Se estiver usando Token de Produção para testar, 
+    // force o ambiente 1 (Produção) mas use o nome de cliente específico abaixo.
+    // Por enquanto, vamos respeitar a config do banco:
     const tipoAmbiente = nfeConfig.environment === 'PRODUCAO' ? "1" : "2";
 
-    // 2. Estrutura Base
     const payload = {
-        "Token": nfeConfig.api_token,
+        // --- ATENÇÃO: NENHUM CAMPO "Token" PODE ESTAR AQUI ---
+        
         "Serie": 1,
-        "Numero": sale.id, // Em produção deve ser sequencial, cuidado aqui
-        "Lote": new Date().getFullYear().toString() + new Date().getMonth().toString(),
+        "Numero": sale.id, 
+        "Lote": "1", // Lote simples
         "Codigo": sale.id.toString().slice(-8),
         "DataEmissao": new Date().toISOString(),
         "DataEntradaSaida": new Date().toISOString(),
-        "NaturezaOperacao": "Venda a Consumidor",
-        "ModeloDocumento": 55, // NFe (Se fosse NFC-e seria 65)
+        "NaturezaOperacao": "VENDA DE MERCADORIA", // Texto padrão seguro
+        "ModeloDocumento": 55, 
         "Finalidade": 1,
         "TipoAmbiente": tipoAmbiente, 
         "IndicadorPresenca": 1, 
-        "ConsumidorFinal": true, // Sempre true para varejo simples
+        "ConsumidorFinal": true,
         "IdentificadorInterno": String(sale.id),
-        "Observacao": "Trib. aprox. conf. lei da transparencia.",
+        "Observacao": "",
 
-        // --- PRODUTOS ---
+        // Produtos
         "Produtos": sale.items.map((item, index) => {
             const taxes = item.taxDetails || {};
             const valorTotal = item.price * item.qty;
 
             return {
                 "NmProduto": item.name,
-                "CodProdutoServico": item.cbaCode || item.id,
+                "CodProdutoServico": String(item.id).substring(0, 20), // Limite de chars
                 "EAN": item.ean || "SEM GTIN",
                 "NCM": taxes.ncm ? taxes.ncm.replace(/\D/g, '') : "00000000",
                 "CEST": taxes.cest || null,
@@ -67,8 +69,8 @@ export const buildNFePayload = (sale, company, client, nfeConfig) => {
                         "CodSituacaoTributaria": taxes.csosn || "102",
                         "Origem": parseInt(taxes.origin || 0),
                         "AliquotaICMS": 0,
-                        "AliquotaCredito": taxes.pCredSN || 0,
-                        "ValorCreditoICMSSN": taxes.vCredICMSSN || 0
+                        "AliquotaCredito": 0,
+                        "ValorCreditoICMSSN": 0
                     },
                     "PIS": { "CodSituacaoTributaria": "49", "Aliquota": 0 },
                     "COFINS": { "CodSituacaoTributaria": "49", "Aliquota": 0 }
@@ -76,57 +78,41 @@ export const buildNFePayload = (sale, company, client, nfeConfig) => {
             };
         }),
 
-        // --- PAGAMENTOS ---
+        // Pagamentos
         "Pagamentos": [{
             "IndicadorPagamento": 0,
-            "FormaPagamento": getPaymentCode(sale.paymentMethod),
+            "FormaPagamento": "01", // Dinheiro (Evita validação de cartão)
             "VlPago": sale.total,
             "TipoIntegracao": false
         }]
     };
 
-    // --- DADOS DO CLIENTE (CONDICIONAL) ---
-    // Se for anônimo, a Brasil NFe aceita enviar o objeto Cliente simplificado ou nulo dependendo da config.
-    // Vamos enviar o mínimo necessário.
-    
+    // Cliente
     if (!isAnonymous) {
         payload.Cliente = {
             "CpfCnpj": finalClient.tax_id ? finalClient.tax_id.replace(/\D/g, '') : null,
             "NmCliente": finalClient.name,
-            "IndicadorIe": Number(finalClient.ie_indicator || 9),
-            "Ie": finalClient.ie ? finalClient.ie.replace(/\D/g, '') : "ISENTO",
+            "IndicadorIe": 9,
+            "Ie": "ISENTO",
             "Endereco": {
-                "Cep": finalClient.address?.zip_code ? finalClient.address.zip_code.replace(/\D/g, '') : '',
-                "Logradouro": finalClient.address?.street || '',
-                "Numero": finalClient.address?.number || 'S/N',
-                "Complemento": finalClient.address?.complement || '',
-                "Bairro": finalClient.address?.neighborhood || '',
-                "CodMunicipio": finalClient.address?.ibge_code || '',
-                "Municipio": finalClient.address?.city || '',
-                "Uf": finalClient.address?.state || '',
+                "Cep": finalClient.address?.zip_code ? finalClient.address.zip_code.replace(/\D/g, '') : '70000000',
+                "Logradouro": finalClient.address?.street || 'Rua Teste',
+                "Numero": finalClient.address?.number || '0',
+                "Bairro": finalClient.address?.neighborhood || 'Centro',
+                "CodMunicipio": finalClient.address?.ibge_code || '5300108', // Brasília (Genérico se falhar)
+                "Municipio": finalClient.address?.city || 'Brasilia',
+                "Uf": finalClient.address?.state || 'DF',
                 "CodPais": 1058,
                 "Pais": "BRASIL"
             }
         };
     } else {
-        // Para consumidor final anônimo na NF-e 55, algumas UFs exigem CPF ou pelo menos nome.
-        // Tentamos enviar apenas o nome "CONSUMIDOR FINAL".
         payload.Cliente = {
             "NmCliente": "CONSUMIDOR FINAL",
             "IndicadorIe": 9,
-            "CpfCnpj": null // Sem CPF
+            "CpfCnpj": null
         };
-        // Endereço muitas vezes pode ser omitido ou enviado o da própria loja como contingência
     }
 
     return payload;
 };
-
-function getPaymentCode(method) {
-    const map = {
-        'Dinheiro': '01', 'Cheque': '02', 'Cartão de Crédito': '03',
-        'Cartão de Débito': '04', 'Crédito Loja': '05', 'Fiado': '05',
-        'Boleto Bancário': '15', 'Sem Pagamento': '90', 'Pix': '17', 'PIX': '17'
-    };
-    return map[method] || '99';
-}

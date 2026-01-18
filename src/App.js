@@ -562,6 +562,13 @@ const Dashboard = ({ sales, products }) => {
   const totalRevenue = sales.reduce((acc, s) => acc + s.total, 0);
   const totalProfit = sales.reduce((acc, s) => acc + s.profit, 0);
   
+  // --- CORREÇÃO: Lógica de Alertas Dinâmica (Baseada nos produtos carregados) ---
+  const lowStockItems = products.filter(p => {
+      // Se tiver minStock definido, usa. Se não, usa 5 como padrão de alerta.
+      const threshold = p.minStock !== undefined ? Number(p.minStock) : 5; 
+      return p.stock <= threshold;
+  });
+
   // Dados dinâmicos para o gráfico (Últimos 7 dias)
   const chartData = Array.from({ length: 7 }).map((_, i) => {
     const d = new Date();
@@ -605,7 +612,7 @@ const Dashboard = ({ sales, products }) => {
         <CardKPI title="Faturamento Mensal" value={formatCurrency(totalRevenue)} subtext="+12% vs mês anterior" icon={DollarSign} color="bg-emerald-500" />
         <CardKPI title="Lucro Estimado" value={formatCurrency(totalProfit)} subtext="Líquido de taxas e custos" icon={BarChart3} color="bg-blue-500" />
         <CardKPI title="Vendas Hoje" value={sales.filter(s => isToday(s.date)).length} subtext="Pedidos realizados" icon={ShoppingCart} color="bg-indigo-500" />
-        <CardKPI title="Estoque Baixo" value={products.filter(p => p.stock <= p.minStock).length} subtext="Itens críticos" icon={AlertTriangle} color="bg-red-500" />
+        <CardKPI title="Estoque Baixo" value={lowStockItems.length} subtext="Itens críticos" icon={AlertTriangle} color="bg-red-500" />
       </div>
       
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -626,15 +633,25 @@ const Dashboard = ({ sales, products }) => {
         
         <div className="bg-white p-6 rounded-lg border border-slate-200 shadow-sm">
           <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><AlertTriangle size={18}/> Alertas de Estoque</h3>
-          <div className="space-y-3">
-            <div className="flex items-center justify-between p-3 bg-red-50 text-red-700 rounded border border-red-100">
-              <span className="flex items-center gap-2 text-sm font-medium"><AlertTriangle size={16}/> Cerveja Pilsen (Lote L001)</span>
-              <span className="text-xs font-bold bg-white px-2 py-1 rounded">Vence em 5 dias</span>
-            </div>
-            <div className="flex items-center justify-between p-3 bg-amber-50 text-amber-700 rounded border border-amber-100">
-              <span className="flex items-center gap-2 text-sm font-medium"><Package size={16}/> Refrigerante Cola</span>
-              <span className="text-xs font-bold bg-white px-2 py-1 rounded">Estoque Baixo</span>
-            </div>
+          {/* CORREÇÃO: Lista dinâmica baseada nos produtos da loja atual */}
+          <div className="space-y-3 max-h-64 overflow-y-auto pr-1 custom-scrollbar">
+            {lowStockItems.length === 0 ? (
+                <div className="text-center py-6 text-slate-400 text-sm">
+                    <CheckCircle className="mx-auto mb-2 opacity-50" size={24}/>
+                    Tudo certo com o estoque!
+                </div>
+            ) : (
+                lowStockItems.map(item => (
+                    <div key={item.id} className="flex items-center justify-between p-3 bg-amber-50 text-amber-700 rounded border border-amber-100">
+                      <span className="flex items-center gap-2 text-sm font-medium truncate max-w-[180px]" title={item.name}>
+                        <Package size={16} className="shrink-0"/> {item.name}
+                      </span>
+                      <span className="text-xs font-bold bg-white px-2 py-1 rounded whitespace-nowrap border border-amber-200">
+                        {item.stock} un (Mín: {item.minStock !== undefined ? item.minStock : 5})
+                      </span>
+                    </div>
+                ))
+            )}
           </div>
         </div>
       </div>
@@ -2295,53 +2312,56 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
   const [notification, setNotification] = useState(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
+  // --- CORREÇÃO: Estado EXCLUSIVO para clientes do Supabase ---
+  // Isso garante que não usamos dados antigos do Firebase/LocalStorage
+  const [salesClients, setSalesClients] = useState([]);
+
   const getAppId = () => {
     if (store && store.id) return String(store.id);
     return typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
   };
 
+  // --- BUSCA DE CLIENTES (Somente Supabase) ---
   useEffect(() => {
     const fetchClientsFromSupabase = async () => {
         if (!store?.id) return;
+        
         try {
+            // Consulta direta na tabela fiscal_clients
             const { data, error } = await supabase
                 .from('fiscal_clients')
                 .select('*')
-                .eq('firebase_store_id', String(store.id));
+                .eq('firebase_store_id', String(store.id))
+                .order('name'); // Ordena alfabeticamente
             
             if (error) throw error;
             
-            // Atualiza o estado local da loja com os clientes do Supabase
-            // Isso garante que o PDV veja os clientes criados no ClientsManager
+            // Atualiza APENAS o estado local. 
+            // NÃO salvamos isso no 'store' do Firebase para evitar cache de excluídos.
             if (data) {
-                updateStore(prev => ({ ...prev, clients: data }));
+                setSalesClients(data);
             }
         } catch (err) {
             console.error("Erro ao sincronizar clientes:", err);
         }
     };
 
-    // Busca ao carregar e quando mudar o módulo para 'pdv' para garantir frescor
+    // Recarrega sempre que mudar de loja ou entrar no PDV/Clientes
     fetchClientsFromSupabase();
-  }, [store?.id, activeModule]);
+  }, [store?.id, activeModule]); 
 
   const showNotification = useCallback((message, type) => { setNotification({ message, type }); setTimeout(() => setNotification(null), 3000); }, []);
 
-  // --- ESTADOS DO BANCO DE DADOS ---
+  // --- ESTADOS DO BANCO DE DADOS (FIREBASE - APENAS PRODUTOS E VENDAS) ---
   const [products, setProducts] = useState([]);
   const [realtimeSales, setRealtimeSales] = useState([]);
 
   // Listener Produtos
   useEffect(() => {
-    // 1. Limpa os produtos antigos imediatamente para não misturar dados na tela
     setProducts([]); 
-    
-    // 2. Se não tiver loja carregada, não busca nada
     if (!store || !store.id) return;
 
-    const appId = String(store.id); // Força o uso do ID da loja atual
-    console.log("🔄 Carregando produtos da loja:", appId);
-
+    const appId = String(store.id);
     const productsRef = collection(firebase.db, 'artifacts', appId, 'public', 'data', 'products');
     
     const unsubscribe = onSnapshot(productsRef, (snapshot) => {
@@ -2390,7 +2410,6 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
     }
   };
 
-  
   // Notificação de Contas a Pagar
   useEffect(() => {
     const checkBillNotifications = async () => {
@@ -2435,14 +2454,11 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
   // --- FUNÇÃO DE EMISSÃO NF-E ---
   const handleEmitNFe = async (sale) => {
     if (!window.confirm(`Confirma emissão de NF-e para a venda #${sale.id}?`)) return;
-    
-    // Notificação de progresso
     showNotification('Iniciando emissão de NF-e...', 'info');
 
     try {
         const appId = String(store.id);
 
-        // 1. Buscar Configurações da API (Token/Ambiente)
         const { data: nfeConfig, error: configError } = await supabase
             .from('fiscal_settings')
             .select('*')
@@ -2453,22 +2469,19 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
             throw new Error("Configuração de NFe incompleta. Verifique o token em Configurações.");
         }
 
-        // 2. Buscar Dados Completos do Cliente (Endereço, CPF, etc.)
+        // Busca dados frescos do cliente no Supabase se necessário
         let clientFull = null;
         if (sale.clientId) {
-            // Tenta achar na lista local primeiro (store.clients)
-            clientFull = store.clients?.find(c => c.id === sale.clientId);
+            clientFull = salesClients?.find(c => c.id === sale.clientId);
             
-            // Se não tiver endereço completo (IBGE), tenta buscar no Supabase para garantir
             if (!clientFull?.address?.ibge_code) {
                  const { data: clientDb } = await supabase
                     .from('fiscal_clients')
                     .select('*')
                     .eq('firebase_store_id', appId)
-                    .eq('id', sale.clientId) // Cuidado: verifique se sale.clientId é o ID do Supabase ou timestamp local
+                    .eq('id', sale.clientId) 
                     .single();
                  
-                 // Mapper rápido se vier do Supabase (ajuste conforme sua estrutura)
                  if (clientDb) {
                      clientFull = {
                          ...clientDb,
@@ -2486,21 +2499,16 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
             }
         }
 
-        // 3. Construir o JSON (Builder)
         const payload = buildNFePayload(sale, store.companyInfo, clientFull, nfeConfig);
         console.log("Payload NFe Gerado:", payload);
 
-        // 4. Enviar para API (Service)
-        // Usamos sale.id como referência única para evitar duplicidade
         const apiResponse = await NFeService.authorize(String(sale.id), payload, nfeConfig);
 
-        // 5. Atualizar Venda no Firebase com Status
         const saleRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'sales', String(sale.id));
-        
         await updateDoc(saleRef, {
-            nfeStatus: apiResponse.status, // ex: "processando", "autorizado"
+            nfeStatus: apiResponse.status, 
             nfeRef: String(sale.id),
-            nfeKey: apiResponse.chave_nfe || null, // Se já vier
+            nfeKey: apiResponse.chave_nfe || null,
             nfeMessage: apiResponse.mensagem || 'Enviado para processamento'
         });
 
@@ -2537,12 +2545,7 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
   return (
     <div className="flex h-screen bg-slate-100 font-sans text-slate-900 overflow-hidden">
       {/* --- SIDEBAR --- */}
-      <aside 
-        className={`
-          bg-slate-900 flex flex-col shadow-xl z-20 transition-all duration-300 ease-in-out relative
-          ${isSidebarCollapsed ? 'w-20' : 'w-64'}
-        `}
-      >
+      <aside className={`bg-slate-900 flex flex-col shadow-xl z-20 transition-all duration-300 ease-in-out relative ${isSidebarCollapsed ? 'w-20' : 'w-64'}`}>
         <button 
           onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
           className="absolute -right-3 top-6 bg-slate-800 text-slate-400 border border-slate-700 rounded-full p-1 hover:text-white hover:bg-slate-700 transition-colors z-30 shadow-sm"
@@ -2550,7 +2553,6 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
           {isSidebarCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
         </button>
 
-        {/* Header */}
         <div className={`p-4 border-b border-slate-800 flex flex-col items-center justify-center transition-all duration-300 ${isSidebarCollapsed ? 'h-20' : 'h-32'}`}>
            {isSidebarCollapsed ? (
              <div className="p-2 bg-indigo-600 rounded-lg animate-in fade-in zoom-in duration-300">
@@ -2561,7 +2563,6 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
                 <div className="flex items-center gap-2 text-xl font-bold text-white">
                   <Package className="text-indigo-500"/> 
                   <span>DistriPro</span>
-                  {/* ÍCONE DA CERVEJA VOLTOU AQUI */}
                   <Beer className="text-amber-500" size={20}/>
                 </div>
                 <span className="text-xs bg-indigo-600 px-1.5 py-0.5 rounded text-white mt-2">ERP Enterprise</span>
@@ -2569,7 +2570,6 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
            )}
         </div>
 
-        {/* Navegação (Com no-scrollbar) */}
         <nav className="flex-1 py-4 space-y-1 overflow-y-auto overflow-x-hidden no-scrollbar">
           <MenuButton id="dashboard" icon={BarChart3} label="Dashboard" />
           <MenuButton id="pdv" icon={ShoppingCart} label="PDV & Vendas" />
@@ -2581,26 +2581,17 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
           <MenuButton id="settings" icon={Settings} label="Configurações" />
         </nav>
 
-        {/* Rodapé (Fluido com mt-auto) */}
         <div className="mt-auto p-4 border-t border-slate-800 bg-slate-900/50">
           <button 
             onClick={onLogout} 
             title={isSidebarCollapsed ? "Sair do Sistema" : ""}
-            className={`
-              w-full flex items-center rounded text-sm font-medium text-red-400 hover:bg-slate-800 hover:text-red-300 transition-colors
-              ${isSidebarCollapsed ? 'justify-center p-2' : 'gap-3 px-4 py-2'}
-            `}
+            className={`w-full flex items-center rounded text-sm font-medium text-red-400 hover:bg-slate-800 hover:text-red-300 transition-colors ${isSidebarCollapsed ? 'justify-center p-2' : 'gap-3 px-4 py-2'}`}
           >
             <LogOut size={20}/> 
-            <span className={`whitespace-nowrap overflow-hidden transition-all duration-300 ${isSidebarCollapsed ? 'w-0 opacity-0' : 'w-auto opacity-100'}`}>
-              Sair
-            </span>
+            <span className={`whitespace-nowrap overflow-hidden transition-all duration-300 ${isSidebarCollapsed ? 'w-0 opacity-0' : 'w-auto opacity-100'}`}>Sair</span>
           </button>
-
           <div className={`mt-4 flex flex-col items-center transition-all duration-500 ${isSidebarCollapsed ? 'opacity-50' : 'opacity-100'}`}>
-             {isSidebarCollapsed ? (
-                <img src={logoWhite} alt="M" className="h-6 w-auto opacity-50" />
-             ) : (
+             {isSidebarCollapsed ? (<img src={logoWhite} alt="M" className="h-6 w-auto opacity-50" />) : (
                 <>
                   <img src={logoWhite} alt="Máquina Software" className="h-10 mb-2 opacity-80" />
                   <span className="text-[10px] text-slate-500">Made by Máquina Software</span>
@@ -2641,8 +2632,15 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
               <PDV 
                 products={products}
                 groups={store.priceGroups || []}
-                clients={store.clients || []}
-                setClients={(c) => updateStore({...store, clients: c})}
+                
+                // MUDANÇA CRUCIAL: Passamos APENAS a lista do Supabase
+                // Isso elimina os "clientes fantasmas" do cache do Firebase
+                clients={salesClients || []}
+                
+                // MUDANÇA CRUCIAL: Atualiza apenas o estado local, não o Store global
+                // Assim, cadastro rápido no PDV não suja o banco com dados temporários não-persistidos
+                setClients={(newClients) => setSalesClients(newClients)} 
+
                 feeProfiles={store.feeProfiles || []}
                 companyInfo={store.companyInfo}
                 onUpdateProduct={async (updatedList) => {
@@ -2674,7 +2672,7 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
             {activeModule === 'inventory' && (
                 <InventoryWMS 
                     storeConfig={store} 
-                    products={products} // <--- O SEGREDO ESTÁ AQUI
+                    products={products} 
                     showNotification={showNotification} 
                 />
             )}
