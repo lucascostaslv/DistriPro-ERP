@@ -1,100 +1,132 @@
 // src/utils/NFeBuilder.js
 
-/**
- * Constrói o Payload JSON para envio à API de Nota Fiscal
- * Compatível com padrão REST (Focus/BrasilNFe)
- */
 export const buildNFePayload = (sale, company, client, nfeConfig) => {
     
-    // 1. Validações de Segurança
+    // 1. Validações Básicas
     if (!company.cnpj) throw new Error("Empresa sem CNPJ configurado.");
-    if (!client && !nfeConfig.allow_anonymous) throw new Error("Cliente não identificado para NF-e.");
     if (!sale.items || sale.items.length === 0) throw new Error("Venda sem itens.");
 
-    // 2. Cabeçalho
-    const payload = {
-        natureza_operacao: "VENDA DE MERCADORIAS",
-        data_emissao: new Date().toISOString(),
-        tipo_documento: 1, // 1=Saída
-        local_destino: 1,  // 1=Interna (Default, ajustável se UF for diferente)
-        finalidade_emissao: 1, // 1=Normal
-        consumidor_final: 1, // 1=Sim
-        presenca_comprador: 1, // 1=Presencial
-        
-        // Emitente (Quem vende)
-        cnpj_emitente: company.cnpj.replace(/\D/g, ''),
-        
-        // Destinatário (Quem compra)
-        // Se não tiver cliente (NFC-e), não envia o objeto destinatário ou envia vazio dependendo da API
-        destinatario: client ? {
-            cpf_cnpj: client.tax_id.replace(/\D/g, ''),
-            nome: client.name,
-            indicador_inscricao_estadual: client.ie_indicator || '9',
-            inscricao_estadual: client.ie ? client.ie.replace(/\D/g, '') : null,
-            email: client.email,
-            endereco: {
-                logradouro: client.address?.street,
-                numero: client.address?.number,
-                bairro: client.address?.neighborhood,
-                codigo_municipio: client.address?.ibge_code, // OBRIGATÓRIO
-                nome_municipio: client.address?.city,
-                uf: client.address?.state,
-                cep: client.address?.zip ? client.address.zip.replace(/\D/g, '') : ''
-            }
-        } : null,
+    // LÓGICA CONSUMIDOR FINAL (Notinha)
+    // Se não veio cliente, criamos um objeto 'fictício' de consumidor
+    let finalClient = client;
+    let isAnonymous = false;
 
-        items: []
+    if (!finalClient) {
+        isAnonymous = true;
+        finalClient = {
+            name: 'CONSUMIDOR FINAL',
+            ie_indicator: '9', // Não Contribuinte
+            ie: 'ISENTO',
+            tax_id: null, // Sem CPF
+            address: null // Sem endereço
+        };
+    }
+
+    const tipoAmbiente = nfeConfig.environment === 'PRODUCAO' ? "1" : "2";
+
+    // 2. Estrutura Base
+    const payload = {
+        "Token": nfeConfig.api_token,
+        "Serie": 1,
+        "Numero": sale.id, // Em produção deve ser sequencial, cuidado aqui
+        "Lote": new Date().getFullYear().toString() + new Date().getMonth().toString(),
+        "Codigo": sale.id.toString().slice(-8),
+        "DataEmissao": new Date().toISOString(),
+        "DataEntradaSaida": new Date().toISOString(),
+        "NaturezaOperacao": "Venda a Consumidor",
+        "ModeloDocumento": 55, // NFe (Se fosse NFC-e seria 65)
+        "Finalidade": 1,
+        "TipoAmbiente": tipoAmbiente, 
+        "IndicadorPresenca": 1, 
+        "ConsumidorFinal": true, // Sempre true para varejo simples
+        "IdentificadorInterno": String(sale.id),
+        "Observacao": "Trib. aprox. conf. lei da transparencia.",
+
+        // --- PRODUTOS ---
+        "Produtos": sale.items.map((item, index) => {
+            const taxes = item.taxDetails || {};
+            const valorTotal = item.price * item.qty;
+
+            return {
+                "NmProduto": item.name,
+                "CodProdutoServico": item.cbaCode || item.id,
+                "EAN": item.ean || "SEM GTIN",
+                "NCM": taxes.ncm ? taxes.ncm.replace(/\D/g, '') : "00000000",
+                "CEST": taxes.cest || null,
+                "Quantidade": item.qty,
+                "UnidadeComercial": item.unit || "UN",
+                "ValorUnitario": item.price,
+                "ValorTotal": valorTotal,
+                "ValorDesconto": 0,
+                "CFOP": parseInt(taxes.cfop || 5102),
+                "NItemPed": index + 1,
+                "OrigemProduto": parseInt(taxes.origin || 0),
+                
+                "Imposto": {
+                    "ICMS": {
+                        "CodSituacaoTributaria": taxes.csosn || "102",
+                        "Origem": parseInt(taxes.origin || 0),
+                        "AliquotaICMS": 0,
+                        "AliquotaCredito": taxes.pCredSN || 0,
+                        "ValorCreditoICMSSN": taxes.vCredICMSSN || 0
+                    },
+                    "PIS": { "CodSituacaoTributaria": "49", "Aliquota": 0 },
+                    "COFINS": { "CodSituacaoTributaria": "49", "Aliquota": 0 }
+                }
+            };
+        }),
+
+        // --- PAGAMENTOS ---
+        "Pagamentos": [{
+            "IndicadorPagamento": 0,
+            "FormaPagamento": getPaymentCode(sale.paymentMethod),
+            "VlPago": sale.total,
+            "TipoIntegracao": false
+        }]
     };
 
-    // 3. Itens (Produtos)
-    payload.items = sale.items.map((item, index) => {
-        // Recupera o cálculo fiscal feito na Fase 6
-        // Se a venda for antiga e não tiver taxDetails, isso vai falhar (correto, força editar)
-        const taxes = item.taxDetails || {};
-
-        if (!taxes.cfop) throw new Error(`Item ${index+1} (${item.name}) sem cálculo fiscal. Cancele e refaça a venda.`);
-
-        return {
-            numero_item: index + 1,
-            codigo_produto: item.cbaCode || item.originalId || 'ITEM'+index,
-            descricao: item.name,
-            cfop: taxes.cfop, // Vem do TaxCalculator
-            unidade_comercial: item.unit || 'UN',
-            quantidade_comercial: item.qty,
-            valor_unitario_comercial: item.price,
-            valor_bruto: item.price * item.qty,
-            codigo_ncm: taxes.ncm ? taxes.ncm.replace(/\D/g,'') : '',
-            
-            // Impostos (Simples Nacional)
-            icms_origem: taxes.origin || '0',
-            icms_situacao_tributaria: taxes.csosn, // 102, 500, etc.
-            
-            // PIS/COFINS (Geralmente 49 ou 99 no Simples)
-            pis_situacao_tributaria: taxes.cst_pis_cofins || '49',
-            cofins_situacao_tributaria: taxes.cst_pis_cofins || '49'
+    // --- DADOS DO CLIENTE (CONDICIONAL) ---
+    // Se for anônimo, a Brasil NFe aceita enviar o objeto Cliente simplificado ou nulo dependendo da config.
+    // Vamos enviar o mínimo necessário.
+    
+    if (!isAnonymous) {
+        payload.Cliente = {
+            "CpfCnpj": finalClient.tax_id ? finalClient.tax_id.replace(/\D/g, '') : null,
+            "NmCliente": finalClient.name,
+            "IndicadorIe": Number(finalClient.ie_indicator || 9),
+            "Ie": finalClient.ie ? finalClient.ie.replace(/\D/g, '') : "ISENTO",
+            "Endereco": {
+                "Cep": finalClient.address?.zip_code ? finalClient.address.zip_code.replace(/\D/g, '') : '',
+                "Logradouro": finalClient.address?.street || '',
+                "Numero": finalClient.address?.number || 'S/N',
+                "Complemento": finalClient.address?.complement || '',
+                "Bairro": finalClient.address?.neighborhood || '',
+                "CodMunicipio": finalClient.address?.ibge_code || '',
+                "Municipio": finalClient.address?.city || '',
+                "Uf": finalClient.address?.state || '',
+                "CodPais": 1058,
+                "Pais": "BRASIL"
+            }
         };
-    });
-
-    // 4. Pagamento
-    payload.formas_pagamento = [{
-        forma_pagamento: getPaymentCode(sale.paymentMethod),
-        valor_pagamento: sale.total,
-        tipo_integracao: 2 // 2=Manual (Sem TEF)
-    }];
+    } else {
+        // Para consumidor final anônimo na NF-e 55, algumas UFs exigem CPF ou pelo menos nome.
+        // Tentamos enviar apenas o nome "CONSUMIDOR FINAL".
+        payload.Cliente = {
+            "NmCliente": "CONSUMIDOR FINAL",
+            "IndicadorIe": 9,
+            "CpfCnpj": null // Sem CPF
+        };
+        // Endereço muitas vezes pode ser omitido ou enviado o da própria loja como contingência
+    }
 
     return payload;
 };
 
-// Helper para converter "Pix", "Dinheiro" em códigos da SEFAZ
 function getPaymentCode(method) {
     const map = {
-        'Dinheiro': '01',
-        'Cheque': '02',
-        'Cartão de Crédito': '03', 'Crédito': '03',
-        'Cartão de Débito': '04', 'Débito': '04',
-        'Crédito Loja': '05', 'Fiado': '05',
-        'Boleto Bancário': '15',
-        'Pix': '17', 'PIX': '17'
+        'Dinheiro': '01', 'Cheque': '02', 'Cartão de Crédito': '03',
+        'Cartão de Débito': '04', 'Crédito Loja': '05', 'Fiado': '05',
+        'Boleto Bancário': '15', 'Sem Pagamento': '90', 'Pix': '17', 'PIX': '17'
     };
-    return map[method] || '99'; // 99=Outros
+    return map[method] || '99';
 }

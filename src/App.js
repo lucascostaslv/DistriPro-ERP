@@ -21,6 +21,8 @@ import { supabase } from './supabaseClient';
 import InventoryWMS from './InventoryWMS';
 import ClientsManager from './ClientsManager';
 import { calculateItemTaxes } from './utils/TaxCalculator';
+import { buildNFePayload } from './utils/NFeBuilder';
+import { NFeService } from './utils/NFeService';
 
 // --- UTILS ---
 const formatCurrency = (value) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
@@ -1555,7 +1557,7 @@ const FinancialReport = ({ sales, transactions, transactionCategories, companyIn
   );
 };
 
-const Finance = ({ sales, transactions, transactionCategories, feeProfiles, setFeeProfiles, showNotification, companyInfo, onPrintReceipt }) => {
+const Finance = ({ sales, transactions, transactionCategories, feeProfiles, setFeeProfiles, showNotification, companyInfo, onPrintReceipt, onEmitNFe }) => {
   const [activeTab, setActiveTab] = useState('closure');
   const [history, setHistory] = useState([]);
   const [viewSale, setViewSale] = useState(null);
@@ -1600,11 +1602,13 @@ const Finance = ({ sales, transactions, transactionCategories, feeProfiles, setF
           </table>
         </div>
       )}
+      
+      {/* ABA VENDAS REALIZADAS (COM O BOTÃO DE EMISSÃO) */}
       {activeTab === 'sales' && (
         <div className="bg-white rounded border border-slate-200 shadow-sm overflow-hidden">
           <table className="w-full text-left text-sm">
             <thead className="bg-slate-50 text-slate-500 uppercase text-xs font-semibold">
-              <tr><th className="p-4">Data</th><th className="p-4">Cliente</th><th className="p-4">Pagamento</th><th className="p-4">Total</th><th className="p-4 text-right">Detalhes</th></tr>
+              <tr><th className="p-4">Data</th><th className="p-4">Cliente</th><th className="p-4">Pagamento</th><th className="p-4">Total</th><th className="p-4 text-right">Ações</th></tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {[...sales].reverse().map((s) => (
@@ -1613,8 +1617,18 @@ const Finance = ({ sales, transactions, transactionCategories, feeProfiles, setF
                   <td className="p-4">{s.clientName}</td>
                   <td className="p-4">{s.paymentMethod} {s.installments > 1 && `(${s.installments}x)`}</td>
                   <td className="p-4 font-bold text-slate-800">{formatCurrency(s.total)}</td>
-                  <td className="p-4 text-right">
-                    <button onClick={() => setViewSale(s)} className="text-indigo-600 hover:bg-indigo-50 p-2 rounded"><Eye size={18}/></button>
+                  <td className="p-4 text-right flex justify-end gap-2">
+                    {/* Botão Ver Detalhes */}
+                    <button onClick={() => setViewSale(s)} className="text-indigo-600 hover:bg-indigo-50 p-2 rounded" title="Ver Detalhes"><Eye size={18}/></button>
+                    
+                    {/* Botão Emitir NF-e (CORRIGIDO) */}
+                    <button 
+                        onClick={() => onEmitNFe && onEmitNFe(s)} 
+                        className={`p-2 rounded transition-colors ${s.nfeStatus === 'autorizado' ? 'text-green-600 bg-green-50' : 'text-slate-400 hover:text-blue-600 hover:bg-blue-50'}`}
+                        title={s.nfeStatus ? `Status NFe: ${s.nfeStatus}` : "Emitir Nota Fiscal"}
+                    >
+                        <FileText size={18}/>
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -1631,6 +1645,13 @@ const Finance = ({ sales, transactions, transactionCategories, feeProfiles, setF
             <div className="flex justify-between"><span>Data:</span> <strong>{viewSale && new Date(viewSale.date).toLocaleString()}</strong></div>
             <div className="flex justify-between"><span>Cliente:</span> <strong>{viewSale?.clientName}</strong></div>
             <div className="flex justify-between"><span>Pagamento:</span> <strong>{viewSale?.paymentMethod}</strong></div>
+            {/* Status NF-e no Modal */}
+            {viewSale?.nfeStatus && (
+                <div className="flex justify-between border-t pt-1 mt-1">
+                    <span>Status NF-e:</span> 
+                    <strong className={viewSale.nfeStatus === 'autorizado' ? 'text-green-600' : 'text-amber-600 uppercase'}>{viewSale.nfeStatus}</strong>
+                </div>
+            )}
           </div>
           <div className="border rounded overflow-hidden">
             <table className="w-full text-sm text-left">
@@ -1650,9 +1671,16 @@ const Finance = ({ sales, transactions, transactionCategories, feeProfiles, setF
             <span>Total</span>
             <span>{viewSale && formatCurrency(viewSale.total)}</span>
           </div>
-          <button onClick={() => onPrintReceipt(viewSale)} className="w-full border border-slate-300 py-2 rounded font-bold text-slate-600 hover:bg-slate-50 flex justify-center items-center gap-2">
-            <Printer size={18}/> Reimprimir Cupom
-          </button>
+          
+          <div className="grid grid-cols-2 gap-2">
+              <button onClick={() => onPrintReceipt(viewSale)} className="border border-slate-300 py-2 rounded font-bold text-slate-600 hover:bg-slate-50 flex justify-center items-center gap-2">
+                <Printer size={18}/> Cupom
+              </button>
+              {/* Botão de NF-e também no modal */}
+              <button onClick={() => onEmitNFe && onEmitNFe(viewSale)} className="bg-slate-800 text-white py-2 rounded font-bold hover:bg-slate-900 flex justify-center items-center gap-2">
+                <FileText size={18}/> {viewSale?.nfeStatus === 'autorizado' ? 'Ver NF-e' : 'Emitir NF-e'}
+              </button>
+          </div>
         </div>
       </Modal>
 
@@ -2193,7 +2221,7 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
                     <label className="block text-xs font-bold text-slate-500 mb-1">Ambiente</label>
                     <select className="w-full border p-2 rounded text-sm" value={certData.environment} onChange={e => setCertData({...certData, environment: e.target.value})}>
                         <option value="HOMOLOG">Homologação (Testes)</option>
-                        <option value="PRODUCAO">Produção (Valendo)</option>
+                        <option value="PRODUCAO">Produção</option>
                     </select>
                 </div>
              </div>
@@ -2267,6 +2295,36 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
   const [notification, setNotification] = useState(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
+  const getAppId = () => {
+    if (store && store.id) return String(store.id);
+    return typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
+  };
+
+  useEffect(() => {
+    const fetchClientsFromSupabase = async () => {
+        if (!store?.id) return;
+        try {
+            const { data, error } = await supabase
+                .from('fiscal_clients')
+                .select('*')
+                .eq('firebase_store_id', String(store.id));
+            
+            if (error) throw error;
+            
+            // Atualiza o estado local da loja com os clientes do Supabase
+            // Isso garante que o PDV veja os clientes criados no ClientsManager
+            if (data) {
+                updateStore(prev => ({ ...prev, clients: data }));
+            }
+        } catch (err) {
+            console.error("Erro ao sincronizar clientes:", err);
+        }
+    };
+
+    // Busca ao carregar e quando mudar o módulo para 'pdv' para garantir frescor
+    fetchClientsFromSupabase();
+  }, [store?.id, activeModule]);
+
   const showNotification = useCallback((message, type) => { setNotification({ message, type }); setTimeout(() => setNotification(null), 3000); }, []);
 
   // --- ESTADOS DO BANCO DE DADOS ---
@@ -2275,30 +2333,43 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
 
   // Listener Produtos
   useEffect(() => {
-    const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
+    // 1. Limpa os produtos antigos imediatamente para não misturar dados na tela
+    setProducts([]); 
+    
+    // 2. Se não tiver loja carregada, não busca nada
+    if (!store || !store.id) return;
+
+    const appId = String(store.id); // Força o uso do ID da loja atual
+    console.log("🔄 Carregando produtos da loja:", appId);
+
     const productsRef = collection(firebase.db, 'artifacts', appId, 'public', 'data', 'products');
+    
     const unsubscribe = onSnapshot(productsRef, (snapshot) => {
         const prods = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         setProducts(prods);
-    }, (error) => console.error("Erro produtos:", error));
+    }, (error) => {
+        console.error("Erro ao carregar produtos:", error);
+        showNotification("Erro de conexão com o estoque.", "error");
+    });
+
     return () => unsubscribe();
-  }, []);
+  }, [store]);
 
   // Listener Vendas
   useEffect(() => {
-    const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
+    const appId = getAppId();
     const salesRef = collection(firebase.db, 'artifacts', appId, 'public', 'data', 'sales');
     const unsubscribe = onSnapshot(salesRef, (snapshot) => {
         const salesData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         setRealtimeSales(salesData);
     }, (error) => console.error("Erro vendas:", error));
     return () => unsubscribe();
-  }, []);
+  }, [store]);
 
   // Função de Venda (com baixa de estoque)
   const handleNewSale = async (sale) => {
     try {
-        const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
+        const appId = getAppId();
         const batch = writeBatch(firebase.db);
         const saleRef = doc(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'sales'));
         const saleData = { ...sale, id: saleRef.id, createdAt: serverTimestamp() }; 
@@ -2319,6 +2390,7 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
     }
   };
 
+  
   // Notificação de Contas a Pagar
   useEffect(() => {
     const checkBillNotifications = async () => {
@@ -2327,7 +2399,7 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
        const alreadyCheckedToday = lastCheck === todayStr;
 
        try {
-         const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
+         const appId = getAppId();
          const q = query(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'invoices'), where('status', '!=', 'CANCELADA')); 
          const snap = await getDocs(q);
          const invoices = snap.docs.map(d => d.data());
@@ -2358,6 +2430,87 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
     const timer = setTimeout(() => { if(store) checkBillNotifications(); }, 2000);
     return () => clearTimeout(timer);
   }, [store, showNotification]);
+  
+
+  // --- FUNÇÃO DE EMISSÃO NF-E ---
+  const handleEmitNFe = async (sale) => {
+    if (!window.confirm(`Confirma emissão de NF-e para a venda #${sale.id}?`)) return;
+    
+    // Notificação de progresso
+    showNotification('Iniciando emissão de NF-e...', 'info');
+
+    try {
+        const appId = String(store.id);
+
+        // 1. Buscar Configurações da API (Token/Ambiente)
+        const { data: nfeConfig, error: configError } = await supabase
+            .from('fiscal_settings')
+            .select('*')
+            .eq('firebase_store_id', appId)
+            .single();
+
+        if (configError || !nfeConfig?.api_token) {
+            throw new Error("Configuração de NFe incompleta. Verifique o token em Configurações.");
+        }
+
+        // 2. Buscar Dados Completos do Cliente (Endereço, CPF, etc.)
+        let clientFull = null;
+        if (sale.clientId) {
+            // Tenta achar na lista local primeiro (store.clients)
+            clientFull = store.clients?.find(c => c.id === sale.clientId);
+            
+            // Se não tiver endereço completo (IBGE), tenta buscar no Supabase para garantir
+            if (!clientFull?.address?.ibge_code) {
+                 const { data: clientDb } = await supabase
+                    .from('fiscal_clients')
+                    .select('*')
+                    .eq('firebase_store_id', appId)
+                    .eq('id', sale.clientId) // Cuidado: verifique se sale.clientId é o ID do Supabase ou timestamp local
+                    .single();
+                 
+                 // Mapper rápido se vier do Supabase (ajuste conforme sua estrutura)
+                 if (clientDb) {
+                     clientFull = {
+                         ...clientDb,
+                         address: {
+                             street: clientDb.street,
+                             number: clientDb.number,
+                             neighborhood: clientDb.neighborhood,
+                             city: clientDb.city,
+                             state: clientDb.state,
+                             zip_code: clientDb.zip_code,
+                             ibge_code: clientDb.ibge_code
+                         }
+                     };
+                 }
+            }
+        }
+
+        // 3. Construir o JSON (Builder)
+        const payload = buildNFePayload(sale, store.companyInfo, clientFull, nfeConfig);
+        console.log("Payload NFe Gerado:", payload);
+
+        // 4. Enviar para API (Service)
+        // Usamos sale.id como referência única para evitar duplicidade
+        const apiResponse = await NFeService.authorize(String(sale.id), payload, nfeConfig);
+
+        // 5. Atualizar Venda no Firebase com Status
+        const saleRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'sales', String(sale.id));
+        
+        await updateDoc(saleRef, {
+            nfeStatus: apiResponse.status, // ex: "processando", "autorizado"
+            nfeRef: String(sale.id),
+            nfeKey: apiResponse.chave_nfe || null, // Se já vier
+            nfeMessage: apiResponse.mensagem || 'Enviado para processamento'
+        });
+
+        showNotification(`NF-e Enviada! Status: ${apiResponse.status}`, 'success');
+
+    } catch (error) {
+        console.error("Erro ao emitir NFe:", error);
+        showNotification(`Erro NFe: ${error.message}`, 'error');
+    }
+  };
 
   const MenuButton = ({ id, icon: Icon, label }) => (
     <button 
@@ -2517,7 +2670,7 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
             )}
             {activeModule === 'transactions' && <Transactions products={products} priceGroups={store.priceGroups || []} onSaveEntry={() => {}} />}
             {activeModule === 'priceGroups' && <PriceGroups products={products} showNotification={showNotification} />}
-            {activeModule === 'finance' && <Finance sales={realtimeSales} transactions={store.transactions} transactionCategories={store.transactionCategories} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} />}
+            {activeModule === 'finance' && <Finance sales={realtimeSales} transactions={store.transactions} transactionCategories={store.transactionCategories} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} onEmitNFe={handleEmitNFe}/>}
             {activeModule === 'inventory' && (
                 <InventoryWMS 
                     storeConfig={store} 
@@ -2619,7 +2772,10 @@ const App = () => {
     setCurrentStore(null);
   };
 
-  const updateCurrentStore = async (updatedStore) => { try { setCurrentStore(updatedStore); await firebase.updateStoreData(updatedStore); } catch (error) { showNotification('Falha ao sincronizar dados. Verifique a conexão.', 'error'); } };
+  const updateCurrentStore = async (updatedStore) => { if (!updatedStore || !updatedStore.id) {
+        console.warn("Tentativa de salvar loja sem ID ignorada.");
+        return;
+    } try { setCurrentStore(updatedStore); await firebase.updateStoreData(updatedStore); } catch (error) { showNotification('Falha ao sincronizar dados. Verifique a conexão.', 'error'); } };
 
   if (loginMode === 'none') return <LoginScreen onLogin={handleUserLogin} onSuperAdminLogin={handleSuperAdminLogin} showNotification={showNotification} />;
   if (loginMode === 'superadmin') return <SuperAdminDashboard onLogout={handleLogout} showNotification={showNotification} />;

@@ -1,6 +1,7 @@
 {
   "name": "distripro-erp",
   "version": "0.1.0",
+  "proxy": "https://api.brasilnfe.com.br",
   "private": true,
   "dependencies": {
     "@supabase/supabase-js": "^2.90.1",
