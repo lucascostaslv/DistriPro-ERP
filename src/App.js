@@ -2835,7 +2835,7 @@ const App = () => {
   const [loginMode, setLoginMode] = useState('none'); // 'none' | 'user' | 'superadmin'
   const [currentStore, setCurrentStore] = useState(null);
   const [notification, setNotification] = useState(null);
-  const [isLoading, setIsLoading] = useState(true);
+  //const [isLoading, setIsLoading] = useState(true);
 
   // ALTERAÇÃO 2: Efeito para verificar e restaurar sessão ao iniciar
   useEffect(() => {

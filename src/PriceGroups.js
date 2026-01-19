@@ -4,7 +4,7 @@ import {
   CheckCircle, AlertTriangle, RefreshCw, Edit, X 
 } from 'lucide-react';
 import { 
-  collection, doc, setDoc, deleteDoc, updateDoc, 
+  collection, doc, setDoc, updateDoc, 
   onSnapshot, writeBatch 
 } from "firebase/firestore";
 import { db } from './firebase'; // Importa a instância do banco

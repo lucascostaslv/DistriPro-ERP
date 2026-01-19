@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Users, Plus, Edit, Trash2, Search, Save, X, 
-  MapPin, User, Building, CheckCircle, AlertTriangle 
+  MapPin, User, Building, AlertTriangle 
 } from 'lucide-react';
 import { supabase } from './supabaseClient';
 

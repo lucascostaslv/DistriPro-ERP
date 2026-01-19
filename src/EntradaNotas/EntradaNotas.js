@@ -468,7 +468,6 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
                const newProductData = {
                    cbaCode: codeToUse,
                    name: newItem.productName || newItem.xmlProductName || 'Produto Sem Nome',
-                   unit: newItem.unit || 'UN',
                    cost: Number(newItem.unitPrice),
                    price: Number(newItem.unitPrice) * 1.5, // Margem padrão
                    unit: newItem.unit || 'UN', // Garante que usa a unidade do XML se disponível
