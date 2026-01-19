@@ -1,28 +1,23 @@
 // src/utils/NFeBuilder.js
 
 export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = '65') => {
-    // Validações Básicas
+    // ... (Validações mantidas) ...
     if (!company.cnpj) throw new Error("Empresa sem CNPJ configurado.");
     if (!sale.items || sale.items.length === 0) throw new Error("Venda sem itens.");
     if (!nfeConfig?.api_token) throw new Error("Token da API não configurado.");
 
-    // Limpeza de Dados
     const cleanToken = nfeConfig.api_token.trim();
     const cleanCNPJ = company.cnpj.replace(/\D/g, '');
     const cleanIE = company.ie ? company.ie.replace(/\D/g, '') : '';
-    
-    // Configuração de Ambiente (Garante Homologação se não for Produção explicita)
     const env = nfeConfig.environment === 'PRODUCAO' ? 1 : 2;
 
-    // Lógica Inteligente do Destinatário
+    // --- LÓGICA DE CLIENTE (Mantida) ---
     let destinatarioPayload = null;
-    const hasClient = client && client.tax_id; // Tem CPF/CNPJ?
+    const hasClient = client && client.tax_id; 
 
     if (targetModel === '55') {
-        // --- MODELO 55 (NF-e) ---
-        // Exige destinatário. Se não tiver, usa "Consumidor Final" genérico (mas NF-e idealmente precisa de cadastro)
+        // NF-e (Nota Grande)
         if (!hasClient) {
-             // Fallback para NF-e sem cadastro (alguns estados recusam, ideal é obrigar cadastro)
              destinatarioPayload = {
                 "NmCliente": "CLIENTE CONSUMIDOR",
                 "IndicadorIe": 9,
@@ -35,23 +30,23 @@ export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = 
             destinatarioPayload = buildClientBlock(client);
         }
     } else {
-        // --- MODELO 65 (NFC-e / Cupom) ---
-        // Se tiver cliente cadastrado, envia. Se não tiver, envia NULL (Venda Anônima)
-        if (hasClient) {
-            destinatarioPayload = buildClientBlock(client);
-        } else {
-            destinatarioPayload = null; // Venda Anônima permitida na NFC-e
-        }
+        // NFC-e (Cupom)
+        if (hasClient) destinatarioPayload = buildClientBlock(client);
+        else destinatarioPayload = null; 
     }
 
-    // Retorno do Payload
+    // --- CORREÇÃO DAS SÉRIES ---
+    // Se for Modelo 55, usa Série 55. Se for 65, usa Série 65.
+    // Isso evita o erro de "Série não encontrada" cruzada.
+    const serieCorreta = targetModel === '55' ? 55 : 65;
+
     return {
         "Token": cleanToken,
         "TipoEnvio": 1, // JSON
         "Ambiente": env, 
-        "Modelo": targetModel, // <--- Dinâmico (55 ou 65)
-        "Serie": 1, // Certifique-se de ter Série 1 cadastrada para o mod. 65 também no painel
-        "Numero": String(sale.id).substring(0, 9),
+        "Modelo": targetModel, 
+        "Serie": serieCorreta, // <--- AQUI ESTÁ O SEGREDO
+        "Numero": 0, // 0 = Pede para a API usar o "Próximo Número" cadastrado no painel
         "Lote": String(Math.floor(Date.now() / 1000)),
         "NaturezaOperacao": targetModel === '55' ? "VENDA DE MERCADORIA" : "VENDA A CONSUMIDOR",
         "Emitente": {
@@ -61,19 +56,23 @@ export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = 
         "Destinatario": destinatarioPayload,
         "Itens": sale.items.map((item, index) => {
             const taxes = item.taxes || item.taxDetails || {};
+            // Ajuste robusto de NCM
+            let ncmSanitizado = item.ncm?.replace(/\D/g, '') || '00000000';
+            if (ncmSanitizado.length !== 8) ncmSanitizado = '00000000';
+
             return {
                 "NumeroItem": index + 1,
                 "Codigo": item.id ? String(item.id).substring(0, 20) : "ITEM"+index,
                 "Descricao": item.name.substring(0, 120),
-                "Ncm": item.ncm?.replace(/\D/g, '') || '00000000',
-                "Cfop": targetModel === '65' ? "5102" : (taxes.cfop || "5102"), // NFC-e quase sempre é 5102/5405
+                "Ncm": ncmSanitizado,
+                "Cfop": targetModel === '65' ? "5102" : (taxes.cfop || "5102"),
                 "Unidade": item.unit || "UN",
                 "Quantidade": Number(item.quantity || item.qty),
                 "VlUnitario": Number(item.unitPrice || item.price),
                 "VlTotal": Number(item.total || (item.price * item.qty)),
                 "Impostos": {
                     "Icms": {
-                        "Cst": taxes.csosn || "102", // Simples Nacional
+                        "Cst": taxes.csosn || "102",
                         "Origem": taxes.origin || "0",
                         "Aliquota": 0, "ValorBase": 0, "Valor": 0
                     },
@@ -83,7 +82,7 @@ export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = 
             };
         }),
         "Pagamentos": [{
-            "IndicadorPagamento": 0, // A vista
+            "IndicadorPagamento": 0,
             "FormaPagamento": mapPaymentMethod(sale.paymentMethod),
             "VlPago": Number(sale.total),
             "TipoIntegracao": 2
@@ -91,10 +90,8 @@ export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = 
     };
 };
 
-// --- Helpers Internos ---
-
+// ... (Mantenha as funções buildClientBlock e mapPaymentMethod iguais ao anterior) ...
 function buildClientBlock(client) {
-    const isAnonymous = !client.tax_id;
     return {
         "CpfCnpj": client.tax_id.replace(/\D/g, ''),
         "NmCliente": client.name.substring(0, 60),
@@ -113,7 +110,7 @@ function buildClientBlock(client) {
 }
 
 function mapPaymentMethod(method) {
-    if (!method) return '01'; // Default Dinheiro
+    if (!method) return '01';
     const m = method.toLowerCase();
     if (m.includes('dinheiro')) return '01';
     if (m.includes('crédito') || m.includes('credito')) return '03';
