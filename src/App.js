@@ -8,7 +8,8 @@ import {
   PieChart, Save, UserPlus, Printer, Lock, Settings, CheckSquare, Square, Edit, Download, LogOut, Server, Beer, Minus, PlusCircle, Tags,
   ChevronLeft, ChevronRight,
   MapPin,
-  Upload
+  Upload,
+  Loader2, Send
 } from 'lucide-react';
 import { collection, query, where, getDocs, setDoc, doc, updateDoc, getDoc, onSnapshot, increment, writeBatch, serverTimestamp } from "firebase/firestore";
 import logo from './img/LOGO-MAQUINA-PNG.png';
@@ -2311,6 +2312,10 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
   const [activeModule, setActiveModule] = useState('dashboard');
   const [notification, setNotification] = useState(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [previewModalOpen, setPreviewModalOpen] = useState(false);
+  const [previewData, setPreviewData] = useState(null);
+  const [isEmitting, setIsEmitting] = useState(false);
+  const [currentSaleToEmit, setCurrentSaleToEmit] = useState(null);
 
   // --- CORREÇÃO: Estado EXCLUSIVO para clientes do Supabase ---
   // Isso garante que não usamos dados antigos do Firebase/LocalStorage
@@ -2452,71 +2457,127 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
   
 
   // --- FUNÇÃO DE EMISSÃO NF-E ---
-  const handleEmitNFe = async (sale) => {
-    if (!window.confirm(`Confirma emissão de NF-e para a venda #${sale.id}?`)) return;
-    showNotification('Iniciando emissão de NF-e...', 'info');
+  // Modificado para receber targetModel ('55' ou '65')
+  // --- FUNÇÃO DE EMISSÃO INTELIGENTE (AUTOMÁTICA) ---
+const handleEmitNFe = async (sale) => {
+    setIsEmitting(true);
+    showNotification('Analisando venda e cliente...', 'info');
 
     try {
         const appId = String(store.id);
 
-        const { data: nfeConfig, error: configError } = await supabase
-            .from('fiscal_settings')
-            .select('*')
-            .eq('firebase_store_id', appId)
-            .single();
+        // 1. Configurações
+        const { data: nfeConfig } = await supabase
+            .from('fiscal_settings').select('*').eq('firebase_store_id', appId).single();
 
-        if (configError || !nfeConfig?.api_token) {
-            throw new Error("Configuração de NFe incompleta. Verifique o token em Configurações.");
-        }
+        if (!nfeConfig?.api_token) throw new Error("Token Fiscal não configurado.");
 
-        // Busca dados frescos do cliente no Supabase se necessário
+        // 2. Buscar Cliente Completo (Se houver)
         let clientFull = null;
         if (sale.clientId) {
-            clientFull = salesClients?.find(c => c.id === sale.clientId);
-            
-            if (!clientFull?.address?.ibge_code) {
-                 const { data: clientDb } = await supabase
-                    .from('fiscal_clients')
-                    .select('*')
-                    .eq('firebase_store_id', appId)
-                    .eq('id', sale.clientId) 
-                    .single();
-                 
-                 if (clientDb) {
-                     clientFull = {
-                         ...clientDb,
-                         address: {
-                             street: clientDb.street,
-                             number: clientDb.number,
-                             neighborhood: clientDb.neighborhood,
-                             city: clientDb.city,
-                             state: clientDb.state,
-                             zip_code: clientDb.zip_code,
-                             ibge_code: clientDb.ibge_code
-                         }
-                     };
-                 }
+             const { data: clientDb } = await supabase
+                .from('fiscal_clients').select('*').eq('firebase_store_id', appId).eq('id', sale.clientId).single();
+             if (clientDb) {
+                 clientFull = { ...clientDb, address: { 
+                     street: clientDb.street, number: clientDb.number, neighborhood: clientDb.neighborhood,
+                     city: clientDb.city, state: clientDb.state, zip_code: clientDb.zip_code, ibge_code: clientDb.ibge_code 
+                 }};
+             }
+        }
+
+        // 3. INTELIGÊNCIA FISCAL: DECIDE O MODELO
+        let targetModel = '65'; // Padrão é Cupom (NFC-e)
+        let modelReason = "Venda ao Consumidor";
+
+        if (clientFull) {
+            const cleanDoc = clientFull.tax_id?.replace(/\D/g, '') || '';
+            const hasAddress = !!(clientFull.address?.zip_code && clientFull.address?.street);
+
+            if (cleanDoc.length > 11) {
+                // É CNPJ -> Obrigatoriamente NF-e (55)
+                targetModel = '55';
+                modelReason = "Cliente PJ (CNPJ detectado)";
+            } else if (hasAddress) {
+                // É CPF mas tem endereço completo -> NF-e (55) para entrega/garantia
+                targetModel = '55';
+                modelReason = "Cliente com Endereço Completo";
+            } else {
+                // É Cliente cadastrado só com CPF/Nome -> Mantém NFC-e (65) identificada
+                targetModel = '65';
+                modelReason = "Cliente Simplificado (CPF na Nota)";
             }
         }
 
-        const payload = buildNFePayload(sale, store.companyInfo, clientFull, nfeConfig);
-        console.log("Payload NFe Gerado:", payload);
+        const modelLabel = targetModel === '55' ? 'NF-e (Nota Grande)' : 'NFC-e (Cupom)';
 
-        const apiResponse = await NFeService.authorize(String(sale.id), payload, nfeConfig);
+        // Confirmação para o usuário (Opcional, mas recomendado para transparência)
+        if (!window.confirm(`O sistema detectou: ${modelReason}.\n\nDeseja emitir uma ${modelLabel}?`)) {
+            setIsEmitting(false);
+            return;
+        }
 
+        // 4. Constrói Payload
+        const payload = buildNFePayload(sale, store.companyInfo, clientFull, nfeConfig, targetModel);
+        console.log(`Payload Automático (${modelLabel}):`, payload);
+
+        // 5. Envia
+        const apiResponse = await NFeService.emit(payload);
+
+        // 6. Trata Resposta
+        const status = apiResponse.Status || (apiResponse.Sucesso ? 'Autorizado' : 'Erro');
+        
         const saleRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'sales', String(sale.id));
         await updateDoc(saleRef, {
-            nfeStatus: apiResponse.status, 
-            nfeRef: String(sale.id),
-            nfeKey: apiResponse.chave_nfe || null,
-            nfeMessage: apiResponse.mensagem || 'Enviado para processamento'
+            nfeStatus: status, 
+            nfeModel: targetModel,
+            nfeKey: apiResponse.ChaveNFe || null,
+            nfeMessage: apiResponse.Mensagem || apiResponse.Motivo || 'Processado'
         });
 
-        showNotification(`NF-e Enviada! Status: ${apiResponse.status}`, 'success');
+        if (apiResponse.Status === 'Erro' || apiResponse.Sucesso === false) {
+             showNotification(`Rejeição: ${apiResponse.Mensagem || apiResponse.Motivo}`, 'error');
+        } else {
+             showNotification(`${modelLabel} Autorizada com Sucesso!`, 'success');
+        }
 
     } catch (error) {
-        console.error("Erro ao emitir NFe:", error);
-        showNotification(`Erro NFe: ${error.message}`, 'error');
+        console.error("Erro Emissão Automática:", error);
+        showNotification(`Erro: ${error.message}`, 'error');
+    } finally {
+        setIsEmitting(false);
+    }
+};
+
+  // 2. CONFIRMAR: Envia a Nota Real
+  const handleConfirmEmission = async () => {
+    if (!previewData || !currentSaleToEmit) return;
+    setIsEmitting(true);
+    
+    try {
+        // Usa o MESMO payload que foi validado no preview
+        const apiResponse = await NFeService.emit(previewData.payload);
+
+        // Atualiza no Firebase
+        const appId = String(store.id);
+        const saleRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'sales', String(currentSaleToEmit.id));
+        
+        await updateDoc(saleRef, {
+            nfeStatus: apiResponse.Status || apiResponse.status || 'Processando', 
+            nfeRef: String(currentSaleToEmit.id),
+            nfeKey: apiResponse.ChaveNFe || apiResponse.chave_nfe || null,
+            nfeMessage: apiResponse.Mensagem || apiResponse.Motivo || 'Enviado com sucesso'
+        });
+
+        showNotification('Nota Fiscal Enviada com Sucesso!', 'success');
+        setPreviewModalOpen(false);
+        setPreviewData(null);
+        setCurrentSaleToEmit(null);
+
+    } catch (error) {
+        console.error("Erro Envio:", error);
+        showNotification(`Erro ao Emitir: ${error.message}`, 'error');
+    } finally {
+        setIsEmitting(false);
     }
   };
 
@@ -2690,6 +2751,80 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
           </div>
         </div>
       </main>
+
+      <Modal isOpen={previewModalOpen} onClose={() => setPreviewModalOpen(false)} title="Conferência de Emissão (NF-e)">
+        <div className="space-y-4">
+            {previewData?.response?.Ok === false ? (
+                 <div className="bg-red-50 border border-red-200 p-4 rounded text-red-700">
+                     <h4 className="font-bold flex items-center gap-2"><AlertTriangle size={18}/> A SEFAZ/API retornou erros:</h4>
+                     <p className="mt-2 text-sm">{previewData.response.Error || previewData.response.Motivo}</p>
+                     <ul className="list-disc list-inside text-xs mt-2">
+                         {previewData.response.Avisos?.map((av, i) => <li key={i}>{av}</li>)}
+                     </ul>
+                     <p className="text-xs mt-4 text-slate-500">Corrija os erros acima antes de tentar enviar.</p>
+                 </div>
+            ) : (
+                <>
+                    <div className="bg-emerald-50 border border-emerald-200 p-4 rounded text-emerald-800">
+                        <h4 className="font-bold flex items-center gap-2"><CheckCircle size={18}/> Pré-visualização Sucesso!</h4>
+                        <p className="text-sm mt-1">Os dados foram validados preliminarmente. Confira os totais calculados:</p>
+                    </div>
+
+                    {/* Exibe totais retornados pela API se disponíveis, ou do Payload */}
+                    <div className="grid grid-cols-2 gap-4 text-sm">
+                        <div className="p-3 bg-slate-50 rounded border">
+                            <span className="block text-xs font-bold text-slate-500 uppercase">Ambiente</span>
+                            <span className="font-mono font-bold">{previewData?.payload?.Ambiente === 2 ? 'HOMOLOGAÇÃO' : 'PRODUÇÃO'}</span>
+                        </div>
+                        <div className="p-3 bg-slate-50 rounded border">
+                            <span className="block text-xs font-bold text-slate-500 uppercase">Natureza Op.</span>
+                            <span className="font-bold">Venda de Mercadoria</span>
+                        </div>
+                    </div>
+
+                    <div className="border rounded overflow-hidden">
+                        <table className="w-full text-xs text-left">
+                            <thead className="bg-slate-100 uppercase text-slate-500">
+                                <tr>
+                                    <th className="p-2">Item</th>
+                                    <th className="p-2 text-center">NCM</th>
+                                    <th className="p-2 text-center">CFOP</th>
+                                    <th className="p-2 text-right">Valor</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y">
+                                {previewData?.payload?.Itens?.map((it, idx) => (
+                                    <tr key={idx}>
+                                        <td className="p-2 truncate max-w-[150px]">{it.Descricao}</td>
+                                        <td className="p-2 text-center">{it.Ncm}</td>
+                                        <td className="p-2 text-center">{it.Cfop}</td>
+                                        <td className="p-2 text-right">{formatCurrency(it.VlTotal)}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </>
+            )}
+
+            <div className="flex justify-end gap-2 pt-4 border-t">
+                <button onClick={() => setPreviewModalOpen(false)} className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded font-bold text-sm">
+                    Cancelar
+                </button>
+                {/* Só libera o botão de confirmar se a resposta da API foi OK */}
+                {previewData?.response?.Ok !== false && (
+                    <button 
+                        onClick={handleConfirmEmission} 
+                        disabled={isEmitting}
+                        className="px-6 py-2 bg-emerald-600 text-white hover:bg-emerald-700 rounded font-bold text-sm flex items-center gap-2 shadow-lg disabled:opacity-50"
+                    >
+                        {isEmitting ? <Loader2 className="animate-spin" size={16}/> : <Send size={16}/>}
+                        Confirmar e Emitir Agora
+                    </button>
+                )}
+            </div>
+        </div>
+      </Modal>
 
       {notification && <Toast message={notification.message} type={notification.type} onClose={() => setNotification(null)} />}
     </div>

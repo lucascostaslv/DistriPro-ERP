@@ -1,118 +1,123 @@
 // src/utils/NFeBuilder.js
 
-export const buildNFePayload = (sale, company, client, nfeConfig) => {
-    
-    // 1. Validações
+export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = '65') => {
+    // Validações Básicas
     if (!company.cnpj) throw new Error("Empresa sem CNPJ configurado.");
     if (!sale.items || sale.items.length === 0) throw new Error("Venda sem itens.");
+    if (!nfeConfig?.api_token) throw new Error("Token da API não configurado.");
 
-    // Consumidor Final
-    let finalClient = client;
-    let isAnonymous = false;
+    // Limpeza de Dados
+    const cleanToken = nfeConfig.api_token.trim();
+    const cleanCNPJ = company.cnpj.replace(/\D/g, '');
+    const cleanIE = company.ie ? company.ie.replace(/\D/g, '') : '';
+    
+    // Configuração de Ambiente (Garante Homologação se não for Produção explicita)
+    const env = nfeConfig.environment === 'PRODUCAO' ? 1 : 2;
 
-    if (!finalClient) {
-        isAnonymous = true;
-        finalClient = {
-            name: 'CONSUMIDOR FINAL',
-            ie_indicator: '9', 
-            ie: 'ISENTO',
-            tax_id: null,
-            address: null 
-        };
+    // Lógica Inteligente do Destinatário
+    let destinatarioPayload = null;
+    const hasClient = client && client.tax_id; // Tem CPF/CNPJ?
+
+    if (targetModel === '55') {
+        // --- MODELO 55 (NF-e) ---
+        // Exige destinatário. Se não tiver, usa "Consumidor Final" genérico (mas NF-e idealmente precisa de cadastro)
+        if (!hasClient) {
+             // Fallback para NF-e sem cadastro (alguns estados recusam, ideal é obrigar cadastro)
+             destinatarioPayload = {
+                "NmCliente": "CLIENTE CONSUMIDOR",
+                "IndicadorIe": 9,
+                "Endereco": {
+                    "Cep": "00000000", "Logradouro": "Via Publica", "Numero": "SN",
+                    "Bairro": "Centro", "CodMunicipio": "9999999", "NmMunicipio": "Exterior", "Uf": "EX"
+                }
+             };
+        } else {
+            destinatarioPayload = buildClientBlock(client);
+        }
+    } else {
+        // --- MODELO 65 (NFC-e / Cupom) ---
+        // Se tiver cliente cadastrado, envia. Se não tiver, envia NULL (Venda Anônima)
+        if (hasClient) {
+            destinatarioPayload = buildClientBlock(client);
+        } else {
+            destinatarioPayload = null; // Venda Anônima permitida na NFC-e
+        }
     }
 
-    // --- TRUQUE: Se estiver usando Token de Produção para testar, 
-    // force o ambiente 1 (Produção) mas use o nome de cliente específico abaixo.
-    // Por enquanto, vamos respeitar a config do banco:
-    const tipoAmbiente = nfeConfig.environment === 'PRODUCAO' ? "1" : "2";
-
-    const payload = {
-        // --- ATENÇÃO: NENHUM CAMPO "Token" PODE ESTAR AQUI ---
-        
-        "Serie": 1,
-        "Numero": sale.id, 
-        "Lote": "1", // Lote simples
-        "Codigo": sale.id.toString().slice(-8),
-        "DataEmissao": new Date().toISOString(),
-        "DataEntradaSaida": new Date().toISOString(),
-        "NaturezaOperacao": "VENDA DE MERCADORIA", // Texto padrão seguro
-        "ModeloDocumento": 55, 
-        "Finalidade": 1,
-        "TipoAmbiente": tipoAmbiente, 
-        "IndicadorPresenca": 1, 
-        "ConsumidorFinal": true,
-        "IdentificadorInterno": String(sale.id),
-        "Observacao": "",
-
-        // Produtos
-        "Produtos": sale.items.map((item, index) => {
-            const taxes = item.taxDetails || {};
-            const valorTotal = item.price * item.qty;
-
+    // Retorno do Payload
+    return {
+        "Token": cleanToken,
+        "TipoEnvio": 1, // JSON
+        "Ambiente": env, 
+        "Modelo": targetModel, // <--- Dinâmico (55 ou 65)
+        "Serie": 1, // Certifique-se de ter Série 1 cadastrada para o mod. 65 também no painel
+        "Numero": String(sale.id).substring(0, 9),
+        "Lote": String(Math.floor(Date.now() / 1000)),
+        "NaturezaOperacao": targetModel === '55' ? "VENDA DE MERCADORIA" : "VENDA A CONSUMIDOR",
+        "Emitente": {
+            "CpfCnpj": cleanCNPJ,
+            "Ie": cleanIE
+        },
+        "Destinatario": destinatarioPayload,
+        "Itens": sale.items.map((item, index) => {
+            const taxes = item.taxes || item.taxDetails || {};
             return {
-                "NmProduto": item.name,
-                "CodProdutoServico": String(item.id).substring(0, 20), // Limite de chars
-                "EAN": item.ean || "SEM GTIN",
-                "NCM": taxes.ncm ? taxes.ncm.replace(/\D/g, '') : "00000000",
-                "CEST": taxes.cest || null,
-                "Quantidade": item.qty,
-                "UnidadeComercial": item.unit || "UN",
-                "ValorUnitario": item.price,
-                "ValorTotal": valorTotal,
-                "ValorDesconto": 0,
-                "CFOP": parseInt(taxes.cfop || 5102),
-                "NItemPed": index + 1,
-                "OrigemProduto": parseInt(taxes.origin || 0),
-                
-                "Imposto": {
-                    "ICMS": {
-                        "CodSituacaoTributaria": taxes.csosn || "102",
-                        "Origem": parseInt(taxes.origin || 0),
-                        "AliquotaICMS": 0,
-                        "AliquotaCredito": 0,
-                        "ValorCreditoICMSSN": 0
+                "NumeroItem": index + 1,
+                "Codigo": item.id ? String(item.id).substring(0, 20) : "ITEM"+index,
+                "Descricao": item.name.substring(0, 120),
+                "Ncm": item.ncm?.replace(/\D/g, '') || '00000000',
+                "Cfop": targetModel === '65' ? "5102" : (taxes.cfop || "5102"), // NFC-e quase sempre é 5102/5405
+                "Unidade": item.unit || "UN",
+                "Quantidade": Number(item.quantity || item.qty),
+                "VlUnitario": Number(item.unitPrice || item.price),
+                "VlTotal": Number(item.total || (item.price * item.qty)),
+                "Impostos": {
+                    "Icms": {
+                        "Cst": taxes.csosn || "102", // Simples Nacional
+                        "Origem": taxes.origin || "0",
+                        "Aliquota": 0, "ValorBase": 0, "Valor": 0
                     },
-                    "PIS": { "CodSituacaoTributaria": "49", "Aliquota": 0 },
-                    "COFINS": { "CodSituacaoTributaria": "49", "Aliquota": 0 }
+                    "Pis": { "Cst": "07" },
+                    "Cofins": { "Cst": "07" }
                 }
             };
         }),
-
-        // Pagamentos
         "Pagamentos": [{
-            "IndicadorPagamento": 0,
-            "FormaPagamento": "01", // Dinheiro (Evita validação de cartão)
-            "VlPago": sale.total,
-            "TipoIntegracao": false
+            "IndicadorPagamento": 0, // A vista
+            "FormaPagamento": mapPaymentMethod(sale.paymentMethod),
+            "VlPago": Number(sale.total),
+            "TipoIntegracao": 2
         }]
     };
-
-    // Cliente
-    if (!isAnonymous) {
-        payload.Cliente = {
-            "CpfCnpj": finalClient.tax_id ? finalClient.tax_id.replace(/\D/g, '') : null,
-            "NmCliente": finalClient.name,
-            "IndicadorIe": 9,
-            "Ie": "ISENTO",
-            "Endereco": {
-                "Cep": finalClient.address?.zip_code ? finalClient.address.zip_code.replace(/\D/g, '') : '70000000',
-                "Logradouro": finalClient.address?.street || 'Rua Teste',
-                "Numero": finalClient.address?.number || '0',
-                "Bairro": finalClient.address?.neighborhood || 'Centro',
-                "CodMunicipio": finalClient.address?.ibge_code || '5300108', // Brasília (Genérico se falhar)
-                "Municipio": finalClient.address?.city || 'Brasilia',
-                "Uf": finalClient.address?.state || 'DF',
-                "CodPais": 1058,
-                "Pais": "BRASIL"
-            }
-        };
-    } else {
-        payload.Cliente = {
-            "NmCliente": "CONSUMIDOR FINAL",
-            "IndicadorIe": 9,
-            "CpfCnpj": null
-        };
-    }
-
-    return payload;
 };
+
+// --- Helpers Internos ---
+
+function buildClientBlock(client) {
+    const isAnonymous = !client.tax_id;
+    return {
+        "CpfCnpj": client.tax_id.replace(/\D/g, ''),
+        "NmCliente": client.name.substring(0, 60),
+        "IndicadorIe": Number(client.ie_indicator || 9),
+        "Ie": (client.ie && client.ie_indicator !== '9') ? client.ie.replace(/\D/g, '') : null,
+        "Endereco": {
+            "Cep": client.address?.zip_code?.replace(/\D/g, '') || '00000000',
+            "Logradouro": client.address?.street || 'Nao Informado',
+            "Numero": client.address?.number || 'SN',
+            "Bairro": client.address?.neighborhood || 'Nao Informado',
+            "CodMunicipio": client.address?.ibge_code || '9999999',
+            "NmMunicipio": client.address?.city || 'Nao Informado',
+            "Uf": client.address?.state || 'SP'
+        }
+    };
+}
+
+function mapPaymentMethod(method) {
+    if (!method) return '01'; // Default Dinheiro
+    const m = method.toLowerCase();
+    if (m.includes('dinheiro')) return '01';
+    if (m.includes('crédito') || m.includes('credito')) return '03';
+    if (m.includes('débito') || m.includes('debito')) return '04';
+    if (m.includes('pix')) return '17';
+    return '99';
+}
