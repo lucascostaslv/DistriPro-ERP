@@ -2869,7 +2869,7 @@ const App = () => {
       }
       
       // Termina o carregamento (seja logado ou não)
-      setIsLoading(false);
+      //setIsLoading(false);
     };
 
     restoreSession();
@@ -2877,7 +2877,7 @@ const App = () => {
 
   const showNotification = useCallback((message, type) => { setNotification({ message, type }); setTimeout(() => setNotification(null), 3000); }, []);
   const handleUserLogin = async (storeConfig) => {
-    setIsLoading(true);
+    //setIsLoading(true);
     try {
       const storeData = await firebase.fetchStoreData(storeConfig);
       setCurrentStore(storeData);
@@ -2895,7 +2895,7 @@ const App = () => {
       showNotification(error.message, 'error');
       // Não damos throw error aqui para não quebrar a UI, apenas paramos o loading
     } finally {
-      setIsLoading(false);
+      //setIsLoading(false);
     }
   };
   const handleSuperAdminLogin = () => { setLoginMode('superadmin'); };
