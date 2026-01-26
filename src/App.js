@@ -8,6 +8,7 @@ import {
   PieChart, Save, UserPlus, Printer, Lock, Settings, CheckSquare, Square, Edit, Download, LogOut, Server, Beer, Minus, PlusCircle, Tags,
   ChevronLeft, ChevronRight,
   MapPin,
+  Boxes,
   Upload,
   Loader2, Send
 } from 'lucide-react';
@@ -36,17 +37,21 @@ const isToday = (dateString) => {
 
 const getDisplayStock = (product, allProducts) => {
   if (!product) return 0;
-  const itemType = product.itemType || 'unit'; // Trata dados legados como unitários
+  const itemType = product.itemType || 'unit';
 
   if (itemType === 'unit') {
       return product.stock || 0;
   }
-  if (product.itemType === 'pack') {
-      const unitProduct = allProducts.find(p => p.parentId === product.id);
+  if (itemType === 'pack') {
+      // Busca o pai pelo ID para calcular quantas caixas virtuais existem
+      const unitProduct = allProducts.find(p => p.id === product.parentId);
+      // Se não achar o pai ou o fator for inválido, retorna 0
       if (!unitProduct || !unitProduct.stock || !product.conversionFactor) return 0;
+      
+      // Arredonda para baixo (Ex: 11 latas / 12 = 0.91 -> 0 caixas)
       return Math.floor(unitProduct.stock / product.conversionFactor);
   }
-  return product.stock || 0; // Fallback para produtos sem tipo definido
+  return product.stock || 0;
 };
 
 // --- COMPONENTS ---
@@ -730,45 +735,59 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
       setEditingProduct(null);
   };
 
-  const addToCart = (product, mode = 'retail') => {
-    let cartItemId, cartItemName, cartItemPrice, stockDeduction;
-
-    if (mode === 'wholesale') {
-        cartItemId = `${product.id}_pack`; 
-        cartItemName = `${product.name} [CX ${product.packQuantity}]`;
-        cartItemPrice = product.wholesalePrice;
-        stockDeduction = product.packQuantity; 
-    } else {
-        cartItemId = product.id;
-        cartItemName = product.name;
-        cartItemPrice = product.price;
-        stockDeduction = 1;
-    }
-
-    const existing = cart.find(item => item.id === cartItemId);
+  const addToCart = (product) => {
+    // 1. Identifica quem é o Pai (Fonte da Verdade)
+    const targetParentId = product.itemType === 'pack' ? product.parentId : product.id;
+    const itemFactor = product.itemType === 'pack' ? (product.conversionFactor || 1) : 1;
     
-    const currentStock = getDisplayStock(product, products);
-    const allCartItemsForThisProduct = cart.filter(item => (item.id === product.id) || (item.originalId === product.id));
-    const totalUnitsAlreadyInCart = allCartItemsForThisProduct.reduce((acc, item) => acc + (item.qty * (item.stockDeduction || 1)), 0);
-    const unitsRequested = stockDeduction;
+    // 2. Busca o Pai na lista completa de produtos
+    const parentProduct = products.find(p => p.id === targetParentId);
+    
+    if (!parentProduct) {
+        showNotification('Erro: Produto Pai não encontrado no estoque.', 'error');
+        return;
+    }
+    
+    const availableRealStock = parentProduct.stock || 0;
 
-    if (currentStock < (totalUnitsAlreadyInCart + unitsRequested)) {
-      showNotification(`Estoque insuficiente. Disponível: ${currentStock} un`, 'error');
-      return;
+    // 3. Calcula quanto JÁ TEM no carrinho dessa família (unidades + caixas)
+    let unitsAlreadyInCart = 0;
+    cart.forEach(item => {
+        // Encontra o produto original do item do carrinho para saber se é parente
+        const itemProd = products.find(p => p.id === (item.originalId || item.id));
+        if (!itemProd) return;
+        
+        // Verifica se é da mesma família (mesmo pai)
+        const itemParentId = itemProd.itemType === 'pack' ? itemProd.parentId : itemProd.id;
+        
+        if (itemParentId === targetParentId) {
+            const factor = itemProd.itemType === 'pack' ? (itemProd.conversionFactor || 1) : 1;
+            unitsAlreadyInCart += (item.qty * factor);
+        }
+    });
+
+    // 4. Verifica se cabe mais um item (convertido em unidades)
+    const neededUnits = unitsAlreadyInCart + itemFactor;
+
+    if (neededUnits > availableRealStock) {
+        showNotification(`Estoque insuficiente! Disponível: ${availableRealStock} unidades reais (Carrinho requer ${neededUnits}).`, 'error');
+        return;
     }
 
+    // 5. Adiciona ao Carrinho
+    const existing = cart.find(item => item.id === product.id);
     if (existing) {
-      setCart(cart.map(item => item.id === cartItemId ? { ...item, qty: item.qty + 1 } : item));
+        setCart(cart.map(item => item.id === product.id ? { ...item, qty: item.qty + 1 } : item));
     } else {
-      setCart([...cart, { 
-          id: cartItemId, 
-          originalId: product.id,
-          name: cartItemName, 
-          price: cartItemPrice, 
-          qty: 1,
-          stockDeduction: stockDeduction,
-          isWholesale: mode === 'wholesale'
-      }]);
+        setCart([...cart, { 
+            id: product.id, 
+            originalId: product.id,
+            name: product.name, 
+            price: product.price, 
+            qty: 1,
+            // Marca visualmente se for caixa para diferenciar no carrinho depois, se quiser
+            isWholesale: product.itemType === 'pack' 
+        }]);
     }
   };
 
@@ -776,21 +795,37 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
     const itemInCart = cart.find(item => item.id === id);
     if (!itemInCart) return;
 
+    // Se for aumentar, faz a verificação de integridade novamente
     if (delta > 0) {
         const product = products.find(p => p.id === (itemInCart.originalId || itemInCart.id));
-        const currentStock = getDisplayStock(product, products);
-        const allCartItemsForThisProduct = cart.filter(item => (item.id === product.id) || (item.originalId === product.id));
-        const totalUnitsAlreadyInCart = allCartItemsForThisProduct.reduce((acc, item) => acc + (item.qty * (item.stockDeduction || 1)), 0);
-        
-        if (currentStock < (totalUnitsAlreadyInCart + (itemInCart.stockDeduction || 1))) {
-            showNotification('Estoque insuficiente.', 'error');
-            return;
+        if (product) {
+            const targetParentId = product.itemType === 'pack' ? product.parentId : product.id;
+            const itemFactor = product.itemType === 'pack' ? (product.conversionFactor || 1) : 1;
+            const parentProduct = products.find(p => p.id === targetParentId);
+            
+            if (parentProduct) {
+                let unitsInCart = 0;
+                cart.forEach(item => {
+                    const itemProd = products.find(p => p.id === (item.originalId || item.id));
+                    if (!itemProd) return;
+                    const pid = itemProd.itemType === 'pack' ? itemProd.parentId : itemProd.id;
+                    if (pid === targetParentId) {
+                        const f = itemProd.itemType === 'pack' ? (itemProd.conversionFactor || 1) : 1;
+                        unitsInCart += (item.qty * f);
+                    }
+                });
+
+                if ((unitsInCart + itemFactor) > parentProduct.stock) {
+                    showNotification('Estoque insuficiente para adicionar mais.', 'error');
+                    return;
+                }
+            }
         }
     }
 
     const newQty = itemInCart.qty + delta;
     if (newQty <= 0) {
-      removeItem(id);
+      setCart(cart.filter(item => item.id !== id));
     } else {
       setCart(cart.map(item => item.id === id ? { ...item, qty: newQty } : item));
     }
@@ -929,61 +964,34 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
         </div>
         <div className="flex-1 overflow-y-auto p-4 grid grid-cols-2 md:grid-cols-3 gap-4 content-start">
           {filteredProducts.map(p => {
-              const hasWholesale = isWholesaleEnabled && p.wholesalePrice > 0 && p.packQuantity > 1;
+            const isPack = p.itemType === 'pack';
+            // AQUI ESTÁ A MÁGICA VISUAL: Passamos 'products' para ele calcular o pai
+            const displayStock = getDisplayStock(p, products); 
 
-              return (
-                <div key={p.id} className="border rounded hover:border-indigo-500 hover:bg-indigo-50 transition-colors group flex flex-col justify-between relative">
-                  
-                  {isEditEnabled && (
-                    <button 
-                        onClick={(e) => { e.stopPropagation(); setEditingProduct({...p}); setIsEditModalOpen(true); }}
-                        className="absolute top-2 right-2 p-1.5 bg-white/80 hover:bg-white text-slate-400 hover:text-indigo-600 rounded-full shadow-sm z-10 border border-slate-100"
-                        title="Editar Produto"
-                    >
-                        <Edit size={14} />
-                    </button>
-                  )}
-
-                  <div className="p-4 cursor-pointer" onClick={() => addToCart(p, 'retail')}>
-                      <div className="font-bold text-slate-800 group-hover:text-indigo-700 pr-6">{p.name}</div>
-                      <div className="text-xs text-slate-500 mb-2 flex gap-2">
-                        <span className="bg-slate-100 px-1 rounded">Item: {p.cbaCode || '-'}</span>
-                      </div>
-                      <div className="flex justify-between items-end">
-                        <div className="flex-1">
-                            <div className="text-xs text-slate-400">Estoque</div>
-                            <div className={`font-bold ${getDisplayStock(p, products) <= (p.minStock || 0) ? 'text-red-500' : 'text-blue-600'}`}>
-                            {getDisplayStock(p, products)} Un
-                            {hasWholesale && (
-                                <span className="text-[10px] text-slate-400 font-normal ml-1">
-                                    ({Math.floor(getDisplayStock(p, products) / p.packQuantity)} cx)
-                                </span>
-                            )}
-                            </div>
+            return (
+            <div key={p.id} onClick={() => addToCart(p)} className={`border rounded hover:border-indigo-500 hover:bg-indigo-50 transition-colors group flex flex-col justify-between relative cursor-pointer ${isPack ? 'border-l-4 border-l-indigo-400' : ''}`}>
+                <div className="p-4">
+                    <div className="flex justify-between items-start">
+                        <div className="font-bold text-slate-800 group-hover:text-indigo-700 pr-2 text-sm leading-tight">{p.name}</div>
+                        {isPack && <span className="text-[10px] font-bold bg-indigo-100 text-indigo-700 px-1 rounded border border-indigo-200">CX</span>}
+                    </div>
+                    <div className="text-xs text-slate-500 mb-2 mt-1">Cód: {p.cbaCode || '-'}</div>
+                    <div className="flex justify-between items-end">
+                    <div>
+                        <div className="text-xs text-slate-400">Estoque</div>
+                        <div className={`font-bold ${displayStock <= (p.minStock || 0) ? 'text-red-500' : 'text-blue-600'}`}>
+                            {displayStock} {p.unit}
                         </div>
-                        <div className="text-right">
-                            <div className="text-xs text-slate-400">Unidade</div>
-                            <div className="font-bold text-slate-700">{formatCurrency(p.price)}</div>
-                        </div>
-                      </div>
-                  </div>
-                  
-                  {hasWholesale ? (
-                      <div className="grid grid-cols-2 border-t divide-x divide-slate-200">
-                          <button onClick={() => addToCart(p, 'retail')} className="py-2 text-xs font-bold text-slate-600 hover:bg-slate-200 text-center">
-                              +1 Unidade
-                          </button>
-                          <button onClick={() => addToCart(p, 'wholesale')} className="py-2 text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 text-center flex flex-col items-center leading-tight">
-                              <span>+1 Caixa</span>
-                              <span className="text-[9px]">{formatCurrency(p.wholesalePrice)}</span>
-                          </button>
-                      </div>
-                  ) : (
-                       null
-                  )}
+                    </div>
+                    <div className="text-right">
+                        <div className="text-xs text-slate-400">Preço</div>
+                        <div className="font-bold text-slate-700">{formatCurrency(p.price)}</div>
+                    </div>
+                    </div>
                 </div>
-              );
-          })}
+            </div>
+            );
+        })}
         </div>
       </div>
 
@@ -2394,17 +2402,33 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
   // Função de Venda (com baixa de estoque)
   const handleNewSale = async (sale) => {
     try {
-        const appId = getAppId();
+        const appId = String(store.id);
         const batch = writeBatch(firebase.db);
+        
+        // 1. Salva a venda (igual ao anterior)
         const saleRef = doc(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'sales'));
-        const saleData = { ...sale, id: saleRef.id, createdAt: serverTimestamp() }; 
-        batch.set(saleRef, saleData);
+        batch.set(saleRef, { ...sale, id: saleRef.id, createdAt: serverTimestamp() });
 
+        // 2. Baixa de Estoque Inteligente (NOVA LÓGICA)
         sale.items.forEach(item => {
-            const targetId = item.originalId || item.id;
-            const unitsToDeduct = item.stockDeduction || item.qty; 
-            const productRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'products', targetId);
-            batch.update(productRef, { stock: increment(-unitsToDeduct) });
+            // Busca o produto original na memória para saber se é Pack ou Unit
+            const originalProd = products.find(p => p.id === (item.originalId || item.id));
+            
+            if (originalProd) {
+                // Se for Pack (Caixa), desconta do Pai
+                if (originalProd.itemType === 'pack') {
+                    if (originalProd.parentId && originalProd.conversionFactor) {
+                        const parentRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'products', originalProd.parentId);
+                        // Qtd vendida * Quantidade na caixa (Ex: 2 caixas * 12 = 24 unidades descontadas)
+                        const qtyToDeduct = item.qty * originalProd.conversionFactor;
+                        batch.update(parentRef, { stock: increment(-qtyToDeduct) });
+                    }
+                } else {
+                    // Se for Unit (Normal), desconta dele mesmo
+                    const productRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'products', originalProd.id);
+                    batch.update(productRef, { stock: increment(-item.qty) });
+                }
+            }
         });
 
         await batch.commit();
@@ -2733,7 +2757,7 @@ const handleEmitNFe = async (sale) => {
             {activeModule === 'inventory' && (
                 <InventoryWMS 
                     storeConfig={store} 
-                    products={products} 
+                    products={products} // <--- ADICIONE ISSO
                     showNotification={showNotification} 
                 />
             )}
