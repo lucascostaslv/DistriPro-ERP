@@ -483,11 +483,21 @@ const printReceipt = (sale, companyInfo) => {
   const lineLength = 48; // Caracteres para impressora de 80mm
   const separator = '-'.repeat(lineLength) + '\n';
 
-  const center = (text) => text.padStart(Math.floor(lineLength / 2) + text.length / 2) + '\n';
+  const center = (text) => {
+    const textStr = String(text); // Garante que o valor é uma string para evitar erros
+    const padding = Math.floor((lineLength - textStr.length) / 2);
+    return ' '.repeat(padding > 0 ? padding : 0) + textStr + '\n';
+  };
 
   let receiptContent = '';
   receiptContent += center(companyInfo.name || 'NOME DA EMPRESA');
-  receiptContent += center(companyInfo.address || 'ENDEREÇO');
+  if (companyInfo && companyInfo.address && typeof companyInfo.address === 'object') {
+    const addr = companyInfo.address;
+    receiptContent += center(`${addr.street || ''}, ${addr.number || ''}`);
+    receiptContent += center(`${addr.city || ''} - ${addr.state || ''}`);
+  } else {
+    receiptContent += center(companyInfo.address || 'ENDEREÇO');
+  }
   receiptContent += center(`CNPJ: ${companyInfo.cnpj || 'XX.XXX.XXX/0001-XX'}`);
   receiptContent += separator;
   receiptContent += center('CUPOM NAO FISCAL');
@@ -669,7 +679,6 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
   const [cart, setCart] = useState([]);
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('');
-  const [isPaymentStep, setIsPaymentStep] = useState(false);
   
   // Estados do Modal de Pagamento
   const [selectedProfileId, setSelectedProfileId] = useState('');
@@ -950,7 +959,6 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
     if (shouldPrint) printReceipt(pendingSale, companyInfo);
     setCart([]);
     setPaymentModalOpen(false);
-    setIsPaymentStep(false);
   };
 
   return (
@@ -1029,20 +1037,11 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
             <span>{formatCurrency(totalCart)}</span>
           </div>
           <div className="grid grid-cols-2 gap-2">
-            {!isPaymentStep ? (
-              <button onClick={() => setIsPaymentStep(true)} className="col-span-2 bg-slate-800 text-white py-3 rounded font-bold hover:bg-slate-700 flex justify-center items-center gap-2">
-                Avançar <ArrowRight size={18}/>
-              </button>
-            ) : (
-              <>
-                <button onClick={() => handlePaymentInit('Dinheiro')} className="bg-emerald-600 text-white py-2 rounded text-sm font-bold hover:bg-emerald-700">Dinheiro</button>
-                <button onClick={() => handlePaymentInit('Pix')} className="bg-slate-800 text-white py-2 rounded text-sm font-bold hover:bg-slate-900">Pix</button>
-                <button onClick={() => handlePaymentInit('Débito')} className="bg-blue-600 text-white py-2 rounded text-sm font-bold hover:bg-blue-700">Débito</button>
-                <button onClick={() => handlePaymentInit('Crédito')} className="bg-indigo-600 text-white py-2 rounded text-sm font-bold hover:bg-indigo-700">Crédito</button>
-                <button onClick={() => handlePaymentInit('Fiado')} className="col-span-2 bg-amber-600 text-white py-2 rounded text-sm font-bold hover:bg-amber-700 flex justify-center items-center gap-2"><UserPlus size={16}/> Fiado / A Prazo</button>
-                <button onClick={() => setIsPaymentStep(false)} className="col-span-2 border border-slate-300 text-slate-600 py-2 rounded text-sm font-bold hover:bg-slate-50">Voltar</button>
-              </>
-            )}
+            <button onClick={() => handlePaymentInit('Dinheiro')} className="bg-emerald-600 text-white py-2 rounded text-sm font-bold hover:bg-emerald-700">Dinheiro</button>
+            <button onClick={() => handlePaymentInit('Pix')} className="bg-slate-800 text-white py-2 rounded text-sm font-bold hover:bg-slate-900">Pix</button>
+            <button onClick={() => handlePaymentInit('Débito')} className="bg-blue-600 text-white py-2 rounded text-sm font-bold hover:bg-blue-700">Débito</button>
+            <button onClick={() => handlePaymentInit('Crédito')} className="bg-indigo-600 text-white py-2 rounded text-sm font-bold hover:bg-indigo-700">Crédito</button>
+            <button onClick={() => handlePaymentInit('Fiado')} className="col-span-2 bg-amber-600 text-white py-2 rounded text-sm font-bold hover:bg-amber-700 flex justify-center items-center gap-2"><UserPlus size={16}/> Fiado / A Prazo</button>
           </div>
         </div>
       </div>
@@ -2317,7 +2316,7 @@ const usePersistedState = (key, initialValue) => {
 };
 
 const StoreApp = ({ store, onLogout, updateStore }) => {
-  const [activeModule, setActiveModule] = useState('dashboard');
+  const [activeModule, setActiveModule] = useState('pdv');
   const [notification, setNotification] = useState(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
