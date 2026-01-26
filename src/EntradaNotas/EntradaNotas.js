@@ -26,7 +26,7 @@ import {
   getDocs,
   limit,
   addDoc,
-  increment // IMPORTANTE: Usado para somar estoque atomicamente
+  increment 
 } from 'firebase/firestore';
 import { 
   signInAnonymously, 
@@ -34,8 +34,8 @@ import {
   signInWithCustomToken 
 } from 'firebase/auth';
 
-// --- CONFIGURAÇÃO FIREBASE ---
-const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
+// --- CONFIGURAÇÃO FIREBASE (Fallback) ---
+const globalAppId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
 const initialAuthToken = typeof window.__initial_auth_token !== 'undefined' ? window.__initial_auth_token : undefined;
 
 // --- UTILITÁRIOS ---
@@ -75,12 +75,15 @@ const DenseSelect = (props) => (
 );
 
 // --- APP PRINCIPAL ---
-export default function EntradaNotas({ products: appProducts, priceGroups, onSaveEntry }) {
+export default function EntradaNotas({ products: appProducts, priceGroups, onSaveEntry, storeConfig }) {
   const [user, setUser] = useState(null);
   const [currentStep, setCurrentStep] = useState(1); 
   const [loading, setLoading] = useState(false);
   const [processingXml, setProcessingXml] = useState(false);
   const [entryMode, setEntryMode] = useState('XML');
+  
+  // Determina o ID da Loja corretamente (Prioridade: Prop > Global)
+  const currentAppId = storeConfig?.id ? String(storeConfig.id) : globalAppId;
   
   // Estado de Produtos Local
   const [products, setProducts] = useState(appProducts || INITIAL_PRODUCTS);
@@ -88,7 +91,6 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
   useEffect(() => {
     if (appProducts) {
         setProducts(prev => {
-            // Mantém os criados localmente que ainda não estão na lista global
             const localNew = prev.filter(p => !appProducts.some(ap => String(ap.id) === String(p.id)));
             return [...appProducts, ...localNew];
         });
@@ -207,7 +209,6 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
     const xmlDoc = parser.parseFromString(xmlText, "text/xml");
     if (xmlDoc.getElementsByTagName("parsererror").length > 0) throw new Error("XML Inválido");
     
-    // Helper para pegar tags com ou sem namespace (nfe:)
     const getTag = (parent, name) => parent.getElementsByTagName(name)[0] || parent.getElementsByTagName("nfe:"+name)[0];
     const getTagContent = (parent, name) => { const el = getTag(parent, name); return el ? el.textContent || "" : ""; };
     
@@ -225,12 +226,9 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
     const xNome = getTagContent(partnerNode, "xNome");
     const cnpj = getTagContent(partnerNode, "CNPJ") || getTagContent(partnerNode, "CPF");
 
-    // --- PARSING DE ITENS (Lógica original mantida) ---
+    // Parsing dos Itens
     const detList = infNFe.getElementsByTagName("det");
-    // ... (Seu código de loop 'for' para detList fica igual, não precisa alterar essa parte dos produtos) ...
-    // Vou resumir a parte dos produtos para focar na correção, mas MANTENHA seu loop de produtos aqui
     
-    // --- CADASTRO FORNECEDOR (Mantido) ---
     let supplier = { name: xNome, id: 'AUTO' };
     if (auth.currentUser) {
         try {
@@ -240,14 +238,11 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
         }
     }
 
-    // --- PARSING DOS PRODUTOS ---
     const newItems = [];
     for(let i=0; i<detList.length; i++) {
-        // ... (MANTENHA A LÓGICA DE PRODUTOS QUE JÁ EXISTIA AQUI) ...
-        // Apenas copiando o trecho essencial para contexto:
         const prod = getTag(detList[i], "prod");
         const impostos = getTag(detList[i], "imposto");
-        // ... (Extração de impostos) ...
+        
         const qCom = parseFloat(getTagContent(prod, "qCom") || "0");
         const vUnCom = parseFloat(getTagContent(prod, "vUnCom") || "0");
         const cProd = getTagContent(prod, "cProd");
@@ -256,14 +251,11 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
         const cEAN = getTagContent(prod, "cEAN");
         const uCom = getTagContent(prod, "uCom");
         
-        // ... (Lógica de busca de produto existente) ...
         let existingProd = products.find(p => String(p.cbaCode) === String(cProd) || String(p.manufacturingCode) === String(cProd));
         if (!existingProd) {
              existingProd = products.find(p => (p.cbaCode && String(p.cbaCode).includes(cProd)) || (p.manufacturingCode && p.manufacturingCode.includes(cProd)));
         }
 
-        // Sugestão de Preço e Push no newItems (Igual ao seu original)
-        // ...
         newItems.push({
             id: Math.random().toString(36).substring(2),
             productId: existingProd ? existingProd.id : '',
@@ -274,40 +266,37 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
             xmlProductName: xProd,
             productName: existingProd ? existingProd.name : xProd,
             unit: getTagContent(prod, "uCom"),
-            quantity: qCom, unitPrice: vUnCom,
+            quantity: qCom || 0, 
+            unitPrice: vUnCom || 0,
             discount: 0, surcharge: 0, 
             icmsRate: 0, ipiRate: 0, 
-            // Correção no cálculo de IPI/ICMS para garantir float
-            icmsValue: 0, // Ajuste conforme sua lógica original de impostos
+            icmsValue: 0,
             ipiValue: 0,
-            total: (qCom * vUnCom), // + impostos se necessário
+            total: (qCom * vUnCom),
             cfop: getTagContent(prod, "CFOP") || selectedType?.defaultCfop || "",
             isService: false,
-            suggestedPrice: null, // Ajuste conforme original
+            suggestedPrice: null, 
             priceGroupMargin: 0,
             acceptedSuggestion: false
         });
     }
 
-    // --- CORREÇÃO CRÍTICA: PARSING FINANCEIRO (COBRANÇA) ---
     const cobr = getTag(infNFe, "cobr");
     const newInstallments = [];
     
     if (cobr) {
-        // Tenta pegar tags <dup> (filhos de cobr)
-        // Nota: getElementsByTagName retorna todos os descendentes com a tag
         let dups = cobr.getElementsByTagName("dup");
-        if (dups.length === 0) dups = cobr.getElementsByTagName("nfe:dup"); // Fallback namespace
+        if (dups.length === 0) dups = cobr.getElementsByTagName("nfe:dup"); 
 
         for (let i = 0; i < dups.length; i++) {
             const dDup = dups[i];
             const nDup = getTagContent(dDup, "nDup");
-            const dVenc = getTagContent(dDup, "dVenc"); // Formato YYYY-MM-DD
+            const dVenc = getTagContent(dDup, "dVenc"); 
             const vDup = parseFloat(getTagContent(dDup, "vDup") || "0");
 
             newInstallments.push({
                 id: Math.random().toString(36),
-                number: nDup || (i + 1).toString(), // Usa o número do XML ou índice
+                number: nDup || (i + 1).toString(),
                 dueDate: dVenc,
                 value: vDup,
                 status: 'PENDENTE'
@@ -315,7 +304,6 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
         }
     }
 
-    // Atualiza estados
     setHeaderData(prev => ({ 
         ...prev, 
         number: nNF, 
@@ -324,13 +312,11 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
         entityName: supplier.name, 
         entityDoc: cnpj, 
         entityId: supplier.id,
-        // Se houver parcelas no XML, já seta a condição de pagamento visualmente
         paymentCondition: newInstallments.length > 0 ? `XML: ${newInstallments.length}x` : prev.paymentCondition
     }));
     
     setItems(newItems);
 
-    // Se encontrou parcelas no XML, define elas. Se não, limpa para gerar manual depois.
     if (newInstallments.length > 0) {
         setInstallments(newInstallments);
         alert(`XML Importado!\n${newItems.length} itens identificados.\n${newInstallments.length} parcelas financeiras importadas.`);
@@ -342,12 +328,12 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
 
   const getOrCreateSupplier = async (cnpj, name) => {
      if(!auth.currentUser) return { name, id: 'ERR' };
-     const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'suppliers'), where('cnpj', '==', cnpj), limit(1));
+     const q = query(collection(db, 'artifacts', currentAppId, 'public', 'data', 'suppliers'), where('cnpj', '==', cnpj), limit(1));
      const snap = await getDocs(q);
      if(!snap.empty) return { name: snap.docs[0].data().name, id: snap.docs[0].data().code };
      
      const newCode = Date.now().toString().slice(-4);
-     await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'suppliers'), {
+     await addDoc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'suppliers'), {
          name, cnpj, code: newCode, autoCreated: true, createdBy: auth.currentUser.uid
      });
      return { name, id: newCode };
@@ -384,7 +370,6 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
       }));
   };
 
-  // Cadastro Rápido (Imediato)
   const handleQuickCreate = async (item) => {
       const codeToUse = item.systemSku || item.xmlProductCode;
       
@@ -397,14 +382,15 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
           cbaCode: codeToUse,
           name: item.xmlProductName || 'Novo Produto',
           unit: item.unit,
-          cost: item.unitPrice,
-          price: item.unitPrice * 1.5, 
-          stock: 0, // Será somado no final
+          cost: Number(item.unitPrice) || 0,
+          price: (Number(item.unitPrice) || 0) * 1.5, 
+          stock: 0, 
           createdAt: serverTimestamp()
       };
 
       try {
-          const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'products'), newProduct);
+          // Usa currentAppId aqui também
+          const docRef = await addDoc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'products'), newProduct);
           const createdProduct = { ...newProduct, id: docRef.id };
           setProducts(prev => [...prev, createdProduct]);
           setItems(prev => prev.map(i => i.id === item.id ? {
@@ -437,13 +423,12 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
 
   const handleRemoveInstallment = (id) => { setInstallments(installments.filter(i => i.id !== id)); };
 
-  // --- FUNÇÃO DE SALVAR CORRIGIDA E ROBUSTA ---
+  // --- FUNÇÃO DE SALVAR CORRIGIDA ---
   const handleSave = async () => {
     setLoading(true);
     try {
       const batch = writeBatch(db);
       
-      // 1. Prepara os itens finais
       const finalItems = [];
       let productsUpdatedCount = 0;
       let productsCreatedCount = 0;
@@ -451,7 +436,6 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
       for (const item of items) {
           let newItem = { ...item };
           
-          // Se não tem ID mas tem SKU, tenta achar na lista local
           if (!newItem.productId && newItem.systemSku) {
               const found = products.find(p => String(p.cbaCode).trim() === String(newItem.systemSku).trim());
               if (found) {
@@ -460,48 +444,46 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
               }
           }
 
-          // SE AINDA NÃO TEM PRODUCTID, CRIA O PRODUTO AGORA (Auto-Cadastro no Save)
+          // Se não tem ID, cria o produto
           if (!newItem.productId) {
-               const newProdRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'products'));
+               const newProdRef = doc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'products'));
                const codeToUse = newItem.systemSku || newItem.xmlProductCode || 'GEN-' + Date.now();
                
+               const safeCost = Number(newItem.unitPrice) || 0;
                const newProductData = {
                    cbaCode: codeToUse,
                    name: newItem.productName || newItem.xmlProductName || 'Produto Sem Nome',
-                   cost: Number(newItem.unitPrice),
-                   price: Number(newItem.unitPrice) * 1.5, // Margem padrão
-                   unit: newItem.unit || 'UN', // Garante que usa a unidade do XML se disponível
-                    ncm: newItem.ncm ? String(newItem.ncm).replace(/\D/g, '') : '', 
-                    ean: newItem.ean || '',
-                    origin: '0', // Padrão Nacional
-                    taxProfileId: null, // Deixa null para forçar você a conferir no Estoque depois
-                   stock: 0, // O estoque será somado no passo de atualização abaixo
+                   cost: safeCost,
+                   price: safeCost * 1.5, 
+                   unit: newItem.unit || 'UN',
+                   ncm: newItem.ncm ? String(newItem.ncm).replace(/\D/g, '') : '', 
+                   ean: newItem.ean || '',
+                   origin: '0', 
+                   taxProfileId: null, 
+                   stock: 0, // Estoque começa em 0 e soma abaixo
                    createdAt: serverTimestamp()
                };
                
                batch.set(newProdRef, newProductData);
-               
-               newItem.productId = newProdRef.id; // Vincula o item ao novo ID gerado
+               newItem.productId = newProdRef.id;
                productsCreatedCount++;
           }
 
-          // ATUALIZAÇÃO DE ESTOQUE (Se configurado na operação)
+          // Atualiza Estoque
           if (selectedType && selectedType.stockAction !== 'NEUTRO') {
               const factor = selectedType.stockAction === 'SOMAR' ? 1 : -1;
-              const qtyChange = Number(newItem.quantity) * factor;
+              const qtyChange = (Number(newItem.quantity) || 0) * factor;
 
-              const productRef = doc(db, 'artifacts', appId, 'public', 'data', 'products', newItem.productId);
+              const productRef = doc(db, 'artifacts', currentAppId, 'public', 'data', 'products', newItem.productId);
               
-              // Atualiza Estoque (Increment) e Custo (Se for entrada)
               const updateData = {
                   stock: increment(qtyChange)
               };
 
-              // Se for entrada e tiver sugestão aceita ou apenas entrada simples, atualiza custo
               if (selectedType.direction === 'ENTRADA') {
-                  updateData.cost = Number(newItem.unitPrice);
+                  updateData.cost = Number(newItem.unitPrice) || 0;
                   if (newItem.acceptedSuggestion && newItem.suggestedPrice) {
-                      updateData.price = Number(newItem.suggestedPrice);
+                      updateData.price = Number(newItem.suggestedPrice) || 0;
                   }
               }
 
@@ -512,8 +494,8 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
           finalItems.push(newItem);
       }
 
-      // 2. Grava a Nota Fiscal (Invoice)
-      const invoiceRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'invoices'));
+      // Grava Nota
+      const invoiceRef = doc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'invoices'));
       batch.set(invoiceRef, {
           header: headerData, 
           type: selectedType, 
@@ -525,16 +507,12 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
           userId: auth.currentUser?.uid || 'anon_user'
       });
 
-      // 3. Comita tudo (Nota + Produtos Novos + Atualizações de Estoque)
       await batch.commit();
 
-      // 4. Feedback e Limpeza
       alert(`SUCESSO!\n\nNota Gravada.\nProdutos Atualizados: ${productsUpdatedCount}\nNovos Produtos Cadastrados: ${productsCreatedCount}`);
       
-      // Chama o callback do pai apenas para atualizar a tela se necessário, 
-      // mas não dependemos mais dele para salvar no banco.
       if (onSaveEntry) {
-          onSaveEntry([], null); // Passa vazio pois já salvamos
+          onSaveEntry([], null);
       }
 
       // Reset

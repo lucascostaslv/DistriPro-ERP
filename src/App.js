@@ -2750,7 +2750,14 @@ const handleEmitNFe = async (sale) => {
                   showNotification={showNotification} 
               />
             )}
-            {activeModule === 'transactions' && <Transactions products={products} priceGroups={store.priceGroups || []} onSaveEntry={() => {}} />}
+            {activeModule === 'transactions' && (
+              <Transactions 
+                products={products} 
+                priceGroups={store.priceGroups || []} 
+                onSaveEntry={() => {}} 
+                storeConfig={store} // <--- ADICIONAR ESTA LINHA
+              />
+            )}
             {activeModule === 'priceGroups' && <PriceGroups products={products} showNotification={showNotification} />}
             {activeModule === 'finance' && <Finance sales={realtimeSales} transactions={store.transactions} transactionCategories={store.transactionCategories} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} onEmitNFe={handleEmitNFe}/>}
             {activeModule === 'inventory' && (
