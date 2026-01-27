@@ -1830,16 +1830,16 @@ const masks = {
 
 const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeConfig, setStoreConfig, showNotification }) => {
   const [activeTab, setActiveTab] = useState('general');
-  const [newUser, setNewUser] = useState({ username: '', password: '' });
-  
-  // Estado Fase 2: Perfis
+  // Adicionei o campo 'cfop' no estado inicial
+  const [newProfile, setNewProfile] = useState({ name: '', origin: '0', cst_nfe: '102', cst_pis_cofins: '49', cfop: '5102' });
   const [taxProfiles, setTaxProfiles] = useState([]);
-  const [newProfile, setNewProfile] = useState({ name: '', origin: '0', cst_nfe: '102', cst_pis_cofins: '49' });
+  
+  // Estados do Certificado
+  const [certData, setCertData] = useState({ password: '', api_token: '', environment: 'HOMOLOG', fileName: '', base64: '' , csc_id: '', csc_token: ''});
 
   const [formData, setFormData] = useState({
     name: companyInfo?.name || '',
     cnpj: companyInfo?.cnpj || '',
-    email: companyInfo?.email || '',
     ie: companyInfo?.ie || '',
     crt: companyInfo?.crt || '1',
     cnae: companyInfo?.cnae || '',
@@ -1848,276 +1848,160 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
     }
   });
 
-  // Carregamento de Dados (Supabase)
+  // Carregar Dados
   useEffect(() => {
     const loadData = async () => {
         if (!storeConfig?.id) return;
-        const storeIdStr = String(storeConfig.id); // Força String
+        const storeIdStr = String(storeConfig.id);
         
         try {
-            // 1. Dados da Empresa
-            const { data: companyData, error: companyError } = await supabase.from('fiscal_emitters').select('*').eq('firebase_store_id', storeIdStr).single();
-            
-            // Só preenche se achou e não deu erro (ignora erro 406 se a tabela estiver vazia)
-            if (companyData && !companyError) {
-                setFormData(prev => ({
-                    ...prev,
-                    name: companyData.x_nome,
-                    cnpj: companyData.cnpj,
-                    ie: companyData.ie,
-                    crt: String(companyData.crt),
-                    cnae: companyData.cnae,
-                    address: {
-                        zip: companyData.cep, street: companyData.x_lgr, number: companyData.nro, 
-                        complement: companyData.xcpl, neighborhood: companyData.xbairro, 
-                        city: companyData.xmun, state: companyData.uf, ibgeCode: companyData.cmun
-                    }
-                }));
+            // Empresa
+            const { data: companyData } = await supabase.from('fiscal_emitters').select('*').eq('firebase_store_id', storeIdStr).single();
+            if (companyData) {
+                setFormData({
+                    name: companyData.x_nome, cnpj: companyData.cnpj, ie: companyData.ie, crt: String(companyData.crt), cnae: companyData.cnae,
+                    address: { zip: companyData.cep, street: companyData.x_lgr, number: companyData.nro, complement: companyData.xcpl, neighborhood: companyData.xbairro, city: companyData.xmun, state: companyData.uf, ibgeCode: companyData.cmun }
+                });
             }
+            // Perfis (Carrega o CFOP do banco agora)
+            const { data: profiles } = await supabase.from('fiscal_tax_profiles').select('*').eq('firebase_store_id', storeIdStr);
+            if (profiles) setTaxProfiles(profiles);
 
-            // 2. Perfis Fiscais
-            const { data: profiles, error: profilesError } = await supabase.from('fiscal_tax_profiles').select('*').eq('firebase_store_id', storeIdStr);
-            if (profiles && !profilesError) setTaxProfiles(profiles);
-            
-        } catch (err) {
-            console.error("Erro ao carregar dados fiscais:", err);
-        }
+            // Certificado
+            const { data: certSettings } = await supabase.from('fiscal_settings').select('*').eq('firebase_store_id', storeIdStr).single();
+            if (certSettings) {
+                setCertData({ 
+                    password: certSettings.cert_password || '', 
+                    api_token: certSettings.api_token || '', 
+                    environment: certSettings.environment || 'HOMOLOG', 
+                    fileName: certSettings.cert_base64 ? 'Certificado Salvo' : '', 
+                    base64: '',
+                    // CORREÇÃO: Usar certSettings
+                    csc_id: certSettings.csc_id || '',       
+                    csc_token: certSettings.csc_token || ''  
+                });
+            }
+        } catch (err) { console.error(err); }
     };
     loadData();
   }, [storeConfig]);
 
-  // --- ESTADOS FASE 5: CERTIFICADO ---
-  const [certData, setCertData] = useState({ 
-    password: '', api_token: '', environment: 'HOMOLOG', fileName: '', base64: '' 
-  });
-
-  // --- NOVO USE EFFECT (Não apague o anterior) ---
-  // Este carrega apenas as configs do certificado/API
-  useEffect(() => {
-    const loadCertConfig = async () => {
-      if (!storeConfig?.id) return;
-      const { data } = await supabase
-        .from('fiscal_settings')
-        .select('*')
-        .eq('firebase_store_id', String(storeConfig.id))
-        .single();
-      
-      if (data) {
-        setCertData({
-          password: data.cert_password || '',
-          api_token: data.api_token || '',
-          environment: data.environment || 'HOMOLOG',
-          fileName: data.cert_base64 ? 'Certificado Salvo (Oculto)' : '',
-          base64: '' // Não trazemos o base64 de volta para a tela por segurança/peso
-        });
-      }
-    };
-    loadCertConfig();
-  }, [storeConfig]); // Roda quando a loja muda
-
-  // Função para ler o arquivo .pfx
-  const handleCertFile = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = function(evt) {
-        // Remove o cabeçalho "data:application/..." para pegar só o base64 puro
-        const b64 = evt.target.result.split(',')[1]; 
-        setCertData(prev => ({ ...prev, base64: b64, fileName: file.name }));
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  // Função para Salvar Configurações
+  // Salvar Certificado
   const handleSaveCertSettings = async () => {
-    const storeIdStr = String(storeConfig.id);
-    const payload = {
-        firebase_store_id: storeIdStr,
-        cert_password: certData.password,
-        api_token: certData.api_token,
-        environment: certData.environment
-    };
-    // Só atualiza o arquivo se o usuário fez upload de um novo
-    if (certData.base64) payload.cert_base64 = certData.base64;
-
-    const { error } = await supabase
-        .from('fiscal_settings')
-        .upsert(payload, { onConflict: 'firebase_store_id' });
-
-    if (!error) showNotification('Configurações de API/Certificado salvas!', 'success');
-    else showNotification('Erro ao salvar: ' + error.message, 'error');
+    if (!certData.api_token) return showNotification('Token obrigatório.', 'error');
+    try {
+        if (certData.base64 && certData.password) {
+            await NFeService.updateCertificate(certData.api_token, certData.password, certData.base64);
+            showNotification('Certificado atualizado na API!', 'success');
+        }
+        const payload = {
+            firebase_store_id: String(storeConfig.id),
+            cert_password: certData.password,
+            api_token: certData.api_token,
+            environment: certData.environment,
+            csc_id: certData.csc_id,       // <--- SALVA
+            csc_token: certData.csc_token
+        };
+        if (certData.base64) payload.cert_base64 = certData.base64;
+        
+        await supabase.from('fiscal_settings').upsert(payload, { onConflict: 'firebase_store_id' });
+        showNotification('Configurações salvas!', 'success');
+    } catch (error) { showNotification('Erro: ' + error.message, 'error'); }
   };
 
+  // Salvar Empresa
   const handleSaveCompany = async () => {
-      if (!formData.address.ibgeCode) return showNotification('Código IBGE inválido. Busque o CEP novamente.', 'error');
-      
-      const storeIdStr = String(storeConfig.id);
-      
-      const fiscalPayload = {
-        firebase_store_id: storeIdStr,
-        x_nome: formData.name,
-        cnpj: formData.cnpj ? String(formData.cnpj).replace(/\D/g, '') : '',
-        ie: formData.ie ? String(formData.ie).replace(/\D/g, '') : '',
-        crt: parseInt(formData.crt),
-        cnae: formData.cnae ? String(formData.cnae).replace(/\D/g, '') : '',
-        x_lgr: formData.address.street,
-        nro: formData.address.number,
-        xcpl: formData.address.complement,
-        xbairro: formData.address.neighborhood,
-        cmun: formData.address.ibgeCode,
-        xmun: formData.address.city,
-        uf: formData.address.state,
-        cep: formData.address.zip ? String(formData.address.zip).replace(/\D/g, '') : ''
-      };
-
       try {
-          const { error } = await supabase.from('fiscal_emitters').upsert(fiscalPayload, { onConflict: 'firebase_store_id' });
-          if (error) throw error;
-          
-          setCompanyInfo(formData); // Atualiza no firebase também
-          showNotification('Dados Fiscais salvos com sucesso!', 'success');
-      } catch (error) {
-          console.error(error);
-          showNotification('Erro ao salvar: ' + error.message, 'error');
-      }
+          const payload = {
+            firebase_store_id: String(storeConfig.id),
+            x_nome: formData.name, cnpj: formData.cnpj.replace(/\D/g, ''), ie: formData.ie.replace(/\D/g, ''),
+            crt: parseInt(formData.crt), cnae: formData.cnae.replace(/\D/g, ''),
+            x_lgr: formData.address.street, nro: formData.address.number, xcpl: formData.address.complement,
+            xbairro: formData.address.neighborhood, cmun: formData.address.ibgeCode, xmun: formData.address.city,
+            uf: formData.address.state, cep: formData.address.zip.replace(/\D/g, '')
+          };
+          await supabase.from('fiscal_emitters').upsert(payload, { onConflict: 'firebase_store_id' });
+          setCompanyInfo(formData);
+          showNotification('Dados da empresa salvos!', 'success');
+      } catch (e) { showNotification(e.message, 'error'); }
   };
 
+  // --- NOVO: Adicionar Perfil com CFOP ---
   const handleAddProfile = async () => {
       if (!newProfile.name) return showNotification('Nome obrigatório', 'error');
-      const storeIdStr = String(storeConfig.id);
-
-      const payload = {
-        firebase_store_id: storeIdStr,
-        name: newProfile.name,
-        origin: parseInt(newProfile.origin),
-        cst_nfe: newProfile.cst_nfe,
-        cst_pis_cofins: newProfile.cst_pis_cofins
-      };
-      
       try {
+          const payload = {
+            firebase_store_id: String(storeConfig.id),
+            name: newProfile.name.toUpperCase(),
+            origin: parseInt(newProfile.origin),
+            cst_nfe: newProfile.cst_nfe,
+            cst_pis_cofins: newProfile.cst_pis_cofins,
+            cfop_state: newProfile.cfop // Salva o CFOP escolhido
+          };
           const { data, error } = await supabase.from('fiscal_tax_profiles').insert(payload).select();
           if (error) throw error;
           
           setTaxProfiles([...taxProfiles, data[0]]);
-          setNewProfile({ name: '', origin: '0', cst_nfe: '102', cst_pis_cofins: '49' });
+          setNewProfile({ name: '', origin: '0', cst_nfe: '102', cst_pis_cofins: '49', cfop: '5102' });
           showNotification('Perfil criado!', 'success');
-      } catch (error) {
-          showNotification('Erro ao criar: ' + error.message, 'error');
-      }
+      } catch (error) { showNotification(error.message, 'error'); }
   };
 
   const handleDeleteProfile = async (id) => {
-      try {
-          const { error } = await supabase.from('fiscal_tax_profiles').delete().eq('id', id);
-          if (error) throw error;
-          setTaxProfiles(taxProfiles.filter(p => p.id !== id));
-          showNotification('Perfil removido', 'success');
-      } catch (error) {
-          showNotification('Erro ao remover: ' + error.message, 'error');
-      }
+      await supabase.from('fiscal_tax_profiles').delete().eq('id', id);
+      setTaxProfiles(taxProfiles.filter(p => p.id !== id));
   };
 
   return (
     <div className="space-y-6 pb-8">
        <div className="flex gap-2 border-b pb-1 overflow-x-auto">
-          <button onClick={() => setActiveTab('general')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors ${activeTab === 'general' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Dados Fiscais</button>
-          <button onClick={() => setActiveTab('tax_profiles')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors ${activeTab === 'tax_profiles' ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Perfis Tributários</button>
-          <button onClick={() => setActiveTab('certificate')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors whitespace-nowrap ${activeTab === 'certificate' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Certificado | NFe</button>
-          <button onClick={() => setActiveTab('users')} className={`px-4 py-2 text-sm font-bold rounded-t-lg transition-colors ${activeTab === 'users' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Usuários</button>
+          <button onClick={() => setActiveTab('general')} className={`px-4 py-2 text-sm font-bold rounded-t-lg ${activeTab === 'general' ? 'bg-slate-800 text-white' : 'bg-slate-100'}`}>Dados Fiscais</button>
+          <button onClick={() => setActiveTab('tax_profiles')} className={`px-4 py-2 text-sm font-bold rounded-t-lg ${activeTab === 'tax_profiles' ? 'bg-emerald-600 text-white' : 'bg-slate-100'}`}>Perfis Tributários</button>
+          <button onClick={() => setActiveTab('certificate')} className={`px-4 py-2 text-sm font-bold rounded-t-lg ${activeTab === 'certificate' ? 'bg-slate-800 text-white' : 'bg-slate-100'}`}>Certificado</button>
        </div>
 
        {activeTab === 'general' && (
-           <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
-               <h3 className="font-bold mb-4 text-slate-800 flex items-center gap-2"><Package size={20}/> Dados do Emitente (Sua Empresa)</h3>
-               
-               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                   <div>
-                       <label className="text-xs font-bold text-slate-500">Razão Social</label>
-                       <input className="w-full border p-2 rounded text-sm" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} />
-                   </div>
-                   <div>
-                       <label className="text-xs font-bold text-slate-500">CNPJ</label>
-                       <input className="w-full border p-2 rounded text-sm" value={formData.cnpj} onChange={e => setFormData({...formData, cnpj: masks.cnpj(e.target.value)})} placeholder="00.000.000/0000-00" maxLength={18}/>
-                   </div>
-                   <div>
-                       <label className="text-xs font-bold text-slate-500">Inscrição Estadual</label>
-                       <input className="w-full border p-2 rounded text-sm" value={formData.ie} onChange={e => setFormData({...formData, ie: masks.numbersOnly(e.target.value)})} />
-                   </div>
-                   <div>
-                       <label className="text-xs font-bold text-slate-500">Regime Tributário</label>
-                       <select className="w-full border p-2 rounded text-sm" value={formData.crt} onChange={e => setFormData({...formData, crt: e.target.value})}>
-                           <option value="1">Simples Nacional</option>
-                           <option value="3">Regime Normal</option>
-                       </select>
-                   </div>
+           <div className="p-6 bg-white border rounded-b shadow-sm">
+               <h3 className="font-bold mb-4 text-slate-800">Dados da Empresa</h3>
+               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                   <div><label className="text-xs font-bold">Razão Social</label><input className="w-full border p-2" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} /></div>
+                   <div><label className="text-xs font-bold">CNPJ</label><input className="w-full border p-2" value={formData.cnpj} onChange={e => setFormData({...formData, cnpj: e.target.value})} /></div>
+                   <div><label className="text-xs font-bold">IE</label><input className="w-full border p-2" value={formData.ie} onChange={e => setFormData({...formData, ie: e.target.value})} /></div>
+                   <div><label className="text-xs font-bold">Regime</label><select className="w-full border p-2" value={formData.crt} onChange={e => setFormData({...formData, crt: e.target.value})}><option value="1">Simples Nacional</option><option value="3">Normal</option></select></div>
                </div>
-
-               {/* Endereço */}
-               <div className="border-t pt-4 mt-4">
-                   <h4 className="font-bold text-sm text-slate-700 mb-3">Endereço Fiscal</h4>
-                   <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-                       <div className="md:col-span-3">
-                           <label className="text-xs font-bold text-slate-500">CEP</label>
-                           <input className="w-full border p-2 rounded text-sm" value={formData.address.zip} onChange={e => setFormData({...formData, address: {...formData.address, zip: masks.cep(e.target.value)}})} onBlur={async () => {
-                               if(formData.address.zip.length >= 8) {
-                                   const r = await fetch(`https://viacep.com.br/ws/${formData.address.zip.replace(/\D/g,'')}/json/`);
-                                   const d = await r.json();
-                                   if(!d.erro) setFormData(prev => ({...prev, address: {...prev.address, street: d.logradouro, neighborhood: d.bairro, city: d.localidade, state: d.uf, ibgeCode: d.ibge}}));
-                               }
-                           }} placeholder="00000-000"/>
-                       </div>
-                       <div className="md:col-span-7">
-                           <label className="text-xs font-bold text-slate-500">Rua</label>
-                           <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.street} readOnly />
-                       </div>
-                       <div className="md:col-span-2">
-                           <label className="text-xs font-bold text-slate-500">Número</label>
-                           <input className="w-full border p-2 rounded text-sm" value={formData.address.number} onChange={e => setFormData({...formData, address: {...formData.address, number: e.target.value}})} />
-                       </div>
-                       <div className="md:col-span-4">
-                           <label className="text-xs font-bold text-slate-500">Bairro</label>
-                           <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.neighborhood} readOnly />
-                       </div>
-                       <div className="md:col-span-4">
-                           <label className="text-xs font-bold text-slate-500">Cidade</label>
-                           <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.city} readOnly />
-                       </div>
-                       <div className="md:col-span-2">
-                           <label className="text-xs font-bold text-slate-500">UF</label>
-                           <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.state} readOnly />
-                       </div>
-                       <div className="md:col-span-2">
-                           <label className="text-xs font-bold text-indigo-600">IBGE</label>
-                           <input className="w-full border p-2 rounded text-sm bg-indigo-50 font-mono text-xs" value={formData.address.ibgeCode} readOnly />
-                       </div>
-                   </div>
+               {/* Endereço Simplificado */}
+               <div className="mt-4 pt-4 border-t grid grid-cols-3 gap-3">
+                   <div><label className="text-xs font-bold">CEP</label><input className="w-full border p-2" value={formData.address.zip} onChange={e => setFormData({...formData, address: {...formData.address, zip: e.target.value}})} onBlur={async () => {
+                       if(formData.address.zip.length>=8) {
+                           const r = await fetch(`https://viacep.com.br/ws/${formData.address.zip.replace(/\D/g,'')}/json/`);
+                           const d = await r.json();
+                           if(!d.erro) setFormData(prev => ({...prev, address: { zip: d.cep, street: d.logradouro, neighborhood: d.bairro, city: d.localidade, state: d.uf, ibgeCode: d.ibge, number: prev.address.number }}));
+                       }
+                   }}/></div>
+                   <div className="col-span-2"><label className="text-xs font-bold">Rua</label><input className="w-full border p-2 bg-slate-50" value={formData.address.street} readOnly /></div>
+                   <div><label className="text-xs font-bold">Número</label><input className="w-full border p-2" value={formData.address.number} onChange={e => setFormData({...formData, address: {...formData.address, number: e.target.value}})} /></div>
+                   <div><label className="text-xs font-bold">Bairro</label><input className="w-full border p-2 bg-slate-50" value={formData.address.neighborhood} readOnly /></div>
+                   <div><label className="text-xs font-bold">Cidade/IBGE</label><input className="w-full border p-2 bg-slate-50" value={`${formData.address.city} (${formData.address.ibgeCode})`} readOnly /></div>
                </div>
-
-               <div className="mt-6 flex justify-end">
-                   <button onClick={handleSaveCompany} className="bg-indigo-600 text-white px-6 py-2 rounded text-sm font-bold hover:bg-indigo-700 flex items-center gap-2">
-                       <Save size={18}/> Salvar Alterações
-                   </button>
-               </div>
+               <button onClick={handleSaveCompany} className="mt-4 bg-indigo-600 text-white px-4 py-2 rounded font-bold float-right">Salvar</button>
            </div>
        )}
 
        {activeTab === 'tax_profiles' && (
-           <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
-               <h3 className="font-bold mb-4 flex items-center gap-2"><Tags size={20}/> Perfis de Imposto (Inteligência Fiscal)</h3>
-               <p className="text-sm text-slate-500 mb-6">Crie regras automáticas para seus produtos. Ao cadastrar um item, basta selecionar o perfil (ex: "Revenda Padrão") e o sistema preencherá os impostos na nota.</p>
+           <div className="p-6 bg-white border rounded-b shadow-sm">
+               <h3 className="font-bold mb-4 flex items-center gap-2"><Tags size={20}/> Gerenciar Perfis Fiscais</h3>
                
+               {/* Formulário Novo */}
                <div className="bg-emerald-50 p-4 rounded border border-emerald-100 mb-6 grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
-                  <div className="md:col-span-4">
-                      <label className="text-xs font-bold text-emerald-700">Nome (Ex: Revenda Padrão)</label>
-                      <input className="w-full border p-2 rounded text-sm" value={newProfile.name} onChange={e => setNewProfile({...newProfile, name: e.target.value})} />
-                  </div>
                   <div className="md:col-span-3">
+                      <label className="text-xs font-bold text-emerald-700">Nome (Ex: Cerveja ST)</label>
+                      <input className="w-full border p-2 rounded text-sm uppercase" value={newProfile.name} onChange={e => setNewProfile({...newProfile, name: e.target.value})} />
+                  </div>
+                  <div className="md:col-span-2">
                       <label className="text-xs font-bold text-emerald-700">Origem</label>
                       <select className="w-full border p-2 rounded text-sm" value={newProfile.origin} onChange={e => setNewProfile({...newProfile, origin: e.target.value})}>
                           <option value="0">0 - Nacional</option>
-                          <option value="1">1 - Importado Direta</option>
-                          <option value="2">2 - Estrangeira (Merc. Interno)</option>
+                          <option value="1">1 - Importado</option>
                       </select>
                   </div>
                   <div className="md:col-span-3">
@@ -2128,165 +2012,114 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
                           <option value="900">900 - Outros</option>
                       </select>
                   </div>
+                  {/* --- CAMPO NOVO: CFOP --- */}
                   <div className="md:col-span-2">
-                      <button onClick={handleAddProfile} className="w-full bg-emerald-600 text-white p-2 rounded font-bold hover:bg-emerald-700 text-sm h-[38px]">Criar</button>
+                      <label className="text-xs font-bold text-emerald-700">CFOP (Estadual)</label>
+                      <input 
+                        className="w-full border p-2 rounded text-sm font-bold text-center" 
+                        value={newProfile.cfop} 
+                        onChange={e => setNewProfile({...newProfile, cfop: e.target.value})} 
+                        placeholder="Ex: 5405"
+                      />
+                  </div>
+                  <div className="md:col-span-2">
+                      <button onClick={handleAddProfile} className="w-full bg-emerald-600 text-white p-2 rounded font-bold hover:bg-emerald-700 text-sm h-[38px]">Adicionar</button>
                   </div>
                </div>
 
+               {/* Tabela */}
                <div className="border rounded overflow-hidden">
                    <table className="w-full text-sm text-left">
                        <thead className="bg-slate-50 uppercase text-xs text-slate-500">
-                           <tr><th className="p-3">Nome</th><th className="p-3">Origem</th><th className="p-3">CSOSN</th><th className="p-3 text-right">Ação</th></tr>
+                           <tr>
+                               <th className="p-3">Nome</th>
+                               <th className="p-3 text-center">Origem</th>
+                               <th className="p-3 text-center">CSOSN</th>
+                               <th className="p-3 text-center bg-yellow-50 text-yellow-800">CFOP</th> {/* Nova Coluna */}
+                               <th className="p-3 text-right">Ação</th>
+                           </tr>
                        </thead>
                        <tbody className="divide-y divide-slate-100">
                            {taxProfiles.map(p => (
                                <tr key={p.id} className="hover:bg-slate-50">
                                    <td className="p-3 font-bold text-slate-700">{p.name}</td>
-                                   <td className="p-3">{p.origin}</td>
-                                   <td className="p-3"><span className="bg-slate-200 px-2 py-1 rounded text-xs font-mono">{p.cst_nfe}</span></td>
+                                   <td className="p-3 text-center">{p.origin}</td>
+                                   <td className="p-3 text-center"><span className="bg-slate-200 px-2 py-1 rounded text-xs font-mono">{p.cst_nfe}</span></td>
+                                   <td className="p-3 text-center bg-yellow-50 font-bold text-yellow-900">{p.cfop_state || '-'}</td> {/* Valor */}
                                    <td className="p-3 text-right"><button onClick={() => handleDeleteProfile(p.id)} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button></td>
                                </tr>
                            ))}
-                           {taxProfiles.length === 0 && <tr><td colSpan={4} className="p-8 text-center text-slate-400">Nenhum perfil cadastrado.</td></tr>}
+                           {taxProfiles.length === 0 && <tr><td colSpan={5} className="p-8 text-center text-slate-400">Nenhum perfil cadastrado.</td></tr>}
                        </tbody>
                    </table>
-               </div>
-              {/* --- SIMULADOR DE CÁLCULO (NOVO) --- */}
-               <div className="mt-8 pt-6 border-t border-slate-200">
-                    <h4 className="font-bold text-slate-700 flex items-center gap-2 mb-4">
-                        <div className="bg-indigo-100 p-1 rounded text-indigo-600"><CheckCircle size={16}/></div>
-                        Simulador de Regra Fiscal (Teste)
-                    </h4>
-                    
-                    <div className="bg-slate-50 p-4 rounded border border-slate-200 grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
-                        {/* Escolha o Perfil */}
-                        <div className="md:col-span-1">
-                            <label className="text-xs font-bold text-slate-500 mb-1">Perfil para Testar</label>
-                            <select id="sim_profile" className="w-full border p-2 rounded text-sm bg-white">
-                                {taxProfiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                            </select>
-                        </div>
-
-                        {/* Cenário do Cliente */}
-                        <div className="md:col-span-1">
-                            <label className="text-xs font-bold text-slate-500 mb-1">Local do Cliente</label>
-                            <select id="sim_location" className="w-full border p-2 rounded text-sm bg-white">
-                                <option value="INTERNAL">Mesmo Estado (Interna)</option>
-                                <option value="EXTERNAL">Outro Estado (Interestadual)</option>
-                            </select>
-                        </div>
-
-                        <div className="md:col-span-1">
-                            <label className="text-xs font-bold text-slate-500 mb-1">Tipo de Cliente</label>
-                            <select id="sim_type" className="w-full border p-2 rounded text-sm bg-white">
-                                <option value="1">Contribuinte (Revenda/Ind)</option>
-                                <option value="9">Não Contribuinte (Consumidor)</option>
-                            </select>
-                        </div>
-
-                        <div className="md:col-span-1">
-                            <button 
-                                onClick={() => {
-                                    const profileId = document.getElementById('sim_profile').value;
-                                    const location = document.getElementById('sim_location').value;
-                                    const type = document.getElementById('sim_type').value;
-                                    
-                                    const profile = taxProfiles.find(p => p.id == profileId);
-                                    
-                                    // Objetos Mock para teste
-                                    const mockProduct = { price: 100, qty: 1, ncm: '00000000' };
-                                    
-                                    // Simula empresa em SP (Pode ajustar conforme seu estado real ou pegar de companyInfo)
-                                    const mockCompany = { address: { state: 'SP' }, ...companyInfo }; 
-                                    
-                                    const mockClient = { 
-                                        address: { state: location === 'INTERNAL' ? mockCompany.address.state : 'XX' },
-                                        ie_indicator: type 
-                                    };
-
-                                    try {
-                                        const result = calculateItemTaxes(mockProduct, mockClient, mockCompany, profile);
-                                        
-                                        alert(`RESULTADO DA SIMULAÇÃO:\n\n` + 
-                                              `CFOP: ${result.cfop}\n` +
-                                              `CSOSN: ${result.csosn}\n` +
-                                              `Origem: ${result.origin}\n` +
-                                              `----------------\n` +
-                                              `Lógica:\n${result.auditLog ? result.auditLog.join('\n') : ''}`);
-                                    } catch (e) {
-                                        alert("Erro ao simular: " + e.message);
-                                    }
-                                }}
-                                className="w-full bg-slate-800 text-white px-4 py-2 rounded text-sm font-bold hover:bg-slate-700 h-[38px]"
-                            >
-                                Simular Cálculo
-                            </button>
-                        </div>
-                    </div>
-                    <p className="text-[10px] text-slate-400 mt-2">
-                        Use este simulador para garantir que o CFOP (5102/5405/6102) está sendo escolhido corretamente antes de emitir notas.
-                    </p>
                </div>
            </div>
        )}
 
        {activeTab === 'certificate' && (
-         <div className="bg-white p-6 rounded-b border border-t-0 border-slate-200 shadow-sm animate-in fade-in">
-           <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><Lock size={20}/> Configuração de Emissão (NF-e)</h3>
-           
-           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-             {/* Lado Esquerdo: API */}
-             <div className="space-y-4">
-                <h4 className="font-bold text-sm text-indigo-600 border-b pb-2">1. Conexão com Gateway</h4>
-                <div>
-                    <label className="block text-xs font-bold text-slate-500 mb-1">Token da API</label>
-                    <input className="w-full border p-2 rounded text-sm" type="password" value={certData.api_token} onChange={e => setCertData({...certData, api_token: e.target.value})} placeholder="Cole seu token aqui"/>
-                </div>
-                <div>
-                    <label className="block text-xs font-bold text-slate-500 mb-1">Ambiente</label>
-                    <select className="w-full border p-2 rounded text-sm" value={certData.environment} onChange={e => setCertData({...certData, environment: e.target.value})}>
-                        <option value="HOMOLOG">Homologação (Testes)</option>
-                        <option value="PRODUCAO">Produção</option>
-                    </select>
-                </div>
-             </div>
-
-             {/* Lado Direito: Certificado */}
-             <div className="space-y-4">
-                <h4 className="font-bold text-sm text-indigo-600 border-b pb-2">2. Certificado Digital A1</h4>
-                <div>
-                    <label className="block text-xs font-bold text-slate-500 mb-1">Arquivo .pfx</label>
-                    <div className="flex gap-2 items-center">
-                        <label className="cursor-pointer bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded text-sm font-bold flex items-center gap-2">
-                            <Upload size={16}/> Escolher Arquivo
-                            <input type="file" accept=".pfx" className="hidden" onChange={handleCertFile} />
-                        </label>
-                        <span className="text-xs text-slate-400 italic truncate max-w-[150px]">{certData.fileName || 'Nenhum selecionado'}</span>
+         <div className="p-6 bg-white border rounded-b shadow-sm">
+             <h3 className="font-bold mb-4">Certificado Digital & API</h3>
+             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                 <div>
+                     <label className="text-xs font-bold">Token API BrasilNFe</label>
+                     <input className="w-full border p-2" type="password" value={certData.api_token} onChange={e => setCertData({...certData, api_token: e.target.value})} />
+                 </div>
+                 <div>
+                     <label className="text-xs font-bold">Ambiente</label>
+                     <select className="w-full border p-2" value={certData.environment} onChange={e => setCertData({...certData, environment: e.target.value})}>
+                         <option value="HOMOLOG">Homologação (Teste)</option>
+                         <option value="PRODUCAO">Produção</option>
+                     </select>
+                 </div>
+                 <div>
+                     <label className="text-xs font-bold">Arquivo PFX</label>
+                     <input type="file" className="w-full text-xs" accept=".pfx" onChange={(e) => {
+                         const file = e.target.files[0];
+                         if(file) {
+                             const reader = new FileReader();
+                             reader.onload = (evt) => setCertData(prev => ({...prev, base64: evt.target.result.split(',')[1], fileName: file.name}));
+                             reader.readAsDataURL(file);
+                         }
+                     }} />
+                     <span className="text-xs text-green-600">{certData.fileName}</span>
+                 </div>
+                 <div>
+                     <label className="text-xs font-bold">Senha do Certificado</label>
+                     <input className="w-full border p-2" type="password" value={certData.password} onChange={e => setCertData({...certData, password: e.target.value})} />
+                 </div>
+                 <div className="mt-6 pt-6 border-t border-slate-100">
+                <h4 className="font-bold text-sm text-indigo-600 border-b pb-2 mb-4 flex items-center gap-2">
+                    <FileText size={16}/> 3. Configuração NFC-e (Cupom Fiscal)
+                </h4>
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-4 bg-indigo-50 p-4 rounded border border-indigo-100">
+                    <div className="md:col-span-3">
+                        <label className="block text-xs font-bold text-indigo-900 mb-1">ID do CSC</label>
+                        <input 
+                            className="w-full border p-2 rounded text-sm placeholder-indigo-300" 
+                            value={certData.csc_id} 
+                            onChange={e => setCertData({...certData, csc_id: e.target.value})} 
+                            placeholder="Ex: 000001"
+                        />
+                    </div>
+                    <div className="md:col-span-9">
+                        <label className="block text-xs font-bold text-indigo-900 mb-1">Código CSC (Token)</label>
+                        <input 
+                            className="w-full border p-2 rounded text-sm placeholder-indigo-300" 
+                            value={certData.csc_token} 
+                            onChange={e => setCertData({...certData, csc_token: e.target.value})} 
+                            placeholder="Ex: 1A2B3C..."
+                        />
+                    </div>
+                    <div className="md:col-span-12">
+                        <p className="text-[10px] text-indigo-700">
+                            * Obrigatório para emitir NFC-e. Obtenha estes códigos no portal da SEFAZ do seu estado (Ambiente Homologação).
+                        </p>
                     </div>
                 </div>
-                <div>
-                    <label className="block text-xs font-bold text-slate-500 mb-1">Senha do Certificado</label>
-                    <input className="w-full border p-2 rounded text-sm" type="password" value={certData.password} onChange={e => setCertData({...certData, password: e.target.value})} />
-                </div>
+           </div>
              </div>
-           </div>
-
-           <div className="mt-8 pt-4 border-t flex justify-end">
-             <button onClick={handleSaveCertSettings} className="bg-emerald-600 text-white px-6 py-2 rounded text-sm font-bold hover:bg-emerald-700 flex items-center gap-2">
-                <Save size={18}/> Salvar Configurações
-             </button>
-           </div>
+             <button onClick={handleSaveCertSettings} className="mt-4 bg-indigo-600 text-white px-4 py-2 rounded font-bold">Salvar Configuração</button>
          </div>
-       )}
-       
-       {/* Usuários (Mantido simples) */}
-       {activeTab === 'users' && (
-           <div className="p-6 bg-white border rounded-b shadow-sm">
-               <h3 className="font-bold mb-4">Gerenciar Usuários da Loja</h3>
-               <div className="bg-slate-50 p-4 rounded text-center text-slate-500 text-sm">
-                   Funcionalidade gerenciada pelo Super Admin. Contate o suporte para adicionar usuários.
-               </div>
-           </div>
        )}
     </div>
   );
@@ -2482,94 +2315,144 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
   // --- FUNÇÃO DE EMISSÃO NF-E ---
   // Modificado para receber targetModel ('55' ou '65')
   // --- FUNÇÃO DE EMISSÃO INTELIGENTE (AUTOMÁTICA) ---
-const handleEmitNFe = async (sale) => {
-    setIsEmitting(true);
-    showNotification('Analisando venda e cliente...', 'info');
 
-    try {
-        const appId = String(store.id);
+  const handleEmitNFe = async (sale) => {
+      setIsEmitting(true);
+      showNotification('Calculando numeração e emitindo...', 'info');
 
-        // 1. Configurações
-        const { data: nfeConfig } = await supabase
-            .from('fiscal_settings').select('*').eq('firebase_store_id', appId).single();
+      try {
+          const appId = String(store.id);
 
-        if (!nfeConfig?.api_token) throw new Error("Token Fiscal não configurado.");
+          // 1. Configurações
+          const { data: nfeConfig } = await supabase
+              .from('fiscal_settings').select('*').eq('firebase_store_id', appId).single();
 
-        // 2. Buscar Cliente Completo (Se houver)
-        let clientFull = null;
-        if (sale.clientId) {
-             const { data: clientDb } = await supabase
-                .from('fiscal_clients').select('*').eq('firebase_store_id', appId).eq('id', sale.clientId).single();
-             if (clientDb) {
-                 clientFull = { ...clientDb, address: { 
-                     street: clientDb.street, number: clientDb.number, neighborhood: clientDb.neighborhood,
-                     city: clientDb.city, state: clientDb.state, zip_code: clientDb.zip_code, ibge_code: clientDb.ibge_code 
-                 }};
-             }
-        }
+          if (!nfeConfig?.api_token) throw new Error("Token Fiscal não configurado.");
 
-        // 3. INTELIGÊNCIA FISCAL: DECIDE O MODELO
-        let targetModel = '65'; // Padrão é Cupom (NFC-e)
-        let modelReason = "Venda ao Consumidor";
+          // 2. Perfis (SQL)
+          const { data: taxProfiles } = await supabase
+              .from('fiscal_tax_profiles').select('*').eq('firebase_store_id', appId);
 
-        if (clientFull) {
-            const cleanDoc = clientFull.tax_id?.replace(/\D/g, '') || '';
-            const hasAddress = !!(clientFull.address?.zip_code && clientFull.address?.street);
+          // 3. Cliente
+          let clientFull = null;
+          if (sale.clientId) {
+              const { data: clientDb } = await supabase
+                  .from('fiscal_clients').select('*').eq('firebase_store_id', appId).eq('id', sale.clientId).single();
+              if (clientDb) {
+                  clientFull = { ...clientDb, address: { 
+                      street: clientDb.street, number: clientDb.number, neighborhood: clientDb.neighborhood,
+                      city: clientDb.city, state: clientDb.state, zip_code: clientDb.zip_code, ibge_code: clientDb.ibge_code 
+                  }};
+              }
+          }
 
-            if (cleanDoc.length > 11) {
-                // É CNPJ -> Obrigatoriamente NF-e (55)
-                targetModel = '55';
-                modelReason = "Cliente PJ (CNPJ detectado)";
-            } else if (hasAddress) {
-                // É CPF mas tem endereço completo -> NF-e (55) para entrega/garantia
-                targetModel = '55';
-                modelReason = "Cliente com Endereço Completo";
-            } else {
-                // É Cliente cadastrado só com CPF/Nome -> Mantém NFC-e (65) identificada
-                targetModel = '65';
-                modelReason = "Cliente Simplificado (CPF na Nota)";
-            }
-        }
+          // 4. Modelo
+          let targetModel = '65'; 
+          if (clientFull) {
+              const cleanDoc = clientFull.tax_id?.replace(/\D/g, '') || '';
+              if (cleanDoc.length > 11 || (clientFull.address?.zip_code && clientFull.address?.street)) {
+                  targetModel = '55';
+              }
+          }
 
-        const modelLabel = targetModel === '55' ? 'NF-e (Nota Grande)' : 'NFC-e (Cupom)';
+          // --- 4.1 NOVO: CÁLCULO DE NUMERAÇÃO ---
+          // Busca a última nota emitida DESTE modelo NESTE ambiente
+          const { data: lastInvoice } = await supabase
+              .from('fiscal_invoices')
+              .select('nfe_number')
+              .eq('firebase_store_id', appId)
+              .eq('nfe_model', targetModel)
+              .eq('environment', nfeConfig.environment) // Não mistura numeração de teste com produção
+              .order('nfe_number', { ascending: false })
+              .limit(1)
+              .single();
 
-        // Confirmação para o usuário (Opcional, mas recomendado para transparência)
-        if (!window.confirm(`O sistema detectou: ${modelReason}.\n\nDeseja emitir uma ${modelLabel}?`)) {
-            setIsEmitting(false);
-            return;
-        }
+          // Se achou última, soma 1. Se não, começa do 1.
+          const nextNumber = (lastInvoice?.nfe_number || 0) + 1;
+          console.log(`🔢 Próximo Número calculado: ${nextNumber} (Modelo ${targetModel})`);
+          // --------------------------------------
 
-        // 4. Constrói Payload
-        const payload = buildNFePayload(sale, store.companyInfo, clientFull, nfeConfig, targetModel);
-        console.log(`Payload Automático (${modelLabel}):`, payload);
+          // 5. Recálculo Itens
+          const itemsWithFreshTaxes = sale.items.map(item => {
+              const liveProduct = products.find(p => p.id === item.id);
+              const mergedItem = liveProduct ? { 
+                  ...item, 
+                  ncm: liveProduct.ncm || item.ncm,
+                  cest: liveProduct.cest || item.cest || '', 
+                  taxProfileId: String(liveProduct.taxProfileId || item.taxProfileId || '') 
+              } : item;
 
-        // 5. Envia
-        const apiResponse = await NFeService.emit(payload);
+              const freshProfile = taxProfiles?.find(tp => String(tp.id) === mergedItem.taxProfileId);
+              if (freshProfile) {
+                  const newTaxes = calculateItemTaxes(mergedItem, clientFull, store.companyInfo, freshProfile);
+                  return { ...mergedItem, taxes: newTaxes };
+              } else {
+                  const basicTaxes = calculateItemTaxes(mergedItem, clientFull, store.companyInfo, null);
+                  return { ...mergedItem, taxes: basicTaxes };
+              }
+          });
 
-        // 6. Trata Resposta
-        const status = apiResponse.Status || (apiResponse.Sucesso ? 'Autorizado' : 'Erro');
-        
-        const saleRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'sales', String(sale.id));
-        await updateDoc(saleRef, {
-            nfeStatus: status, 
-            nfeModel: targetModel,
-            nfeKey: apiResponse.ChaveNFe || null,
-            nfeMessage: apiResponse.Mensagem || apiResponse.Motivo || 'Processado'
-        });
+          const saleWithFreshTaxes = { ...sale, items: itemsWithFreshTaxes };
 
-        if (apiResponse.Status === 'Erro' || apiResponse.Sucesso === false) {
-             showNotification(`Rejeição: ${apiResponse.Mensagem || apiResponse.Motivo}`, 'error');
-        } else {
-             showNotification(`${modelLabel} Autorizada com Sucesso!`, 'success');
-        }
+          // 6. Payload (Passando o nextNumber)
+          const payload = buildNFePayload(saleWithFreshTaxes, store.companyInfo, clientFull, nfeConfig, targetModel, nextNumber);
 
-    } catch (error) {
-        console.error("Erro Emissão Automática:", error);
-        showNotification(`Erro: ${error.message}`, 'error');
-    } finally {
-        setIsEmitting(false);
-    }
-};
+          console.log("🚨 PAYLOAD FINAL:", JSON.stringify(payload, null, 2));
+          
+          if (payload.TipoAmbiente !== "1" && payload.TipoAmbiente !== "2") {
+              throw new Error(`Ambiente inválido (${payload.TipoAmbiente}).`);
+          }
+
+          // 7. Envio
+          const apiResponse = await NFeService.emit(payload);
+          console.log("📢 RESPOSTA API:", apiResponse);
+
+          // 8. Processamento
+          const isSuccess = (apiResponse.Sucesso === true) || (apiResponse.ReturnNF?.Ok === true);
+          const returnData = apiResponse.ReturnNF || {};
+
+          const saleRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'sales', String(sale.id));
+          
+          if (isSuccess) {
+              const invoiceData = {
+                  firebase_store_id: appId,
+                  sale_id: String(sale.id),
+                  environment: nfeConfig.environment,
+                  nfe_model: targetModel,
+                  nfe_number: returnData.Numero || nextNumber, // Usa o retornado ou o calculado
+                  nfe_series: returnData.Serie || 55,
+                  nfe_key: returnData.ChaveNF || returnData.ChaveNFe, 
+                  nfe_protocol: returnData.Protocolo || returnData.nProt,
+                  status: returnData.DsStatusRespostaSefaz || 'AUTORIZADA',
+                  pdf_base64: apiResponse.Base64File || null, 
+                  xml_content: apiResponse.Base64Xml || null,
+                  client_name: clientFull?.name || sale.clientName || 'Consumidor',
+                  total_value: returnData.Detalhes?.valorNf || sale.total
+              };
+
+              const { error: dbError } = await supabase.from('fiscal_invoices').insert(invoiceData);
+              if (dbError) console.error("Erro SQL:", dbError);
+
+              await updateDoc(saleRef, {
+                  nfeStatus: 'AUTORIZADA', 
+                  nfeKey: returnData.ChaveNF || returnData.ChaveNFe,
+                  nfeMessage: 'Emitida com Sucesso'
+              });
+
+              showNotification(`Nota ${invoiceData.nfe_number} Autorizada!`, 'success');
+          } else {
+              const errorMsg = apiResponse.Mensagem || apiResponse.Error || (apiResponse.ReturnNF ? apiResponse.ReturnNF.DsStatusRespostaSefaz : "Erro desconhecido");
+              await updateDoc(saleRef, { nfeStatus: 'REJEITADA', nfeMessage: errorMsg });
+              showNotification(`Rejeição: ${errorMsg}`, 'error');
+          }
+
+      } catch (error) {
+          console.error("Erro Crítico:", error);
+          showNotification(`Erro: ${error.message}`, 'error');
+      } finally {
+          setIsEmitting(false);
+      }
+  };
 
   // 2. CONFIRMAR: Envia a Nota Real
   const handleConfirmEmission = async () => {

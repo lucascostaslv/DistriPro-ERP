@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
-import { PlusCircle, FileText } from 'lucide-react';
-import EntradaNotas from './EntradaNotas'; // Importa seu arquivo original
-import AccountsPayable from './AccountsPayable'; // O arquivo novo de contas a pagar
+import { PlusCircle, FileText, ScrollText } from 'lucide-react'; // Adicionei ScrollText
+import EntradaNotas from './EntradaNotas'; 
+import AccountsPayable from './AccountsPayable';
+import FiscalInvoices from './FiscalInvoices'; // <--- IMPORTAÇÃO NOVA
 
 const Transactions = (props) => {
-  // Props recebidos: products, onSaveEntry e priceGroups (via ...props)
-  const [activeTab, setActiveTab] = useState('entry'); // 'entry' | 'payable'
+  // 'entry' | 'payable' | 'fiscal'
+  const [activeTab, setActiveTab] = useState('entry'); 
 
   return (
     <div className="space-y-4">
@@ -23,17 +24,31 @@ const Transactions = (props) => {
         >
            <FileText size={16}/> Contas a Pagar
         </button>
+        {/* --- NOVO BOTÃO --- */}
+        <button 
+          onClick={() => setActiveTab('fiscal')}
+          className={`px-4 py-2 rounded text-sm font-bold flex items-center gap-2 transition-all ${activeTab === 'fiscal' ? 'bg-slate-800 text-white shadow' : 'text-slate-500 hover:bg-slate-100'}`}
+        >
+           <ScrollText size={16}/> Notas Emitidas (Fiscal)
+        </button>
       </div>
 
       {/* Renderização Condicional */}
       <div className="min-h-[600px]">
-        {activeTab === 'entry' ? (
-          // O {...props} aqui é fundamental: ele passa 'products', 'onSaveEntry' 
-          // e agora 'priceGroups' para o EntradaNotas automaticamente.
+        {activeTab === 'entry' && (
           <EntradaNotas {...props} />
-        ) : (
-          // Renderiza a nova tela, passando produtos para os filtros de categoria
+        )}
+        
+        {activeTab === 'payable' && (
           <AccountsPayable products={props.products || []} />
+        )}
+
+        {/* --- NOVA TELA --- */}
+        {activeTab === 'fiscal' && (
+          <FiscalInvoices 
+            storeConfig={props.storeConfig} 
+            showNotification={props.showNotification || alert} // Fallback para alert se não passar func
+          />
         )}
       </div>
     </div>

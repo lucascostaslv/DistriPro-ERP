@@ -10,6 +10,7 @@ import { supabase } from './supabaseClient';
 // Máscaras de Proteção
 const masks = {
   ncm: (val) => val ? String(val).replace(/\D/g, '').replace(/^(\d{4})(\d{2})(\d{2})/, '$1.$2.$3').substring(0, 10) : '',
+  cest: (val) => val ? String(val).replace(/\D/g, '').replace(/^(\d{2})(\d{3})(\d{2})/, '$1.$2.$3').substring(0, 9) : '',
   ean: (val) => val ? String(val).replace(/\D/g, '').substring(0, 14) : '',
 };
 
@@ -155,6 +156,7 @@ const InventoryWMS = ({ storeConfig, showNotification, products = [] }) => {
     setCurrentProduct({ 
       ...prod, 
       ncm: prod.ncm || '', 
+      cest: prod.cest || '',
       taxProfileId: prod.taxProfileId || '',
       unit: prod.unit || 'UN',
       ean: prod.ean || '',
@@ -172,6 +174,7 @@ const InventoryWMS = ({ storeConfig, showNotification, products = [] }) => {
   const handleAddNew = () => {
     setCurrentProduct({
       name: '', price: 0, cost: 0, stock: 0,
+      ncm: '', cest: '', taxProfileId: '',
       ncm: '', taxProfileId: '', unit: 'UN', ean: '', origin: '0',
       itemType: 'unit', parentId: '', conversionFactor: 1
     });
@@ -211,6 +214,7 @@ const InventoryWMS = ({ storeConfig, showNotification, products = [] }) => {
         stock: currentProduct.itemType === 'unit' ? Number(currentProduct.stock) : 0,
 
         ncm: currentProduct.ncm ? String(currentProduct.ncm).replace(/\D/g, '') : '',
+        cest: currentProduct.cest ? String(currentProduct.cest).replace(/\D/g, '') : '',
         taxProfileId: currentProduct.taxProfileId || null,
         unit: currentProduct.unit,
         ean: currentProduct.ean,
@@ -455,12 +459,27 @@ const InventoryWMS = ({ storeConfig, showNotification, products = [] }) => {
                         {/* FISCAL (Mantido) */}
                         <div className="md:col-span-12 my-2 border-t pt-2 bg-slate-50 p-2 rounded border border-slate-200">
                             <p className="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1"><BarChart3 size={14}/> Configuração Fiscal</p>
+                            {/* Bloco Fiscal Atualizado */}
                             <div className="grid grid-cols-12 gap-4">
-                                <div className="col-span-4">
+                                <div className="col-span-3">
                                     <label className="block text-[10px] font-bold text-slate-500 mb-1">NCM</label>
-                                    <input className="w-full border p-2 rounded text-sm" value={masks.ncm(currentProduct.ncm)} onChange={e => setCurrentProduct({...currentProduct, ncm: e.target.value})} placeholder="0000.00.00"/>
+                                    <input className="w-full border p-2 rounded text-sm font-mono" value={masks.ncm(currentProduct.ncm)} onChange={e => setCurrentProduct({...currentProduct, ncm: e.target.value})} placeholder="0000.00.00"/>
                                 </div>
-                                <div className="col-span-8">
+                                
+                                {/* --- NOVO CAMPO CEST --- */}
+                                <div className="col-span-3">
+                                    <label className="block text-[10px] font-bold text-slate-500 mb-1">CEST (ST)</label>
+                                    <input 
+                                        className="w-full border p-2 rounded text-sm font-mono bg-yellow-50" 
+                                        value={masks.cest(currentProduct.cest)} 
+                                        onChange={e => setCurrentProduct({...currentProduct, cest: e.target.value})} 
+                                        placeholder="00.000.00"
+                                        title="Obrigatório para produtos com ST"
+                                    />
+                                </div>
+                                {/* ----------------------- */}
+
+                                <div className="col-span-6">
                                     <label className="block text-[10px] font-bold text-slate-500 mb-1">Perfil Tributário</label>
                                     <select className="w-full border p-2 rounded text-sm bg-white" value={currentProduct.taxProfileId || ''} onChange={e => setCurrentProduct({...currentProduct, taxProfileId: e.target.value})}>
                                         <option value="">-- Selecione --</option>
