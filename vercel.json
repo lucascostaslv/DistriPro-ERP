@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/services/(.*)",
+      "destination": "/api/proxy.js?endpoint=$1"
+    }
+  ]
+}

@@ -59,12 +59,8 @@ export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = 
     return {
         "Token": cleanToken,
         "IdentificadorInterno": sale.id,
+    
         
-        // --- CAMPOS CSC (NOVO) ---
-        // A API BrasilNFe exige estes campos na raiz para gerar o QR Code da NFC-e
-        "idToken": targetModel === '65' ? nfeConfig.csc_id : undefined,
-        "CSC": targetModel === '65' ? nfeConfig.csc_token : undefined,
-        // -------------------------
 
         "Serie": serieCorreta,
         "Numero": numeroFinal, 
