@@ -12,7 +12,7 @@ import {
   Upload,
   Loader2, Send
 } from 'lucide-react';
-import { collection, query, where, getDocs, setDoc, doc, updateDoc, getDoc, onSnapshot, increment, writeBatch, serverTimestamp } from "firebase/firestore";
+import { collection, query, where, getDocs, setDoc, doc, updateDoc, getDoc, onSnapshot, increment, writeBatch, serverTimestamp, addDoc} from "firebase/firestore";
 import logo from './img/LOGO-MAQUINA-PNG.png';
 import logoWhite from './img/logo-maquina-texto-branco.png';
 import * as firebase from './firebase';
@@ -122,7 +122,7 @@ const LoginScreen = ({ onLogin, onSuperAdminLogin, showNotification }) => {
     setError('');
     setIsLoading(true);
 
-    // Verificar Super Admin (Banco de Dados ou Fallback)
+    // Verificar Super Admin
     try {
       const saRef = doc(firebase.adminDB, "settings", "superadmin");
       const saSnap = await getDoc(saRef);
@@ -141,7 +141,6 @@ const LoginScreen = ({ onLogin, onSuperAdminLogin, showNotification }) => {
         return;
       }
     } catch (e) {
-      // Fallback em caso de erro de conexão na primeira verificação
       if (username === 'superadmin' && pass === 'superadminn') {
         onSuperAdminLogin();
         setIsLoading(false);
@@ -149,17 +148,16 @@ const LoginScreen = ({ onLogin, onSuperAdminLogin, showNotification }) => {
       }
     }
 
-    // **AVISO DE SEGURANÇA:** Armazenar senhas em texto plano é extremamente inseguro.
-    // Para uma aplicação real, use um serviço de autenticação como o Firebase Authentication.
-    // O código abaixo é apenas para ilustrar a busca no banco de dados.
     try {
       const usersRef = collection(firebase.adminDB, "users");
+      // Busca usuário por nome e senha
       const q = query(usersRef, where("username", "==", username), where("password", "==", pass));
       const querySnapshot = await getDocs(q);
 
       let user = null;
       if (!querySnapshot.empty) {
-        user = querySnapshot.docs[0].data();
+        // Pega o primeiro usuário encontrado e inclui o ID
+        user = { id: querySnapshot.docs[0].id, ...querySnapshot.docs[0].data() };
       }
 
       if (user) {
@@ -169,7 +167,6 @@ const LoginScreen = ({ onLogin, onSuperAdminLogin, showNotification }) => {
           return;
         }
 
-        // Buscar configuração da loja no Firebase
         const storesRef = collection(firebase.adminDB, "stores");
         const qStore = query(storesRef, where("id", "==", user.storeId));
         const storeSnapshot = await getDocs(qStore);
@@ -181,7 +178,8 @@ const LoginScreen = ({ onLogin, onSuperAdminLogin, showNotification }) => {
             setIsLoading(false);
             return;
           }
-          await onLogin(storeConfig);
+          // --- ALTERAÇÃO AQUI: Passamos o objeto 'user' completo ---
+          await onLogin(storeConfig, user); 
         } else {
           setError('Configuração da loja não encontrada.');
           setIsLoading(false);
@@ -191,7 +189,9 @@ const LoginScreen = ({ onLogin, onSuperAdminLogin, showNotification }) => {
         setIsLoading(false);
       }
     } catch (dbError) {
+      console.error(dbError);
       setError('Erro ao conectar com o banco de dados de usuários.');
+    } finally {
       setIsLoading(false);
     }
   };
@@ -1895,11 +1895,13 @@ const masks = {
 
 const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeConfig, setStoreConfig, showNotification }) => {
   const [activeTab, setActiveTab] = useState('general');
-  // Adicionei o campo 'cfop' no estado inicial
   const [newProfile, setNewProfile] = useState({ name: '', origin: '0', cst_nfe: '102', cst_pis_cofins: '49', cfop: '5102' });
   const [taxProfiles, setTaxProfiles] = useState([]);
   
-  // Estados do Certificado
+  // ESTADOS USUÁRIOS
+  const [newUser, setNewUser] = useState({ username: '', password: '', role: 'cashier' });
+  const [storeUsers, setStoreUsers] = useState([]); // Começa vazio e preenche via busca
+
   const [certData, setCertData] = useState({ password: '', api_token: '', environment: 'HOMOLOG', fileName: '', base64: '' , csc_id: '', csc_token: ''});
 
   const [formData, setFormData] = useState({
@@ -1913,12 +1915,23 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
     }
   });
 
-  // Carregar Dados
+  // Carregar Dados (AGORA COM BUSCA DE USUÁRIOS)
   useEffect(() => {
     const loadData = async () => {
         if (!storeConfig?.id) return;
         const storeIdStr = String(storeConfig.id);
         
+        // --- NOVO: BUSCA USUÁRIOS DO BANCO ---
+        try {
+            const usersQ = query(collection(firebase.adminDB, "users"), where("storeId", "==", storeConfig.id));
+            const usersSnap = await getDocs(usersQ);
+            const loadedUsers = usersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            setStoreUsers(loadedUsers);
+        } catch (err) {
+            console.error("Erro ao buscar usuários:", err);
+        }
+        // -------------------------------------
+
         try {
             // Empresa
             const { data: companyData } = await supabase.from('fiscal_emitters').select('*').eq('firebase_store_id', storeIdStr).single();
@@ -1928,7 +1941,7 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
                     address: { zip: companyData.cep, street: companyData.x_lgr, number: companyData.nro, complement: companyData.xcpl, neighborhood: companyData.xbairro, city: companyData.xmun, state: companyData.uf, ibgeCode: companyData.cmun }
                 });
             }
-            // Perfis (Carrega o CFOP do banco agora)
+            // Perfis
             const { data: profiles } = await supabase.from('fiscal_tax_profiles').select('*').eq('firebase_store_id', storeIdStr);
             if (profiles) setTaxProfiles(profiles);
 
@@ -1941,7 +1954,6 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
                     environment: certSettings.environment || 'HOMOLOG', 
                     fileName: certSettings.cert_base64 ? 'Certificado Salvo' : '', 
                     base64: '',
-                    // CORREÇÃO: Usar certSettings
                     csc_id: certSettings.csc_id || '',       
                     csc_token: certSettings.csc_token || ''  
                 });
@@ -1951,7 +1963,7 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
     loadData();
   }, [storeConfig]);
 
-  // Salvar Certificado
+  // ... (Funções de Certificado e Empresa mantidas iguais) ...
   const handleSaveCertSettings = async () => {
     if (!certData.api_token) return showNotification('Token obrigatório.', 'error');
     try {
@@ -1964,17 +1976,15 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
             cert_password: certData.password,
             api_token: certData.api_token,
             environment: certData.environment,
-            csc_id: certData.csc_id,       // <--- SALVA
+            csc_id: certData.csc_id,
             csc_token: certData.csc_token
         };
         if (certData.base64) payload.cert_base64 = certData.base64;
-        
         await supabase.from('fiscal_settings').upsert(payload, { onConflict: 'firebase_store_id' });
         showNotification('Configurações salvas!', 'success');
     } catch (error) { showNotification('Erro: ' + error.message, 'error'); }
   };
 
-  // Salvar Empresa
   const handleSaveCompany = async () => {
       try {
           const payload = {
@@ -1991,7 +2001,6 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
       } catch (e) { showNotification(e.message, 'error'); }
   };
 
-  // --- NOVO: Adicionar Perfil com CFOP ---
   const handleAddProfile = async () => {
       if (!newProfile.name) return showNotification('Nome obrigatório', 'error');
       try {
@@ -2001,11 +2010,10 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
             origin: parseInt(newProfile.origin),
             cst_nfe: newProfile.cst_nfe,
             cst_pis_cofins: newProfile.cst_pis_cofins,
-            cfop_state: newProfile.cfop // Salva o CFOP escolhido
+            cfop_state: newProfile.cfop 
           };
           const { data, error } = await supabase.from('fiscal_tax_profiles').insert(payload).select();
           if (error) throw error;
-          
           setTaxProfiles([...taxProfiles, data[0]]);
           setNewProfile({ name: '', origin: '0', cst_nfe: '102', cst_pis_cofins: '49', cfop: '5102' });
           showNotification('Perfil criado!', 'success');
@@ -2017,16 +2025,64 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
       setTaxProfiles(taxProfiles.filter(p => p.id !== id));
   };
 
+  // --- GERENCIAMENTO DE USUÁRIOS (ATUALIZADO) ---
+  const handleAddUser = async () => {
+      if (!newUser.username || !newUser.password) return showNotification("Preencha usuário e senha", "error");
+      
+      try {
+          // Adiciona ao Firestore
+          const userData = {
+              username: newUser.username,
+              password: newUser.password,
+              storeId: storeConfig.id,
+              role: newUser.role,
+              active: true,
+              createdAt: serverTimestamp()
+          };
+          
+          const docRef = await addDoc(collection(firebase.adminDB, "users"), userData);
+          const createdUser = { id: docRef.id, ...userData };
+          
+          // Atualiza lista local
+          const updatedList = [...storeUsers, createdUser];
+          setStoreUsers(updatedList);
+          
+          setNewUser({ username: '', password: '', role: 'cashier' });
+          showNotification("Usuário criado com sucesso!", "success");
+      } catch (e) {
+          console.error(e);
+          showNotification("Erro ao criar usuário: " + e.message, "error");
+      }
+  };
+
+  const handleToggleUserStatus = async (user) => {
+      try {
+          const userRef = doc(firebase.adminDB, "users", user.id);
+          // Inverte o status atual (se undefined, considera true e inverte para false)
+          const newStatus = user.active === false ? true : false;
+          
+          await updateDoc(userRef, { active: newStatus });
+          
+          const updatedList = storeUsers.map(u => u.id === user.id ? { ...u, active: newStatus } : u);
+          setStoreUsers(updatedList);
+          showNotification(`Status alterado para ${newStatus ? 'Ativo' : 'Inativo'}`, "success");
+      } catch (e) {
+          showNotification("Erro ao atualizar status", "error");
+      }
+  };
+
   return (
     <div className="space-y-6 pb-8">
        <div className="flex gap-2 border-b pb-1 overflow-x-auto">
           <button onClick={() => setActiveTab('general')} className={`px-4 py-2 text-sm font-bold rounded-t-lg ${activeTab === 'general' ? 'bg-slate-800 text-white' : 'bg-slate-100'}`}>Dados Fiscais</button>
+          <button onClick={() => setActiveTab('users')} className={`px-4 py-2 text-sm font-bold rounded-t-lg ${activeTab === 'users' ? 'bg-indigo-600 text-white' : 'bg-slate-100'}`}>Gestão de Usuários</button>
           <button onClick={() => setActiveTab('tax_profiles')} className={`px-4 py-2 text-sm font-bold rounded-t-lg ${activeTab === 'tax_profiles' ? 'bg-emerald-600 text-white' : 'bg-slate-100'}`}>Perfis Tributários</button>
           <button onClick={() => setActiveTab('certificate')} className={`px-4 py-2 text-sm font-bold rounded-t-lg ${activeTab === 'certificate' ? 'bg-slate-800 text-white' : 'bg-slate-100'}`}>Certificado</button>
        </div>
 
+       {/* ABA DADOS FISCAIS */}
        {activeTab === 'general' && (
-           <div className="p-6 bg-white border rounded-b shadow-sm">
+           <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
                <h3 className="font-bold mb-4 text-slate-800">Dados da Empresa</h3>
                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                    <div><label className="text-xs font-bold">Razão Social</label><input className="w-full border p-2" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} /></div>
@@ -2034,7 +2090,6 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
                    <div><label className="text-xs font-bold">IE</label><input className="w-full border p-2" value={formData.ie} onChange={e => setFormData({...formData, ie: e.target.value})} /></div>
                    <div><label className="text-xs font-bold">Regime</label><select className="w-full border p-2" value={formData.crt} onChange={e => setFormData({...formData, crt: e.target.value})}><option value="1">Simples Nacional</option><option value="3">Normal</option></select></div>
                </div>
-               {/* Endereço Simplificado */}
                <div className="mt-4 pt-4 border-t grid grid-cols-3 gap-3">
                    <div><label className="text-xs font-bold">CEP</label><input className="w-full border p-2" value={formData.address.zip} onChange={e => setFormData({...formData, address: {...formData.address, zip: e.target.value}})} onBlur={async () => {
                        if(formData.address.zip.length>=8) {
@@ -2052,11 +2107,89 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
            </div>
        )}
 
+       {/* ABA USUÁRIOS (CORRIGIDA) */}
+       {activeTab === 'users' && (
+           <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
+               <h3 className="font-bold mb-4 flex items-center gap-2 text-indigo-800"><Users size={20}/> Equipe e Permissões</h3>
+               
+               <div className="bg-indigo-50 p-4 rounded border border-indigo-100 mb-6 flex flex-col md:flex-row gap-3 items-end">
+                  <div className="flex-1">
+                      <label className="text-xs font-bold text-indigo-700">Usuário (Login)</label>
+                      <input 
+                        className="w-full border p-2 rounded text-sm" 
+                        placeholder="Ex: caixa01"
+                        value={newUser.username} 
+                        onChange={e => setNewUser({...newUser, username: e.target.value})} 
+                      />
+                  </div>
+                  <div className="flex-1">
+                      <label className="text-xs font-bold text-indigo-700">Senha</label>
+                      <input 
+                        className="w-full border p-2 rounded text-sm" 
+                        placeholder="******"
+                        value={newUser.password} 
+                        onChange={e => setNewUser({...newUser, password: e.target.value})} 
+                      />
+                  </div>
+                  <div className="w-40">
+                      <label className="text-xs font-bold text-indigo-700">Função</label>
+                      <select className="w-full border p-2 rounded text-sm bg-white" value={newUser.role} onChange={e => setNewUser({...newUser, role: e.target.value})}>
+                          <option value="cashier">Caixa (Restrito)</option>
+                          <option value="admin">Gerente (Total)</option>
+                      </select>
+                  </div>
+                  <button onClick={handleAddUser} className="bg-indigo-600 text-white px-4 py-2 rounded font-bold hover:bg-indigo-700 h-[38px] flex items-center gap-2">
+                      <Plus size={16}/> Criar
+                  </button>
+               </div>
+
+               <div className="border rounded overflow-hidden">
+                   <table className="w-full text-sm text-left">
+                       <thead className="bg-slate-50 uppercase text-xs text-slate-500">
+                           <tr>
+                               <th className="p-3">Usuário</th>
+                               <th className="p-3">Função</th>
+                               <th className="p-3">Status</th>
+                               <th className="p-3 text-right">Ação</th>
+                           </tr>
+                       </thead>
+                       <tbody className="divide-y divide-slate-100">
+                           {storeUsers.map(u => (
+                               <tr key={u.id} className="hover:bg-slate-50">
+                                   <td className="p-3 font-bold text-slate-700">{u.username}</td>
+                                   <td className="p-3">
+                                       <span className={`text-[10px] uppercase font-bold px-2 py-1 rounded ${u.role === 'admin' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}`}>
+                                           {u.role === 'admin' ? 'Gerente' : 'Caixa'}
+                                       </span>
+                                   </td>
+                                   <td className="p-3">
+                                       {/* Correção visual: Se active for undefined, considera true */}
+                                       <span className={`text-[10px] font-bold px-2 py-1 rounded ${u.active !== false ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                                           {u.active !== false ? 'Ativo' : 'Bloqueado'}
+                                       </span>
+                                   </td>
+                                   <td className="p-3 text-right">
+                                       <button 
+                                            onClick={() => handleToggleUserStatus(u)} 
+                                            className={`text-xs font-bold px-3 py-1 rounded border ${u.active !== false ? 'border-red-200 text-red-600 hover:bg-red-50' : 'border-green-200 text-green-600 hover:bg-green-50'}`}
+                                       >
+                                           {u.active !== false ? 'Bloquear' : 'Ativar'}
+                                       </button>
+                                   </td>
+                               </tr>
+                           ))}
+                           {storeUsers.length === 0 && <tr><td colSpan={4} className="p-4 text-center text-slate-400">Nenhum usuário encontrado.</td></tr>}
+                       </tbody>
+                   </table>
+               </div>
+           </div>
+       )}
+
+       {/* ABA PERFIS FISCAIS */}
        {activeTab === 'tax_profiles' && (
-           <div className="p-6 bg-white border rounded-b shadow-sm">
+           <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
                <h3 className="font-bold mb-4 flex items-center gap-2"><Tags size={20}/> Gerenciar Perfis Fiscais</h3>
                
-               {/* Formulário Novo */}
                <div className="bg-emerald-50 p-4 rounded border border-emerald-100 mb-6 grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
                   <div className="md:col-span-3">
                       <label className="text-xs font-bold text-emerald-700">Nome (Ex: Cerveja ST)</label>
@@ -2077,7 +2210,6 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
                           <option value="900">900 - Outros</option>
                       </select>
                   </div>
-                  {/* --- CAMPO NOVO: CFOP --- */}
                   <div className="md:col-span-2">
                       <label className="text-xs font-bold text-emerald-700">CFOP (Estadual)</label>
                       <input 
@@ -2092,7 +2224,6 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
                   </div>
                </div>
 
-               {/* Tabela */}
                <div className="border rounded overflow-hidden">
                    <table className="w-full text-sm text-left">
                        <thead className="bg-slate-50 uppercase text-xs text-slate-500">
@@ -2100,7 +2231,7 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
                                <th className="p-3">Nome</th>
                                <th className="p-3 text-center">Origem</th>
                                <th className="p-3 text-center">CSOSN</th>
-                               <th className="p-3 text-center bg-yellow-50 text-yellow-800">CFOP</th> {/* Nova Coluna */}
+                               <th className="p-3 text-center bg-yellow-50 text-yellow-800">CFOP</th>
                                <th className="p-3 text-right">Ação</th>
                            </tr>
                        </thead>
@@ -2110,7 +2241,7 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
                                    <td className="p-3 font-bold text-slate-700">{p.name}</td>
                                    <td className="p-3 text-center">{p.origin}</td>
                                    <td className="p-3 text-center"><span className="bg-slate-200 px-2 py-1 rounded text-xs font-mono">{p.cst_nfe}</span></td>
-                                   <td className="p-3 text-center bg-yellow-50 font-bold text-yellow-900">{p.cfop_state || '-'}</td> {/* Valor */}
+                                   <td className="p-3 text-center bg-yellow-50 font-bold text-yellow-900">{p.cfop_state || '-'}</td>
                                    <td className="p-3 text-right"><button onClick={() => handleDeleteProfile(p.id)} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button></td>
                                </tr>
                            ))}
@@ -2121,8 +2252,9 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
            </div>
        )}
 
+       {/* ABA CERTIFICADO */}
        {activeTab === 'certificate' && (
-         <div className="p-6 bg-white border rounded-b shadow-sm">
+         <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
              <h3 className="font-bold mb-4">Certificado Digital & API</h3>
              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                  <div>
@@ -2153,35 +2285,35 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
                      <input className="w-full border p-2" type="password" value={certData.password} onChange={e => setCertData({...certData, password: e.target.value})} />
                  </div>
                  <div className="mt-6 pt-6 border-t border-slate-100">
-                <h4 className="font-bold text-sm text-indigo-600 border-b pb-2 mb-4 flex items-center gap-2">
-                    <FileText size={16}/> 3. Configuração NFC-e (Cupom Fiscal)
-                </h4>
-                <div className="grid grid-cols-1 md:grid-cols-12 gap-4 bg-indigo-50 p-4 rounded border border-indigo-100">
-                    <div className="md:col-span-3">
-                        <label className="block text-xs font-bold text-indigo-900 mb-1">ID do CSC</label>
-                        <input 
-                            className="w-full border p-2 rounded text-sm placeholder-indigo-300" 
-                            value={certData.csc_id} 
-                            onChange={e => setCertData({...certData, csc_id: e.target.value})} 
-                            placeholder="Ex: 000001"
-                        />
-                    </div>
-                    <div className="md:col-span-9">
-                        <label className="block text-xs font-bold text-indigo-900 mb-1">Código CSC (Token)</label>
-                        <input 
-                            className="w-full border p-2 rounded text-sm placeholder-indigo-300" 
-                            value={certData.csc_token} 
-                            onChange={e => setCertData({...certData, csc_token: e.target.value})} 
-                            placeholder="Ex: 1A2B3C..."
-                        />
-                    </div>
-                    <div className="md:col-span-12">
-                        <p className="text-[10px] text-indigo-700">
-                            * Obrigatório para emitir NFC-e. Obtenha estes códigos no portal da SEFAZ do seu estado (Ambiente Homologação).
-                        </p>
+                    <h4 className="font-bold text-sm text-indigo-600 border-b pb-2 mb-4 flex items-center gap-2">
+                        <FileText size={16}/> 3. Configuração NFC-e (Cupom Fiscal)
+                    </h4>
+                    <div className="grid grid-cols-1 md:grid-cols-12 gap-4 bg-indigo-50 p-4 rounded border border-indigo-100">
+                        <div className="md:col-span-3">
+                            <label className="block text-xs font-bold text-indigo-900 mb-1">ID do CSC</label>
+                            <input 
+                                className="w-full border p-2 rounded text-sm placeholder-indigo-300" 
+                                value={certData.csc_id} 
+                                onChange={e => setCertData({...certData, csc_id: e.target.value})} 
+                                placeholder="Ex: 000001"
+                            />
+                        </div>
+                        <div className="md:col-span-9">
+                            <label className="block text-xs font-bold text-indigo-900 mb-1">Código CSC (Token)</label>
+                            <input 
+                                className="w-full border p-2 rounded text-sm placeholder-indigo-300" 
+                                value={certData.csc_token} 
+                                onChange={e => setCertData({...certData, csc_token: e.target.value})} 
+                                placeholder="Ex: 1A2B3C..."
+                            />
+                        </div>
+                        <div className="md:col-span-12">
+                            <p className="text-[10px] text-indigo-700">
+                                * Obrigatório para emitir NFC-e. Obtenha estes códigos no portal da SEFAZ do seu estado (Ambiente Homologação).
+                            </p>
+                        </div>
                     </div>
                 </div>
-           </div>
              </div>
              <button onClick={handleSaveCertSettings} className="mt-4 bg-indigo-600 text-white px-4 py-2 rounded font-bold">Salvar Configuração</button>
          </div>
@@ -2213,7 +2345,7 @@ const usePersistedState = (key, initialValue) => {
   return [state, setState];
 };
 
-const StoreApp = ({ store, onLogout, updateStore }) => {
+const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
   const [activeModule, setActiveModule] = useState('pdv');
   const [notification, setNotification] = useState(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -2604,14 +2736,27 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
         </div>
 
         <nav className="flex-1 py-4 space-y-1 overflow-y-auto overflow-x-hidden no-scrollbar">
-          <MenuButton id="dashboard" icon={BarChart3} label="Dashboard" />
+          {/* PAINEL (Só Admin) */}
+          {(currentUser?.role === 'admin') && (
+             <MenuButton id="dashboard" icon={BarChart3} label="Dashboard" />
+          )}
+
+          {/* PDV (Todos) */}
           <MenuButton id="pdv" icon={ShoppingCart} label="PDV & Vendas" />
-          <MenuButton id="clients" icon={Users} label="Clientes" />
-          <MenuButton id="transactions" icon={ClipboardList} label="Notas & Gastos" />
-          <MenuButton id="finance" icon={DollarSign} label="Financeiro" />
-          <MenuButton id="priceGroups" icon={Tags} label="Precificação" />
+
+          {/* ESTOQUE (Todos, mas Caixa vê limitado lá dentro depois) */}
           <MenuButton id="inventory" icon={Package} label="Estoque (WMS)" />
-          <MenuButton id="settings" icon={Settings} label="Configurações" />
+
+          {/* RESTO (Só Admin) */}
+          {(currentUser?.role === 'admin') && (
+            <>
+              <MenuButton id="clients" icon={Users} label="Clientes" />
+              <MenuButton id="transactions" icon={ClipboardList} label="Notas & Gastos" />
+              <MenuButton id="finance" icon={DollarSign} label="Financeiro" />
+              <MenuButton id="priceGroups" icon={Tags} label="Precificação" />
+              <MenuButton id="settings" icon={Settings} label="Configurações" />
+            </>
+          )}
         </nav>
 
         <div className="mt-auto p-4 border-t border-slate-800 bg-slate-900/50">
@@ -2814,6 +2959,7 @@ const App = () => {
   const [loginMode, setLoginMode] = useState('none'); // 'none' | 'user' | 'superadmin'
   const [currentStore, setCurrentStore] = useState(null);
   const [notification, setNotification] = useState(null);
+  const [currentUser, setCurrentUser] = useState(null);
   //const [isLoading, setIsLoading] = useState(true);
 
   // ALTERAÇÃO 2: Efeito para verificar e restaurar sessão ao iniciar
@@ -2823,60 +2969,59 @@ const App = () => {
       
       if (savedSession) {
         try {
-          const { storeConfig, mode, timestamp } = JSON.parse(savedSession);
+          // Recuperamos também o 'user' salvo
+          const { storeConfig, mode, timestamp, user } = JSON.parse(savedSession);
           const now = new Date().getTime();
-          const twelveHours = 12 * 60 * 60 * 1000; // 12 horas em milissegundos
+          const twelveHours = 12 * 60 * 60 * 1000; 
 
-          // Se a sessão tem menos de 12 horas
           if (now - timestamp < twelveHours) {
             if (mode === 'user') {
-               // Reconecta no banco para garantir dados frescos, usando a config salva
                const storeData = await firebase.fetchStoreData(storeConfig);
                setCurrentStore(storeData);
+               setCurrentUser(user || { role: 'admin' }); // Recupera usuário
                setLoginMode('user');
             } else if (mode === 'superadmin') {
                setLoginMode('superadmin');
             }
           } else {
-            // Sessão expirou
             localStorage.removeItem('distripro_session');
           }
         } catch (e) {
-          console.error("Sessão inválida ou erro de conexão:", e);
+          console.error("Sessão inválida:", e);
           localStorage.removeItem('distripro_session');
         }
       }
-      
-      // Termina o carregamento (seja logado ou não)
-      //setIsLoading(false);
     };
-
     restoreSession();
   }, []);
 
-  const showNotification = useCallback((message, type) => { setNotification({ message, type }); setTimeout(() => setNotification(null), 3000); }, []);
-  const handleUserLogin = async (storeConfig) => {
-    //setIsLoading(true);
+  // Login Atualizado
+  const handleUserLogin = async (storeConfig, user) => {
     try {
       const storeData = await firebase.fetchStoreData(storeConfig);
       setCurrentStore(storeData);
+      
+      // Define o usuário atual (se não vier role, assume admin por compatibilidade)
+      const userWithRole = { ...user, role: user.role || 'admin' };
+      setCurrentUser(userWithRole);
+      
       window.__app_id = String(storeData.id);
       setLoginMode('user');
 
-      // ALTERAÇÃO 3: Salva a sessão no LocalStorage
       localStorage.setItem('distripro_session', JSON.stringify({
-        storeConfig: storeConfig, // Salva a config para poder reconectar depois
+        storeConfig: storeConfig,
         mode: 'user',
+        user: userWithRole, // Salva usuário na sessão
         timestamp: new Date().getTime()
       }));
 
     } catch (error) {
       showNotification(error.message, 'error');
-      // Não damos throw error aqui para não quebrar a UI, apenas paramos o loading
-    } finally {
-      //setIsLoading(false);
     }
   };
+
+  const showNotification = useCallback((message, type) => { setNotification({ message, type }); setTimeout(() => setNotification(null), 3000); }, []);
+
   const handleSuperAdminLogin = () => { setLoginMode('superadmin'); };
 
   const handleLogout = () => {
@@ -2895,7 +3040,12 @@ const App = () => {
   return (
     <>
       {loginMode === 'user' && (
-        <StoreApp store={currentStore} onLogout={handleLogout} updateStore={updateCurrentStore} />
+        <StoreApp 
+            store={currentStore} 
+            currentUser={currentUser} // <--- PASSANDO O USUÁRIO
+            onLogout={handleLogout} 
+            updateStore={updateCurrentStore} 
+        />
       )}
       {notification && (
         <Toast message={notification.message} type={notification.type} onClose={() => setNotification(null)} />
