@@ -680,6 +680,9 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('');
   
+  // Estado Global de Preço (Define o padrão ao bipar)
+  const [pricingMode, setPricingMode] = useState('retail'); 
+
   // Estados do Modal de Pagamento
   const [selectedProfileId, setSelectedProfileId] = useState('');
   const [installments, setInstallments] = useState(1);
@@ -697,10 +700,8 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
   const [editingProduct, setEditingProduct] = useState(null);
   const [showGroupSuggestions, setShowGroupSuggestions] = useState(false);
   
-  // --- NOVO: Estado para Perfis Fiscais ---
   const [taxProfiles, setTaxProfiles] = useState([]);
 
-  // --- NOVO: Buscar Perfis Fiscais do Supabase ---
   useEffect(() => {
     const fetchProfiles = async () => {
       if (!storeConfig?.id) return;
@@ -713,122 +714,112 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
     fetchProfiles();
   }, [storeConfig]);
   
-  // Configurações
   const isWholesaleEnabled = storeConfig?.enableWholesale;
-  const isEditEnabled = storeConfig?.enablePDVEditing;
 
-  const handleSaveProduct = (e) => {
-      e.preventDefault();
-      const product = editingProduct;
-      
-      const productWithNumbers = {
-        ...product,
-        cost: parseFloat(String(product.cost || '0').replace(',', '.')) || 0,
-        price: parseFloat(String(product.price || '0').replace(',', '.')) || 0,
-        minStock: parseInt(product.minStock, 10) || 0,
-        wholesalePrice: parseFloat(String(product.wholesalePrice || '0').replace(',', '.')) || 0,
-        packQuantity: parseInt(product.packQuantity, 10) || 0,
-        conversionFactor: parseInt(product.conversionFactor, 10) || 1,
-      };
+  // --- EFEITO GLOBAL: Aplica o modo escolhido a todos os itens (Reset em massa) ---
+  useEffect(() => {
+      if (cart.length === 0) return;
 
-      if (!isWholesaleEnabled) {
-          productWithNumbers.wholesalePrice = 0;
-          productWithNumbers.packQuantity = 0;
-      }
+      setCart(currentCart => currentCart.map(item => {
+          const originalProduct = products.find(p => p.id === item.id) || item;
+          const retailPrice = Number(originalProduct.price) || 0;
+          const wholesalePrice = Number(originalProduct.wholesalePrice) || 0;
+          
+          // Se mudou o botão global, tenta aplicar a todos que têm preço de atacado
+          const useWholesale = pricingMode === 'wholesale' && wholesalePrice > 0;
+          
+          return {
+              ...item,
+              price: useWholesale ? wholesalePrice : retailPrice,
+              priceMode: useWholesale ? 'ATACADO' : 'VAREJO',
+              isWholesale: useWholesale
+          };
+      }));
+  }, [pricingMode]); // Removemos 'products' da dependência para evitar re-render loops, mas mantemos pricingMode
 
-      const updatedList = products.map(p => p.id === productWithNumbers.id ? productWithNumbers : p);
-      onUpdateProduct(updatedList);
-      
-      showNotification('Produto atualizado com sucesso!', 'success');
-      setIsEditModalOpen(false);
-      setEditingProduct(null);
+  // --- NOVA FUNÇÃO: Alternar preço de UM item específico (Checkbox) ---
+  const toggleCartItemMode = (itemId) => {
+      setCart(currentCart => currentCart.map(item => {
+          if (item.id !== itemId) return item;
+
+          // Pega dados originais para garantir valores certos
+          const originalProduct = products.find(p => p.id === item.id) || item;
+          const retailPrice = Number(originalProduct.price) || 0;
+          const wholesalePrice = Number(originalProduct.wholesalePrice) || 0;
+
+          // Se não tem preço de atacado, não deixa marcar
+          if (wholesalePrice <= 0) return item;
+
+          const newIsWholesale = !item.isWholesale;
+
+          return {
+              ...item,
+              isWholesale: newIsWholesale,
+              price: newIsWholesale ? wholesalePrice : retailPrice,
+              priceMode: newIsWholesale ? 'ATACADO' : 'VAREJO'
+          };
+      }));
   };
 
   const addToCart = (product) => {
-    // 1. Identifica quem é o Pai (Fonte da Verdade)
-    const targetParentId = product.itemType === 'pack' ? product.parentId : product.id;
-    const itemFactor = product.itemType === 'pack' ? (product.conversionFactor || 1) : 1;
-    
-    // 2. Busca o Pai na lista completa de produtos
-    const parentProduct = products.find(p => p.id === targetParentId);
-    
-    if (!parentProduct) {
-        showNotification('Erro: Produto Pai não encontrado no estoque.', 'error');
+    const currentStock = getDisplayStock(product, products);
+    const itemInCart = cart.find(i => i.id === product.id);
+    const cartQty = itemInCart ? itemInCart.qty : 0;
+
+    if (currentStock <= cartQty) {
+        showNotification(`Estoque insuficiente! Disponível: ${currentStock}`, 'error');
         return;
     }
-    
-    const availableRealStock = parentProduct.stock || 0;
 
-    // 3. Calcula quanto JÁ TEM no carrinho dessa família (unidades + caixas)
-    let unitsAlreadyInCart = 0;
-    cart.forEach(item => {
-        // Encontra o produto original do item do carrinho para saber se é parente
-        const itemProd = products.find(p => p.id === (item.originalId || item.id));
-        if (!itemProd) return;
-        
-        // Verifica se é da mesma família (mesmo pai)
-        const itemParentId = itemProd.itemType === 'pack' ? itemProd.parentId : itemProd.id;
-        
-        if (itemParentId === targetParentId) {
-            const factor = itemProd.itemType === 'pack' ? (itemProd.conversionFactor || 1) : 1;
-            unitsAlreadyInCart += (item.qty * factor);
-        }
+    const retailPrice = Number(product.price) || 0;
+    const wholesalePrice = Number(product.wholesalePrice) || 0;
+    
+    // Padrão: segue o modo global, MAS só se tiver preço de atacado
+    const useWholesale = pricingMode === 'wholesale' && wholesalePrice > 0;
+    
+    const finalPrice = useWholesale ? wholesalePrice : retailPrice;
+    const priceLabel = useWholesale ? 'ATACADO' : 'VAREJO';
+
+    setCart((prevCart) => {
+      const existingItem = prevCart.find((item) => item.id === product.id);
+      
+      if (existingItem) {
+        return prevCart.map((item) =>
+          item.id === product.id
+            ? { 
+                ...item, 
+                qty: item.qty + 1, 
+                // Mantém o modo que o item JÁ estava, a menos que queiramos forçar na adição
+                // Aqui optei por manter a consistência do item
+                price: item.isWholesale ? wholesalePrice : retailPrice 
+              }
+            : item
+        );
+      } else {
+        return [
+          ...prevCart,
+          { 
+            ...product, 
+            qty: 1, 
+            price: finalPrice,
+            priceMode: priceLabel,
+            isWholesale: useWholesale
+          },
+        ];
+      }
     });
-
-    // 4. Verifica se cabe mais um item (convertido em unidades)
-    const neededUnits = unitsAlreadyInCart + itemFactor;
-
-    if (neededUnits > availableRealStock) {
-        showNotification(`Estoque insuficiente! Disponível: ${availableRealStock} unidades reais (Carrinho requer ${neededUnits}).`, 'error');
-        return;
-    }
-
-    // 5. Adiciona ao Carrinho
-    const existing = cart.find(item => item.id === product.id);
-    if (existing) {
-        setCart(cart.map(item => item.id === product.id ? { ...item, qty: item.qty + 1 } : item));
-    } else {
-        setCart([...cart, { 
-            id: product.id, 
-            originalId: product.id,
-            name: product.name, 
-            price: product.price, 
-            qty: 1,
-            // Marca visualmente se for caixa para diferenciar no carrinho depois, se quiser
-            isWholesale: product.itemType === 'pack' 
-        }]);
-    }
   };
 
   const updateQty = (id, delta) => {
     const itemInCart = cart.find(item => item.id === id);
     if (!itemInCart) return;
 
-    // Se for aumentar, faz a verificação de integridade novamente
     if (delta > 0) {
         const product = products.find(p => p.id === (itemInCart.originalId || itemInCart.id));
-        if (product) {
-            const targetParentId = product.itemType === 'pack' ? product.parentId : product.id;
-            const itemFactor = product.itemType === 'pack' ? (product.conversionFactor || 1) : 1;
-            const parentProduct = products.find(p => p.id === targetParentId);
-            
-            if (parentProduct) {
-                let unitsInCart = 0;
-                cart.forEach(item => {
-                    const itemProd = products.find(p => p.id === (item.originalId || item.id));
-                    if (!itemProd) return;
-                    const pid = itemProd.itemType === 'pack' ? itemProd.parentId : itemProd.id;
-                    if (pid === targetParentId) {
-                        const f = itemProd.itemType === 'pack' ? (itemProd.conversionFactor || 1) : 1;
-                        unitsInCart += (item.qty * f);
-                    }
-                });
-
-                if ((unitsInCart + itemFactor) > parentProduct.stock) {
-                    showNotification('Estoque insuficiente para adicionar mais.', 'error');
-                    return;
-                }
-            }
+        const currentStock = getDisplayStock(product, products);
+        if (itemInCart.qty >= currentStock) {
+            showNotification('Estoque máximo atingido.', 'error');
+            return;
         }
     }
 
@@ -846,8 +837,8 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
   const totalCost = cart.reduce((acc, item) => {
      const product = products.find(p => p.id === (item.originalId || item.id));
      const unitCost = product ? product.cost : 0;
-     const totalUnits = item.qty * (item.stockDeduction || 1);
-     return acc + (unitCost * totalUnits);
+     const factor = product?.itemType === 'pack' ? (product.conversionFactor || 1) : 1;
+     return acc + (unitCost * item.qty * factor);
   }, 0);
 
   const handlePaymentInit = (method) => {
@@ -874,6 +865,7 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
     );
   });
 
+  // Funções auxiliares de venda (Review, Confirm, EditSave) mantidas iguais...
   const handleReview = () => {
     let feeAmount = 0;
     let finalClientId = null;
@@ -908,17 +900,12 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
       }
     }
 
-    // --- CÁLCULO FISCAL AUTOMÁTICO (INTEGRAÇÃO FASE 6) ---
     const clientData = clients.find(c => c.id === finalClientId) || null;
     
     const itemsWithTax = cart.map(item => {
-        // Encontra o produto original para ler NCM e Perfil
         const originalProduct = products.find(p => p.id === (item.originalId || item.id));
-        
-        // Encontra o perfil fiscal correspondente
         const taxProfile = taxProfiles.find(tp => tp.id === originalProduct?.taxProfileId);
         
-        // Calcula!
         const taxDetails = calculateItemTaxes(
             { ...item, ...originalProduct }, 
             clientData, 
@@ -926,17 +913,13 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
             taxProfile
         );
 
-        return {
-            ...item,
-            taxDetails: taxDetails // Guarda o cálculo pronto no item
-        };
+        return { ...item, taxDetails: taxDetails };
     });
-    // -----------------------------------------------------
 
     const sale = {
       id: Date.now(),
       date: new Date().toISOString(),
-      items: itemsWithTax, // Salva os itens JÁ com impostos calculados
+      items: itemsWithTax,
       total: totalCart,
       cost: totalCost,
       fee: feeAmount,
@@ -961,8 +944,35 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
     setPaymentModalOpen(false);
   };
 
+  const handleSaveProduct = (e) => {
+      e.preventDefault();
+      const product = editingProduct;
+      const productWithNumbers = {
+        ...product,
+        cost: parseFloat(String(product.cost || '0').replace(',', '.')) || 0,
+        price: parseFloat(String(product.price || '0').replace(',', '.')) || 0,
+        minStock: parseInt(product.minStock, 10) || 0,
+        wholesalePrice: parseFloat(String(product.wholesalePrice || '0').replace(',', '.')) || 0,
+        packQuantity: parseInt(product.packQuantity, 10) || 0,
+        conversionFactor: parseInt(product.conversionFactor, 10) || 1,
+      };
+
+      if (!isWholesaleEnabled) {
+          productWithNumbers.wholesalePrice = 0;
+          productWithNumbers.packQuantity = 0;
+      }
+
+      const updatedList = products.map(p => p.id === productWithNumbers.id ? productWithNumbers : p);
+      onUpdateProduct(updatedList);
+      showNotification('Produto atualizado com sucesso!', 'success');
+      setIsEditModalOpen(false);
+      setEditingProduct(null);
+  };
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[calc(100vh-140px)]">
+      
+      {/* COLUNA ESQUERDA: LISTA DE PRODUTOS */}
       <div className="lg:col-span-2 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col overflow-hidden">
         <div className="p-4 border-b bg-slate-50">
           <div className="relative flex-1">
@@ -973,7 +983,6 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
         <div className="flex-1 overflow-y-auto p-4 grid grid-cols-2 md:grid-cols-3 gap-4 content-start">
           {filteredProducts.map(p => {
             const isPack = p.itemType === 'pack';
-            // AQUI ESTÁ A MÁGICA VISUAL: Passamos 'products' para ele calcular o pai
             const displayStock = getDisplayStock(p, products); 
 
             return (
@@ -984,17 +993,18 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
                         {isPack && <span className="text-[10px] font-bold bg-indigo-100 text-indigo-700 px-1 rounded border border-indigo-200">CX</span>}
                     </div>
                     <div className="text-xs text-slate-500 mb-2 mt-1">Cód: {p.cbaCode || '-'}</div>
-                    <div className="flex justify-between items-end">
-                    <div>
-                        <div className="text-xs text-slate-400">Estoque</div>
-                        <div className={`font-bold ${displayStock <= (p.minStock || 0) ? 'text-red-500' : 'text-blue-600'}`}>
-                            {displayStock} {p.unit}
+                    
+                    <div className="flex justify-between items-end mt-2">
+                        <div>
+                            <div className="text-xs text-slate-400">Estoque</div>
+                            <div className={`font-bold ${displayStock <= (p.minStock || 0) ? 'text-red-500' : 'text-blue-600'}`}>
+                                {displayStock} {p.unit}
+                            </div>
                         </div>
-                    </div>
-                    <div className="text-right">
-                        <div className="text-xs text-slate-400">Preço</div>
-                        <div className="font-bold text-slate-700">{formatCurrency(p.price)}</div>
-                    </div>
+                        <div className="text-right">
+                            <div className="text-xs text-slate-400">Preço</div>
+                            <div className="font-bold text-slate-700">{formatCurrency(p.price)}</div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1003,23 +1013,75 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
         </div>
       </div>
 
+      {/* COLUNA DA DIREITA: CARRINHO */}
       <div className="bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col h-full">
-        <div className="p-4 border-b bg-slate-50 font-bold text-slate-700 flex items-center gap-2">
-          <ShoppingCart size={20}/> Carrinho Atual
+        <div className="p-4 border-b bg-slate-50 font-bold text-slate-700 flex flex-col gap-3">
+          <div className="flex items-center gap-2">
+            <ShoppingCart size={20}/> Carrinho Atual
+          </div>
+
+          <div className="flex bg-slate-200 p-1 rounded-lg w-full">
+              <button
+                  onClick={() => setPricingMode('retail')}
+                  className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-bold transition-all ${
+                      pricingMode === 'retail' 
+                      ? 'bg-white text-blue-700 shadow-sm' 
+                      : 'text-slate-500 hover:text-slate-700'
+                  }`}
+              >
+                  <Tags size={14} /> Varejo
+              </button>
+              
+              <button
+                  onClick={() => setPricingMode('wholesale')}
+                  className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-bold transition-all ${
+                      pricingMode === 'wholesale' 
+                      ? 'bg-emerald-600 text-white shadow-sm' 
+                      : 'text-slate-500 hover:text-slate-700'
+                  }`}
+              >
+                  <Boxes size={14} /> Atacado
+              </button>
+          </div>
         </div>
+
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
           {cart.map(item => {
+             const originalItem = products.find(p => p.id === item.id) || item;
+             const hasWholesale = Number(originalItem.wholesalePrice) > 0;
+
              return (
-              <div key={item.id} className={`flex justify-between items-center p-2 border-b border-slate-100 last:border-0 ${item.isWholesale ? 'bg-indigo-50/50 rounded' : ''}`}>
-                <div className="flex-1">
-                  <div className="font-medium text-sm flex items-center gap-1">
-                      {item.name}
-                      {item.isWholesale && <Package size={12} className="text-indigo-600"/>}
-                  </div>
-                  <div className="text-xs text-slate-500">
-                    {item.qty} {item.isWholesale ? 'cx' : 'un'} x {formatCurrency(item.price)} 
-                  </div>
+              <div key={item.id} className={`flex justify-between items-center p-2 border-b border-slate-100 last:border-0 ${item.isWholesale ? 'bg-emerald-50/50 rounded' : ''}`}>
+                
+                {/* CHECKBOX INDIVIDUAL + NOME */}
+                <div className="flex-1 flex items-start gap-2">
+                   {/* Checkbox para alternar modo */}
+                   <div className="pt-1">
+                       <input 
+                          type="checkbox" 
+                          className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                          checked={item.isWholesale}
+                          disabled={!hasWholesale}
+                          onChange={() => toggleCartItemMode(item.id)}
+                          title={hasWholesale ? "Ativar/Desativar Preço de Atacado para este item" : "Este item não possui preço de atacado definido"}
+                       />
+                   </div>
+
+                   <div>
+                       <div className="font-bold text-sm flex flex-col">
+                           {item.name}
+                           {item.isWholesale && (
+                               <span className="text-[9px] text-emerald-600 font-bold uppercase tracking-wide">
+                                   Preço Atacado Aplicado
+                               </span>
+                           )}
+                       </div>
+                       <div className="text-xs text-slate-500 mt-0.5">
+                         {item.qty} {item.unit || 'un'} x {formatCurrency(item.price)} 
+                       </div>
+                   </div>
                 </div>
+
                 <div className="flex items-center gap-2">
                   <button onClick={() => updateQty(item.id, -1)} className="p-1 hover:bg-slate-100 rounded"><ArrowLeft size={14}/></button>
                   <span className="text-sm font-bold w-6 text-center">{item.qty}</span>
@@ -1031,6 +1093,8 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
           })}
           {cart.length === 0 && <div className="text-center text-slate-400 py-10">Carrinho vazio</div>}
         </div>
+        
+        {/* Footer do Carrinho (Total e Botões de Pagamento) mantido igual */}
         <div className="p-4 bg-slate-50 border-t space-y-3">
           <div className="flex justify-between items-center text-lg font-bold text-slate-800">
             <span>Total</span>
@@ -1046,7 +1110,9 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
         </div>
       </div>
 
+      {/* Modais (Edição e Pagamento) continuam aqui (igual ao código anterior)... */}
       <Modal isOpen={paymentModalOpen} onClose={() => setPaymentModalOpen(false)} title={`Pagamento: ${paymentMethod}`}>
+          {/* Conteúdo do Modal de Pagamento (Igual) */}
          <div className="space-y-4">
           {modalStep === 'config' ? (
             <>
@@ -1109,8 +1175,8 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
         </div>
       </Modal>
 
-      {/* --- Modal de Edição Rápida no PDV (VISUAL CORRIGIDO) --- */}
       <Modal isOpen={isEditModalOpen} onClose={() => setIsEditModalOpen(false)} title="Editar Produto (PDV)">
+          {/* Form de Edição (Igual) */}
         <form onSubmit={handleSaveProduct} className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div className="col-span-2">
@@ -1145,7 +1211,6 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
                <input type="text" inputMode="decimal" className="w-full border p-2 rounded text-sm font-bold text-slate-800" value={editingProduct?.price || ''} onChange={e => setEditingProduct({...editingProduct, price: e.target.value})}/>
             </div>
 
-            {/* ÁREA ATACADO (ESTILO IDÊNTICO AO ESTOQUE) */}
             <div className={`col-span-2 p-3 rounded border ${isWholesaleEnabled ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-100 border-slate-200 opacity-70'}`} title={!isWholesaleEnabled ? "Habilite 'Venda por Atacado' nas configurações para editar." : ""}>
                <div className="flex items-center gap-2 mb-2">
                   <h4 className={`text-xs font-bold uppercase ${isWholesaleEnabled ? 'text-indigo-700' : 'text-slate-500'}`}>Venda Atacado / Caixa Fechada</h4>
@@ -2156,6 +2221,7 @@ const StoreApp = ({ store, onLogout, updateStore }) => {
   const [previewData, setPreviewData] = useState(null);
   const [isEmitting, setIsEmitting] = useState(false);
   const [currentSaleToEmit, setCurrentSaleToEmit] = useState(null);
+  const [pricingMode, setPricingMode] = useState('retail');
 
   // --- CORREÇÃO: Estado EXCLUSIVO para clientes do Supabase ---
   // Isso garante que não usamos dados antigos do Firebase/LocalStorage

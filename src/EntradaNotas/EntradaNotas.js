@@ -14,7 +14,8 @@ import {
   FileText,
   Link as LinkIcon,
   Settings,
-  RefreshCw
+  RefreshCw,
+  MapPin
 } from 'lucide-react';
 import { 
   collection, 
@@ -33,6 +34,7 @@ import {
   onAuthStateChanged,
   signInWithCustomToken 
 } from 'firebase/auth';
+import { supabase } from '../supabaseClient';
 
 // --- CONFIGURAÇÃO FIREBASE (Fallback) ---
 const globalAppId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
@@ -120,6 +122,282 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
 
   const [items, setItems] = useState([]);
   const [installments, setInstallments] = useState([]);
+
+  // --- NOVOS ESTADOS (ADICIONE AQUI) ---
+  const [isSupplierModalOpen, setIsSupplierModalOpen] = useState(false);
+  const [supplierForm, setSupplierForm] = useState({
+  name: '', tax_id: '', ie: '', email: '', phone: '',
+  address: { zip: '', street: '', number: '', neighborhood: '', city: '', state: '', ibge_code: '' }});
+
+  // ... (após const [supplierForm, setSupplierForm] = ...)
+
+  // --- ESTADOS PARA BUSCA DE CLIENTE/FORNECEDOR ---
+  const [clientSearchTerm, setClientSearchTerm] = useState('');
+  const [clientSearchResults, setClientSearchResults] = useState([]);
+  const [showClientResults, setShowClientResults] = useState(false);
+
+  // --- ESTADO PARA MODAL PAI/FILHO (PACK) ---
+  const [packConfigModal, setPackConfigModal] = useState({ open: false, itemId: null });
+  const [isCreatingChild, setIsCreatingChild] = useState(false);
+  const [newChildForm, setNewChildForm] = useState({ 
+      name: '', 
+      code: '', 
+      cost: '', 
+      margin: '30', // Margem padrão
+      price: '', 
+      wholesalePrice: '' 
+  });
+
+  // --- FUNÇÃO DE CÁLCULO PARA O MODAL FILHO ---
+  const handleChildCalc = (field, value) => {
+      let newData = { ...newChildForm, [field]: value };
+      
+      const getNum = (v) => parseFloat(String(v).replace(',', '.')) || 0;
+      const cost = getNum(newData.cost);
+      const margin = getNum(newData.margin);
+      const price = getNum(newData.price);
+
+      // Se mexer no Custo ou Margem -> Calcula Preço Venda
+      if (field === 'cost' || field === 'margin') {
+          if (cost >= 0) {
+              newData.price = (cost * (1 + margin / 100)).toFixed(2);
+          }
+      }
+      // Se mexer no Preço Venda -> Calcula Margem
+      if (field === 'price') {
+          if (cost > 0) {
+              newData.margin = (((price - cost) / cost) * 100).toFixed(2);
+          }
+      }
+      
+      setNewChildForm(newData);
+  };
+
+  const handleQuickCreateChild = async () => {
+      if (!newChildForm.name) return alert('Nome do produto unitário é obrigatório');
+      
+      try {
+          const code = newChildForm.code || 'GEN-UNIT-' + Date.now();
+          
+          // Cria o objeto do produto
+          const newProd = {
+            name: newChildForm.name.toUpperCase(),
+            cbaCode: code,
+            barcode: code,
+            unit: 'UN',
+            
+            // NOVOS CAMPOS SENDO SALVOS:
+            cost: parseFloat(String(newChildForm.cost).replace(',', '.')) || 0,
+            costPrice: parseFloat(String(newChildForm.cost).replace(',', '.')) || 0,
+            price: parseFloat(String(newChildForm.price).replace(',', '.')) || 0,
+            wholesalePrice: parseFloat(String(newChildForm.wholesalePrice).replace(',', '.')) || 0,
+            profitMargin: parseFloat(String(newChildForm.margin).replace(',', '.')) || 0,
+            
+            stock: 0,
+            isPack: false,
+            createdAt: serverTimestamp()
+        };
+
+          // Salva no Firebase (coleção de produtos)
+          const docRef = await addDoc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'products'), newProd);
+          
+          // Atualiza lista local para aparecer imediatamente
+          const createdItem = { ...newProd, id: docRef.id };
+          setProducts(prev => [...prev, createdItem]);
+          
+          // Já seleciona ele no item que você estava editando
+          setItems(prev => prev.map(i => i.id === packConfigModal.itemId ? { 
+              ...i, 
+              childId: createdItem.id, 
+              childName: createdItem.name 
+          } : i));
+
+          // Reseta a modal para o modo de seleção
+          setIsCreatingChild(false);
+          setNewChildForm({ name: '', code: '' });
+          alert('Item unitário criado e selecionado!');
+
+      } catch (e) {
+          console.error(e);
+          alert('Erro ao criar: ' + e.message);
+      }
+  };
+
+  // --- FUNÇÕES DE BUSCA ---
+  const searchClients = async (term) => {
+      setClientSearchTerm(term);
+      // Atualiza o visual do input imediatamente
+      setHeaderData(prev => ({ ...prev, entityName: term })); 
+      
+      if (term.length < 3) {
+          setClientSearchResults([]);
+          setShowClientResults(false);
+          return;
+      }
+
+      try {
+          const { data, error } = await supabase
+              .from('fiscal_clients')
+              .select('*')
+              .eq('firebase_store_id', String(storeConfig.id))
+              .ilike('name', `%${term}%`)
+              .limit(5);
+
+          if (data) {
+              setClientSearchResults(data);
+              setShowClientResults(true);
+          }
+      } catch (err) {
+          console.error(err);
+      }
+  };
+
+  const selectClient = (client) => {
+      setHeaderData(prev => ({
+          ...prev,
+          entityName: client.name,
+          entityDoc: client.tax_id,
+          entityId: String(client.id) // Salva o ID do Supabase
+      }));
+      setClientSearchTerm(client.name);
+      setShowClientResults(false);
+  };
+
+  // Função para buscar CEP
+const handleCepBlur = async () => {
+  const cep = supplierForm.address.zip.replace(/\D/g, '');
+  if (cep.length !== 8) return;
+  try {
+    const r = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
+    const d = await r.json();
+    if (!d.erro) {
+      setSupplierForm(prev => ({
+        ...prev,
+        address: { ...prev.address, street: d.logradouro, neighborhood: d.bairro, city: d.localidade, state: d.uf, ibge_code: d.ibge }
+      }));
+    }
+  } catch (e) { console.error(e); }
+};
+
+// Função Salvar Fornecedor (Agora no Supabase)
+const handleSaveSupplier = async () => {
+    if (!supplierForm.name || !supplierForm.tax_id) return alert('Nome e Documento obrigatórios');
+    try {
+        const payload = {
+            firebase_store_id: String(storeConfig.id),
+            name: supplierForm.name.toUpperCase(),
+            type: 'PJ', // Fornecedor geralmente é PJ
+            tax_id: supplierForm.tax_id.replace(/\D/g, ''),
+            ie_indicator: '1', // Contribuinte
+            ie: supplierForm.ie.replace(/\D/g, ''),
+            email: supplierForm.email,
+            phone: supplierForm.phone,
+            zip_code: supplierForm.address.zip.replace(/\D/g, ''),
+            street: supplierForm.address.street,
+            number: supplierForm.address.number,
+            neighborhood: supplierForm.address.neighborhood,
+            city: supplierForm.address.city,
+            state: supplierForm.address.state,
+            ibge_code: supplierForm.address.ibge_code
+        };
+
+        const { error } = await supabase.from('fiscal_clients').insert(payload);
+        if (error) throw error;
+
+        // Atualiza o cabeçalho da nota com o novo fornecedor
+        setHeaderData(prev => ({ 
+            ...prev, 
+            entityName: supplierForm.name.toUpperCase(), 
+            entityDoc: supplierForm.tax_id 
+        }));
+        
+        setIsSupplierModalOpen(false);
+        // Limpa form...
+        setSupplierForm({ name: '', tax_id: '', ie: '', email: '', phone: '', address: { zip: '', street: '', number: '', neighborhood: '', city: '', state: '', ibge_code: '' } });
+        alert('Fornecedor cadastrado com sucesso!');
+    } catch (e) {
+        alert('Erro ao salvar: ' + e.message);
+    }
+};
+
+  // --- FUNÇÃO: ADICIONAR ITEM MANUAL (ITEM 6) ---
+  const handleAddManualItem = () => {
+      setItems([...items, {
+          id: Math.random().toString(36).substr(2, 9),
+          productId: '', 
+          systemSku: '',
+          barcode: '', // Item 7 (Criação)
+          productName: '', // Item 8 (Descrição)
+          unit: 'UN', // Item 9
+          quantity: 1, // Item 10
+          unitPrice: 0, // Item 10 (Custo)
+          margin: 30, // Item 2 (Margem Padrão)
+          sellingPrice: 0, // Item 2 (Venda)
+          total: 0,
+          isNew: true // Flag para saber que precisa cadastrar
+      }]);
+  };
+
+  // --- FUNÇÃO: CÁLCULO INTELIGENTE NA TABELA (ITENS 8, 9, 10 e 2) ---
+  const handleItemChange = (id, field, value) => {
+      setItems(prev => prev.map(item => {
+          if (item.id !== id) return item;
+          
+          const updates = { [field]: value };
+          
+          // Conversões numéricas seguras
+          const getNum = (val) => parseFloat(String(val).replace(',', '.')) || 0;
+
+          // 1. Recálculo de Totais (Se mudar Qtd ou Custo)
+          if (field === 'quantity' || field === 'unitPrice') {
+              const q = field === 'quantity' ? getNum(value) : item.quantity;
+              const c = field === 'unitPrice' ? getNum(value) : item.unitPrice;
+              updates.total = q * c;
+              
+              // Se mudou o custo, sugere novo preço de venda mantendo a margem
+              if (field === 'unitPrice') {
+                  const m = item.margin || 30;
+                  updates.sellingPrice = (c * (1 + m / 100)).toFixed(2);
+              }
+          }
+
+          // 2. Margem alterada -> Recalcula Preço de Venda
+          if (field === 'margin') {
+              const cost = item.unitPrice || 0;
+              const margin = getNum(value);
+              updates.sellingPrice = (cost * (1 + margin / 100)).toFixed(2);
+          }
+
+          // 3. Preço Venda alterado -> Recalcula Margem
+          if (field === 'sellingPrice') {
+              const cost = item.unitPrice || 0;
+              const price = getNum(value);
+              if (cost > 0) {
+                  updates.margin = (((price - cost) / cost) * 100).toFixed(2);
+              }
+          }
+
+          // 4. Código de Barras (Busca automática de produto existente)
+          if (field === 'barcode' && value.length > 3) {
+              const existing = products.find(p => p.barcode === value || p.cbaCode === value);
+              if (existing) {
+                  updates.isNew = false;
+                  updates.productId = existing.id;
+                  updates.productName = existing.name; // Puxa nome
+                  updates.unit = existing.unit;
+                  updates.sellingPrice = existing.price;
+                  updates.margin = existing.profitMargin || 30;
+                  // O custo mantemos o que está sendo digitado na nota, ou puxamos do cadastro se for 0
+                  if(item.unitPrice === 0) updates.unitPrice = existing.cost || 0;
+              } else {
+                  updates.isNew = true;
+                  updates.productId = ''; // Limpa ID para forçar criação
+              }
+          }
+
+          return { ...item, ...updates };
+      }));
+  };
 
   const xmlInputRef = useRef(null);
 
@@ -423,78 +701,133 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
 
   const handleRemoveInstallment = (id) => { setInstallments(installments.filter(i => i.id !== id)); };
 
-  // --- FUNÇÃO DE SALVAR CORRIGIDA ---
+  // --- FUNÇÃO DE SALVAR ATUALIZADA (CADASTRO AUTOMÁTICO) ---
+  // --- FUNÇÃO DE SALVAR CORRIGIDA (LÓGICA PAI/FILHO WMS) ---
   const handleSave = async () => {
     setLoading(true);
     try {
       const batch = writeBatch(db);
       
       const finalItems = [];
-      let productsUpdatedCount = 0;
-      let productsCreatedCount = 0;
+      let createdCount = 0;
+      let updatedCount = 0;
 
       for (const item of items) {
           let newItem = { ...item };
-          
-          if (!newItem.productId && newItem.systemSku) {
-              const found = products.find(p => String(p.cbaCode).trim() === String(newItem.systemSku).trim());
-              if (found) {
-                  newItem.productId = found.id;
-                  newItem.productName = found.name;
-              }
-          }
+          let prodRef;
+          let productDataForStock = {}; // Dados para decidir onde jogar o estoque
 
-          // Se não tem ID, cria o produto
-          if (!newItem.productId) {
-               const newProdRef = doc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'products'));
-               const codeToUse = newItem.systemSku || newItem.xmlProductCode || 'GEN-' + Date.now();
+          // ============================================================
+          // A. PRODUTO NOVO (Criação)
+          // ============================================================
+          if (item.isNew || !item.productId) {
+               prodRef = doc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'products'));
                
-               const safeCost = Number(newItem.unitPrice) || 0;
+               const codeToUse = item.barcode || item.xmlProductCode || 'GEN-' + Date.now() + Math.random().toString().slice(2,5);
+               const safeCost = parseFloat(item.unitPrice) || 0;
+               const safePrice = parseFloat(item.sellingPrice) || (safeCost * 1.3);
+
+               // Verifica se é PACOTE baseado na UI
+               const isPackItem = ['CX', 'FD', 'FARDO', 'PCT'].includes(item.unit) && item.childId;
+               const conversionFactor = parseFloat(item.conversionFactor) || 1;
+
                const newProductData = {
+                   id: prodRef.id,
+                   name: (item.productName || item.xmlProductName || 'NOVO ITEM').toUpperCase(),
                    cbaCode: codeToUse,
-                   name: newItem.productName || newItem.xmlProductName || 'Produto Sem Nome',
+                   barcode: codeToUse,
+                   unit: item.unit || 'UN',
+                   
                    cost: safeCost,
-                   price: safeCost * 1.5, 
-                   unit: newItem.unit || 'UN',
-                   ncm: newItem.ncm ? String(newItem.ncm).replace(/\D/g, '') : '', 
-                   ean: newItem.ean || '',
-                   origin: '0', 
-                   taxProfileId: null, 
-                   stock: 0, // Estoque começa em 0 e soma abaixo
-                   createdAt: serverTimestamp()
+                   costPrice: safeCost,
+                   price: safePrice,
+                   wholesalePrice: parseFloat(item.wholesalePrice) || 0,
+                   profitMargin: parseFloat(item.margin) || 30,
+                   
+                   stock: 0, // Estoque físico começa zerado (será ajustado na mov. abaixo)
+                   minStock: 5,
+                   
+                   // --- CORREÇÃO CRÍTICA DO VÍNCULO ---
+                   itemType: isPackItem ? 'pack' : 'unit',
+                   
+                   // Se for PACK, o parentId aponta para o Filho (Unidade), igual ao WMS
+                   parentId: isPackItem ? item.childId : null, 
+                   
+                   conversionFactor: conversionFactor, 
+                   packQuantity: conversionFactor, // Redundância para garantir compatibilidade
+
+                   createdAt: serverTimestamp(),
+                   last_updated: serverTimestamp()
                };
                
-               batch.set(newProdRef, newProductData);
-               newItem.productId = newProdRef.id;
-               productsCreatedCount++;
+               batch.set(prodRef, newProductData);
+               newItem.productId = prodRef.id;
+               
+               // Guarda dados para usar na movimentação de estoque
+               productDataForStock = {
+                   isPack: isPackItem,
+                   targetId: isPackItem ? item.childId : prodRef.id, // Se for pack, joga estoque no filho!
+                   factor: isPackItem ? conversionFactor : 1
+               };
+               
+               createdCount++;
+          }
+          // ============================================================
+          // B. PRODUTO EXISTENTE (Atualização)
+          // ============================================================
+          else {
+               prodRef = doc(db, 'artifacts', currentAppId, 'public', 'data', 'products', item.productId);
+               
+               // Busca dados do produto original na memória para saber se é Pack
+               const originalProd = products.find(p => p.id === item.productId);
+               const isPackExisting = originalProd?.itemType === 'pack';
+               const parentIdExisting = originalProd?.parentId;
+               const factorExisting = originalProd?.conversionFactor || originalProd?.packQuantity || 1;
+
+               const updateData = { last_updated: serverTimestamp() };
+               
+               if (selectedType && selectedType.direction === 'ENTRADA') {
+                   updateData.cost = parseFloat(item.unitPrice);
+                   updateData.costPrice = parseFloat(item.unitPrice);
+                   if (item.sellingPrice > 0) {
+                       updateData.price = parseFloat(item.sellingPrice);
+                       updateData.wholesalePrice = parseFloat(item.wholesalePrice) || 0;
+                       updateData.profitMargin = parseFloat(item.margin);
+                   }
+               }
+               batch.update(prodRef, updateData);
+               
+               // Guarda dados para movimentação
+               productDataForStock = {
+                   isPack: isPackExisting,
+                   // Se for Pack existente, o alvo é o parentId (Unidade). Se não, é ele mesmo.
+                   targetId: (isPackExisting && parentIdExisting) ? parentIdExisting : item.productId,
+                   factor: isPackExisting ? factorExisting : 1
+               };
+               
+               updatedCount++;
           }
 
-          // Atualiza Estoque
+          // ============================================================
+          // C. MOVIMENTAÇÃO DE ESTOQUE (A CORREÇÃO MÁGICA)
+          // ============================================================
           if (selectedType && selectedType.stockAction !== 'NEUTRO') {
-              const factor = selectedType.stockAction === 'SOMAR' ? 1 : -1;
-              const qtyChange = (Number(newItem.quantity) || 0) * factor;
-
-              const productRef = doc(db, 'artifacts', currentAppId, 'public', 'data', 'products', newItem.productId);
+              const directionFactor = selectedType.stockAction === 'SOMAR' ? 1 : -1;
               
-              const updateData = {
-                  stock: increment(qtyChange)
-              };
-
-              if (selectedType.direction === 'ENTRADA') {
-                  updateData.cost = Number(newItem.unitPrice) || 0;
-                  if (newItem.acceptedSuggestion && newItem.suggestedPrice) {
-                      updateData.price = Number(newItem.suggestedPrice) || 0;
-                  }
+              // Qtd da Nota * Fator do Pack (Ex: 10 Caixas * 12 Latas = 120 Latas)
+              const qtyToMove = (parseFloat(item.quantity) || 0) * productDataForStock.factor * directionFactor;
+              
+              // Onde vamos mexer? No targetId (que é a Unidade/Filho se for caixa)
+              if (productDataForStock.targetId) {
+                  const stockRef = doc(db, 'artifacts', currentAppId, 'public', 'data', 'products', productDataForStock.targetId);
+                  batch.update(stockRef, { stock: increment(qtyToMove) });
               }
-
-              batch.update(productRef, updateData);
-              productsUpdatedCount++;
           }
 
           finalItems.push(newItem);
       }
 
-      // Grava Nota
+      // D. GRAVAR A NOTA (Mantido igual)
       const invoiceRef = doc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'invoices'));
       batch.set(invoiceRef, {
           header: headerData, 
@@ -504,36 +837,32 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
           totals,
           status: 'CONFIRMADA', 
           createdAt: serverTimestamp(), 
-          userId: auth.currentUser?.uid || 'anon_user'
+          userId: auth.currentUser?.uid || 'anon'
       });
+
+      // E. GRAVAR CONTAS A PAGAR (Mantido igual)
+      if (installments.length > 0 && selectedType.financialAction === 'PAGAR') {
+          installments.forEach(inst => {
+              const billRef = doc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'financial_movements'));
+              batch.set(billRef, {
+                  type: 'EXPENSE',
+                  category: 'Fornecedores',
+                  description: `NF ${headerData.number} - Parc ${inst.number}`,
+                  amount: parseFloat(inst.value),
+                  date: inst.dueDate,
+                  status: 'PENDENTE',
+                  createdAt: serverTimestamp()
+              });
+          });
+      }
 
       await batch.commit();
 
-      alert(`SUCESSO!\n\nNota Gravada.\nProdutos Atualizados: ${productsUpdatedCount}\nNovos Produtos Cadastrados: ${productsCreatedCount}`);
+      alert(`SUCESSO!\nNota Salva e Estoque Vinculado Corretamente.\nProdutos Criados: ${createdCount}\nAtualizados: ${updatedCount}`);
       
-      if (onSaveEntry) {
-          onSaveEntry([], null);
-      }
-
-      // Reset
+      if (onSaveEntry) onSaveEntry([], null);
       setItems([]);
       setInstallments([]);
-      setHeaderData({
-        series: '1',
-        number: '',
-        issueDate: new Date().toISOString().split('T')[0],
-        entryDate: new Date().toISOString().split('T')[0],
-        model: '55',
-        accessKey: '',
-        entityId: '',
-        entityName: '',
-        entityDoc: '',
-        xmlFile: '',
-        xmlValidated: false,
-        observations: '',
-        paymentCondition: '30 DIAS', 
-        paymentMethod: 'BOLETO'      
-      });
       setCurrentStep(1);
       
     } catch (e) { 
@@ -664,7 +993,36 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
                    </h4>
                    <div className="grid grid-cols-12 gap-2">
                        <div className="col-span-2"><DenseInput placeholder="Cód." value={headerData.entityId} readOnly className="bg-gray-50"/></div>
-                       <div className="col-span-6"><DenseInput placeholder="Razão Social / Nome" value={headerData.entityName} onChange={(e)=>setHeaderData({...headerData, entityName: e.target.value})}/></div>
+                       {/* Substitua o input do fornecedor no Passo 1 por este bloco */}
+                        <div className="col-span-6 flex gap-1 relative">
+                            <div className="flex-1 relative">
+                                <DenseInput 
+                                    placeholder="Busque por Nome..." 
+                                    value={headerData.entityName} 
+                                    onChange={(e) => searchClients(e.target.value)}
+                                    onFocus={() => headerData.entityName && searchClients(headerData.entityName)}
+                                    className="font-bold text-blue-900"
+                                />
+                                {/* Lista de Resultados da Busca */}
+                                {showClientResults && clientSearchResults.length > 0 && (
+                                    <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-gray-300 shadow-xl rounded max-h-40 overflow-y-auto">
+                                        {clientSearchResults.map(c => (
+                                            <div 
+                                                key={c.id} 
+                                                onClick={() => selectClient(c)}
+                                                className="p-2 text-xs hover:bg-blue-50 cursor-pointer border-b last:border-0 flex justify-between"
+                                            >
+                                                <span className="font-bold">{c.name}</span>
+                                                <span className="text-gray-500">{c.tax_id}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                            <button onClick={() => setIsSupplierModalOpen(true)} className="bg-slate-800 text-white px-2 rounded hover:bg-slate-700 shadow" title="Novo Fornecedor">
+                                <Plus size={16}/>
+                            </button>
+                        </div>
                        <div className="col-span-4"><DenseInput placeholder="CNPJ/CPF (Opcional se manual)" value={headerData.entityDoc} onChange={(e)=>setHeaderData({...headerData, entityDoc: e.target.value})}/></div>
                    </div>
                </div>
@@ -676,120 +1034,156 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
         {currentStep === 2 && (
           <div className="flex-1 flex flex-col bg-white border border-gray-300 rounded shadow-sm h-full">
             <div className="p-3 border-b bg-gray-50 flex justify-between items-center">
-                <h2 className="font-bold text-gray-700 flex items-center gap-2"><Package size={18}/> Itens da Nota</h2>
+                <h2 className="font-bold text-gray-700 flex items-center gap-2"><Package size={18}/> Itens e Precificação</h2>
+                <div className="flex gap-2">
+                    {/* ITEM 6: Botão Manual */}
+                    <button onClick={handleAddManualItem} className="bg-emerald-600 text-white px-3 py-1 rounded text-xs font-bold flex items-center gap-1 hover:bg-emerald-700">
+                        <Plus size={14}/> Adicionar Item Manual
+                    </button>
+                </div>
             </div>
 
-            {/* Grid */}
-            <div className="flex-1 overflow-auto p-2">
+            {/* Grid Editável (Estilo Excel) */}
+            <div className="flex-1 overflow-auto p-0">
                 <table className="w-full text-xs text-left border-collapse">
-                    <thead className="bg-gray-100 text-gray-600 sticky top-0 shadow-sm z-10">
+                    <thead className="bg-gray-100 text-gray-600 sticky top-0 shadow-sm z-10 font-bold uppercase">
                         <tr>
-                            <th className="p-2 border-b w-40 bg-yellow-50 text-yellow-800 border-r border-yellow-200">Cód. Interno / Ação</th>
-                            <th className="p-2 border-b">Produto / Descrição</th>
-                            <th className="p-2 border-b text-right">Qtd</th>
-                            <th className="p-2 border-b text-right">Unitário</th>
-                            <th className="p-2 border-b text-right bg-indigo-50 text-indigo-800">Sugestão Venda</th>
-                            <th className="p-2 border-b text-right bg-blue-50 text-blue-800">Total + Desp.</th>
+                            <th className="p-2 border-b border-r w-32">Cód. Barras</th>
+                            <th className="p-2 border-b border-r">Descrição do Produto (Nome)</th>
+                            <th className="p-2 border-b border-r w-16 text-center">Unid.</th>
+                            <th className="p-2 border-b border-r w-20 text-center">Qtd</th>
+                            <th className="p-2 border-b border-r w-24 text-right">Custo (R$)</th>
+                            <th className="p-2 border-b border-r w-20 text-center bg-indigo-50 text-indigo-800">Margem %</th>
+                            <th className="p-2 border-b border-r w-24 text-right bg-indigo-50 text-indigo-800">Venda (R$)</th>
+                            <th className="p-2 border-b border-r w-24 text-right bg-emerald-50 text-emerald-800">Atacado (R$)</th>
+                            <th className="p-2 border-b text-right w-24">Total</th>
                             <th className="p-2 border-b w-8"></th>
                         </tr>
                     </thead>
                     <tbody className="divide-y">
                         {items.map(item => (
-                            <tr key={item.id} className="hover:bg-gray-50">
-                                {/* CAMPO DE VÍNCULO & CADASTRO */}
-                                <td className="p-1 border-r border-gray-200 bg-yellow-50/30 align-top">
-                                    {item.isService ? (
-                                        <div className="flex items-center gap-1 text-gray-500 italic px-2 py-1">
-                                            <Settings size={12} /> SERVIÇO
-                                        </div>
-                                    ) : (
-                                        <div className="flex gap-1 items-center">
-                                          <div className="relative flex-1">
-                                            <input 
-                                              type="text" 
-                                              value={item.systemSku} 
-                                              onChange={(e) => handleSystemSkuChange(item.id, e.target.value)}
-                                              className={`w-full border rounded px-1 py-1 font-bold text-xs ${item.productId ? 'border-green-400 text-green-700 bg-green-50' : 'border-gray-300 text-gray-600 bg-white'}`}
-                                              placeholder="Cód."
-                                            />
-                                            {item.productId && <CheckCircle2 size={10} className="absolute right-1 top-1.5 text-green-500" />}
-                                          </div>
-                                          
-                                          <button 
-                                            onClick={() => handleUpdateItemInfo(item.id)}
-                                            className="bg-blue-100 text-blue-700 p-1 rounded hover:bg-blue-200 border border-blue-200"
-                                            title="Alterar item para o código digitado"
-                                          >
-                                              <RefreshCw size={14} />
-                                          </button>
-
-                                          {!item.productId && (
-                                              <button 
-                                                onClick={() => handleQuickCreate(item)}
-                                                className="bg-blue-600 text-white p-1 rounded hover:bg-blue-700"
-                                                title="Cadastrar Produto com dados do XML"
-                                              >
-                                                  <Plus size={14} />
-                                              </button>
-                                          )}
-                                        </div>
+                            <tr key={item.id} className={`hover:bg-blue-50 ${item.isNew ? 'bg-yellow-50' : ''}`}>
+                                {/* Item 7: Código de Barras (Busca) */}
+                                <td className="p-1 border-r relative group">
+                                    <select 
+                                        className="w-full h-full bg-transparent outline-none text-center appearance-none font-bold"
+                                        value={item.unit}
+                                        onChange={(e) => handleItemChange(item.id, 'unit', e.target.value)}
+                                    >
+                                        <option>UN</option><option>CX</option><option>KG</option><option>PCT</option><option>FARDO</option><option>FD</option>
+                                    </select>
+                                    
+                                    {/* Botão aparece apenas se for Pack */}
+                                    {['CX', 'FD', 'FARDO', 'PCT'].includes(item.unit) && (
+                                        <button 
+                                            onClick={() => setPackConfigModal({ open: true, itemId: item.id })}
+                                            className="absolute right-0 top-0 bottom-0 bg-orange-100 text-orange-600 px-1 hover:bg-orange-200 z-10"
+                                            title="Vincular Item Filho (Unidade)"
+                                        >
+                                            <Package size={12}/>
+                                        </button>
+                                    )}
+                                    
+                                    {/* Indicador se já está configurado */}
+                                    {item.childId && (
+                                        <div className="absolute top-0 right-0 -mt-1 -mr-1 w-2 h-2 bg-green-500 rounded-full"></div>
                                     )}
                                 </td>
-                                
-                                <td className="p-2">
-                                    <div className="font-medium text-gray-800">{item.productName}</div>
-                                    {item.xmlProductCode && (
-                                      <div className="text-[10px] text-gray-400 flex items-center gap-1">
-                                        <LinkIcon size={10} /> XML: {item.xmlProductCode} - {item.xmlProductName}
-                                      </div>
-                                    )}
+                                {/* Item 8: Descrição Editável */}
+                                <td className="p-1 border-r">
+                                    <input 
+                                        className="w-full h-full bg-transparent outline-none uppercase font-bold text-gray-700" 
+                                        value={item.productName} 
+                                        onChange={(e) => handleItemChange(item.id, 'productName', e.target.value)}
+                                        placeholder="Nome do Produto"
+                                    />
                                 </td>
-                                <td className="p-2 text-right">{item.quantity}</td>
-                                <td className="p-2 text-right">{formatCurrency(item.unitPrice)}</td>
-                                <td className="p-2 text-right bg-indigo-50/30">
-                                    {item.suggestedPrice ? (
-                                        <div className="flex flex-col items-end gap-1">
-                                            <button 
-                                                onClick={() => togglePriceSuggestion(item.id)}
-                                                className={`flex items-center gap-1 px-2 py-1 rounded border shadow-sm transition-all ${item.acceptedSuggestion ? 'bg-green-600 text-white border-green-700' : 'bg-white text-indigo-600 border-indigo-200 hover:bg-indigo-50'}`}
-                                                title={`Margem do Grupo: ${item.priceGroupMargin}%`}
-                                            >
-                                                {item.acceptedSuggestion ? <CheckCircle2 size={10}/> : <RefreshCw size={10}/>}
-                                                <span className="font-bold">{formatCurrency(item.suggestedPrice)}</span>
-                                            </button>
-                                            {item.acceptedSuggestion && <span className="text-[9px] text-green-600 font-bold">Será Atualizado</span>}
-                                        </div>
-                                    ) : (
-                                        <span className="text-gray-300">-</span>
-                                    )}
+                                {/* Item 9: Unidade */}
+                                <td className="p-1 border-r">
+                                    <select 
+                                        className="w-full h-full bg-transparent outline-none text-center appearance-none"
+                                        value={item.unit}
+                                        onChange={(e) => handleItemChange(item.id, 'unit', e.target.value)}
+                                    >
+                                        <option>UN</option><option>CX</option><option>KG</option><option>PCT</option><option>FARDO</option>
+                                    </select>
                                 </td>
-                                <td className="p-2 text-right font-bold bg-blue-50/30 text-blue-800">{formatCurrency(item.total)}</td>
-                                <td className="p-2 text-center"><button onClick={()=>setItems(items.filter(i=>i.id!==item.id))} className="text-gray-400 hover:text-red-500"><Trash2 size={14}/></button></td>
+                                {/* Item 10: Quantidade */}
+                                <td className="p-1 border-r">
+                                    <input 
+                                        type="number" 
+                                        className="w-full h-full bg-transparent outline-none text-center font-bold" 
+                                        value={item.quantity} 
+                                        onChange={(e) => handleItemChange(item.id, 'quantity', e.target.value)}
+                                    />
+                                </td>
+                                {/* Item 10: Custo */}
+                                <td className="p-1 border-r">
+                                    <input 
+                                        type="number" step="0.01"
+                                        className="w-full h-full bg-transparent outline-none text-right text-red-600" 
+                                        value={item.unitPrice} 
+                                        onChange={(e) => handleItemChange(item.id, 'unitPrice', e.target.value)}
+                                    />
+                                </td>
+                                {/* Item 2: Margem */}
+                                <td className="p-1 border-r bg-indigo-50/30">
+                                    <input 
+                                        type="number" step="1"
+                                        className="w-full h-full bg-transparent outline-none text-center text-indigo-600 font-bold" 
+                                        value={item.margin} 
+                                        onChange={(e) => handleItemChange(item.id, 'margin', e.target.value)}
+                                    />
+                                </td>
+                                {/* Item 2: Preço Venda */}
+                                <td className="p-1 border-r bg-indigo-50/30">
+                                    <input 
+                                        type="number" step="0.01"
+                                        className="w-full h-full bg-transparent outline-none text-right text-indigo-700 font-bold" 
+                                        value={item.sellingPrice} 
+                                        onChange={(e) => handleItemChange(item.id, 'sellingPrice', e.target.value)}
+                                    />
+                                </td>
+                                {/* Preço atacado*/}
+                                <td className="p-1 border-r bg-emerald-50/30">
+                                    <input 
+                                        type="number" step="0.01"
+                                        className="w-full h-full bg-transparent outline-none text-right text-emerald-700 font-bold" 
+                                        
+                                        // 1. Se for 0 ou nulo, fica vazio para facilitar a digitação
+                                        value={item.wholesalePrice || ''} 
+                                        
+                                        // 2. Ao clicar ou dar Tab, seleciona todo o conteúdo
+                                        onFocus={(e) => e.target.select()}
+                                        
+                                        onChange={(e) => handleItemChange(item.id, 'wholesalePrice', e.target.value)}
+                                        placeholder="0.00"
+                                    />
+                                </td>
+                                <td className="p-2 text-right font-bold text-gray-800">
+                                    {formatCurrency(item.total)}
+                                </td>
+                                <td className="p-1 text-center">
+                                    <button onClick={()=>setItems(items.filter(i=>i.id!==item.id))} className="text-gray-400 hover:text-red-500">
+                                        <Trash2 size={14}/>
+                                    </button>
+                                </td>
                             </tr>
                         ))}
-                        {items.length === 0 && <tr><td colSpan={6} className="p-8 text-center text-gray-400">Nenhum item lançado.</td></tr>}
                     </tbody>
                 </table>
+                {items.length === 0 && <div className="p-8 text-center text-gray-400">Nenhum item. Importe um XML ou adicione manualmente.</div>}
             </div>
 
             {/* Footer Totais */}
             <div className="p-3 bg-gray-50 border-t flex justify-end gap-6">
-                <div className="text-right">
-                    <span className="text-[10px] uppercase font-bold text-gray-500">Total Itens</span>
-                    <div className="font-bold text-gray-700">{formatCurrency(totals.totalProducts)}</div>
-                </div>
-                <div className="text-right">
-                    <span className="text-[10px] uppercase font-bold text-gray-500">Total Despesas</span>
-                    <div className="font-bold text-gray-700">{formatCurrency(totals.totalSurcharge)}</div>
-                </div>
                 <div className="text-right border-l pl-4 border-gray-300">
-                    <span className="text-[10px] uppercase font-bold text-gray-900">Total Nota</span>
-                    <div className="font-bold text-lg text-gray-900">{formatCurrency(totals.totalNote)}</div>
+                    <span className="text-[10px] uppercase font-bold text-gray-500">Total Nota</span>
+                    <div className="font-bold text-lg text-gray-900">{formatCurrency(items.reduce((a,b)=>a+(b.total||0), 0))}</div>
                 </div>
             </div>
           </div>
         )}
-
         {/* === PASSO 3: FINANCEIRO & FECHAMENTO === */}
         {currentStep === 3 && (
           <div className="bg-white border border-gray-300 rounded shadow-sm h-full flex flex-col">
@@ -877,6 +1271,254 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
              </div>
         </div>
       </div>
+
+      {/* MODAL NOVO FORNECEDOR (ITEM 5) */}
+      {isSupplierModalOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-lg w-full max-w-2xl shadow-xl overflow-hidden max-h-[90vh] flex flex-col">
+                <div className="bg-slate-800 text-white p-4 flex justify-between items-center">
+                    <h3 className="font-bold text-lg">Novo Fornecedor (Completo)</h3>
+                    <button onClick={() => setIsSupplierModalOpen(false)}><XIcon size={20}/></button>
+                </div>
+                
+                <div className="p-6 overflow-y-auto space-y-4">
+                    <div className="grid grid-cols-12 gap-4">
+                        <div className="col-span-8">
+                            <Label required>Razão Social</Label>
+                            <DenseInput value={supplierForm.name} onChange={e => setSupplierForm({...supplierForm, name: e.target.value})} className="uppercase"/>
+                        </div>
+                        <div className="col-span-4">
+                            <Label required>CNPJ</Label>
+                            <DenseInput value={supplierForm.tax_id} onChange={e => setSupplierForm({...supplierForm, tax_id: e.target.value})} placeholder="Apenas números"/>
+                        </div>
+                        
+                        <div className="col-span-4">
+                            <Label>Inscrição Estadual</Label>
+                            <DenseInput value={supplierForm.ie} onChange={e => setSupplierForm({...supplierForm, ie: e.target.value})}/>
+                        </div>
+                        <div className="col-span-4">
+                            <Label>Telefone</Label>
+                            <DenseInput value={supplierForm.phone} onChange={e => setSupplierForm({...supplierForm, phone: e.target.value})}/>
+                        </div>
+                        <div className="col-span-4">
+                            <Label>Email</Label>
+                            <DenseInput value={supplierForm.email} onChange={e => setSupplierForm({...supplierForm, email: e.target.value})}/>
+                        </div>
+
+                        {/* Endereço */}
+                        <div className="col-span-12 border-t pt-2 mt-2"><h4 className="text-xs font-bold text-slate-500 uppercase flex items-center gap-1"><MapPin size={12}/> Endereço</h4></div>
+                        
+                        <div className="col-span-3">
+                            <Label>CEP</Label>
+                            <DenseInput value={supplierForm.address.zip} onChange={e => setSupplierForm({...supplierForm, address: {...supplierForm.address, zip: e.target.value}})} onBlur={handleCepBlur}/>
+                        </div>
+                        <div className="col-span-7">
+                            <Label>Rua</Label>
+                            <DenseInput value={supplierForm.address.street} onChange={e => setSupplierForm({...supplierForm, address: {...supplierForm.address, street: e.target.value}})}/>
+                        </div>
+                        <div className="col-span-2">
+                            <Label>Número</Label>
+                            <DenseInput value={supplierForm.address.number} onChange={e => setSupplierForm({...supplierForm, address: {...supplierForm.address, number: e.target.value}})}/>
+                        </div>
+                        <div className="col-span-5">
+                            <Label>Bairro</Label>
+                            <DenseInput value={supplierForm.address.neighborhood} onChange={e => setSupplierForm({...supplierForm, address: {...supplierForm.address, neighborhood: e.target.value}})}/>
+                        </div>
+                        <div className="col-span-5">
+                            <Label>Cidade</Label>
+                            <DenseInput value={supplierForm.address.city} readOnly className="bg-slate-50"/>
+                        </div>
+                        <div className="col-span-2">
+                            <Label>UF</Label>
+                            <DenseInput value={supplierForm.address.state} readOnly className="bg-slate-50"/>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="p-4 bg-slate-50 border-t flex justify-end gap-2">
+                    <button onClick={() => setIsSupplierModalOpen(false)} className="px-4 py-2 text-slate-600 font-bold hover:bg-slate-200 rounded text-xs">Cancelar</button>
+                    <button onClick={handleSaveSupplier} className="px-6 py-2 bg-blue-600 text-white font-bold rounded hover:bg-blue-700 text-xs flex items-center gap-2">
+                        <Save size={14}/> Salvar Fornecedor
+                    </button>
+                </div>
+            </div>
+        </div>
+        )}
+
+        {/* --- MODAL DE CONFIGURAÇÃO DE PACK (PAI/FILHO) --- */}
+      {/* --- MODAL DE CONFIGURAÇÃO DE PACK (PAI/FILHO) COM CADASTRO RÁPIDO --- */}
+      {packConfigModal.open && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 animate-in fade-in">
+            <div className="bg-white p-6 rounded-lg shadow-2xl w-full max-w-md border border-gray-200">
+                <div className="flex justify-between items-center mb-4 border-b pb-2">
+                    <h3 className="font-bold text-gray-800 flex items-center gap-2">
+                        <Package className="text-orange-500" size={20}/> 
+                        {isCreatingChild ? 'Novo Item Unitário' : 'Configurar Embalagem'}
+                    </h3>
+                    <button onClick={() => { setPackConfigModal({ open: false, itemId: null }); setIsCreatingChild(false); }} className="text-gray-400 hover:text-red-500">
+                        <XIcon size={20}/>
+                    </button>
+                </div>
+                
+                {/* MODO 1: SELECIONAR EXISTENTE */}
+                {!isCreatingChild ? (
+                    <div className="space-y-4">
+                        <div>
+                            <label className="text-xs font-bold text-gray-600 block mb-1">Item Unitário (Filho)</label>
+                            <div className="flex gap-2">
+                                <select 
+                                    className="flex-1 border p-2 rounded text-sm bg-gray-50 focus:ring-2 focus:ring-orange-500 outline-none"
+                                    onChange={(e) => {
+                                        if(!e.target.value) return;
+                                        const child = products.find(p => p.id === e.target.value);
+                                        setItems(prev => prev.map(i => i.id === packConfigModal.itemId ? { 
+                                            ...i, 
+                                            childId: child.id, 
+                                            childName: child.name 
+                                        } : i));
+                                    }}
+                                >
+                                    <option value="">Selecione o item...</option>
+                                    {products
+                                        .filter(p => !p.isPack && p.unit === 'UN')
+                                        .sort((a,b) => a.name.localeCompare(b.name))
+                                        .map(p => (
+                                        <option key={p.id} value={p.id}>{p.name}</option>
+                                    ))}
+                                </select>
+                                {/* BOTÃO PARA CRIAR NOVO */}
+                                <button 
+                                    onClick={() => setIsCreatingChild(true)}
+                                    className="bg-green-600 text-white px-3 rounded hover:bg-green-700"
+                                    title="Cadastrar Nova Unidade"
+                                >
+                                    <Plus size={18}/>
+                                </button>
+                            </div>
+                            <p className="text-[10px] text-gray-400 mt-1">Selecione a unidade que vem dentro desta caixa.</p>
+                        </div>
+
+                        <div>
+                            <label className="text-xs font-bold text-gray-600 block mb-1">Quantidade na Embalagem</label>
+                            <input 
+                                type="number" 
+                                className="w-full border p-2 rounded text-sm font-bold text-center"
+                                placeholder="Ex: 12"
+                                autoFocus
+                                onChange={(e) => {
+                                     setItems(prev => prev.map(i => i.id === packConfigModal.itemId ? { 
+                                        ...i, 
+                                        conversionFactor: parseFloat(e.target.value) 
+                                    } : i));
+                                }}
+                            />
+                        </div>
+
+                        <button 
+                            onClick={() => setPackConfigModal({ open: false, itemId: null })} 
+                            className="w-full bg-orange-600 text-white py-2 rounded font-bold hover:bg-orange-700 transition-colors"
+                        >
+                            Confirmar Vínculo
+                        </button>
+                    </div>
+                ) : (
+                    /* MODO 2: CRIAR NOVO */
+                    <div className="space-y-4 animate-in slide-in-from-right">
+                        <div className="bg-green-50 p-3 rounded text-green-800 text-xs mb-2 border border-green-100">
+                            <strong>Cadastro Rápido:</strong> Defina a unidade avulsa para vincular à caixa.
+                        </div>
+                        
+                        {/* Nome e Código */}
+                        <div className="grid grid-cols-2 gap-3">
+                            <div className="col-span-2">
+                                <label className="text-[10px] font-bold text-gray-500 uppercase block mb-1">Nome do Produto (Unitário)</label>
+                                <input 
+                                    className="w-full border p-2 rounded text-sm uppercase font-bold text-gray-700"
+                                    placeholder="EX: COCA COLA LATA 350ML"
+                                    value={newChildForm.name}
+                                    onChange={e => setNewChildForm({...newChildForm, name: e.target.value})}
+                                    autoFocus
+                                />
+                            </div>
+                            <div className="col-span-2">
+                                <label className="text-[10px] font-bold text-gray-500 uppercase block mb-1">Código de Barras (Opcional)</label>
+                                <input 
+                                    className="w-full border p-2 rounded text-sm"
+                                    placeholder="Escaneie ou digite..."
+                                    value={newChildForm.code}
+                                    onChange={e => setNewChildForm({...newChildForm, code: e.target.value})}
+                                />
+                            </div>
+                        </div>
+
+                        {/* PRECIFICAÇÃO COMPLETA */}
+                        <div className="bg-slate-50 p-3 rounded border border-slate-200">
+                            <h4 className="text-[10px] font-bold text-blue-800 uppercase border-b border-blue-100 pb-1 mb-2 flex items-center gap-1">
+                                <DollarSign size={10}/> Formação de Preço
+                            </h4>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="text-[10px] font-bold text-gray-500 uppercase block mb-1">Custo (R$)</label>
+                                    <input 
+                                        type="number" step="0.01"
+                                        className="w-full border p-1.5 rounded text-sm text-right"
+                                        placeholder="0.00"
+                                        value={newChildForm.cost}
+                                        onChange={e => handleChildCalc('cost', e.target.value)}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-[10px] font-bold text-gray-500 uppercase block mb-1">Margem (%)</label>
+                                    <input 
+                                        type="number" step="0.1"
+                                        className="w-full border p-1.5 rounded text-sm text-center text-blue-600 font-bold"
+                                        placeholder="%"
+                                        value={newChildForm.margin}
+                                        onChange={e => handleChildCalc('margin', e.target.value)}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-[10px] font-bold text-blue-700 uppercase block mb-1">Preço Varejo</label>
+                                    <input 
+                                        type="number" step="0.01"
+                                        className="w-full border border-blue-300 bg-white p-1.5 rounded text-sm text-right font-bold text-blue-800"
+                                        placeholder="0.00"
+                                        value={newChildForm.price}
+                                        onChange={e => handleChildCalc('price', e.target.value)}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-[10px] font-bold text-emerald-700 uppercase block mb-1">Atacado (Opcional)</label>
+                                    <input 
+                                        type="number" step="0.01"
+                                        className="w-full border border-emerald-300 bg-emerald-50 p-1.5 rounded text-sm text-right font-bold text-emerald-800"
+                                        placeholder="0.00"
+                                        value={newChildForm.wholesalePrice}
+                                        onChange={e => setNewChildForm({...newChildForm, wholesalePrice: e.target.value})}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div className="flex gap-2 pt-2 border-t mt-2">
+                            <button 
+                                onClick={() => setIsCreatingChild(false)} 
+                                className="flex-1 border border-gray-300 text-gray-600 py-2 rounded font-bold text-xs hover:bg-gray-50"
+                            >
+                                Voltar
+                            </button>
+                            <button 
+                                onClick={handleQuickCreateChild} 
+                                className="flex-1 bg-green-600 text-white py-2 rounded font-bold text-xs hover:bg-green-700 shadow-sm"
+                            >
+                                <Save size={14} className="inline mr-1"/> Salvar & Vincular
+                            </button>
+                        </div>
+                    </div>
+                )}
+            </div>
+        </div>
+      )}
 
     </div>
   );
