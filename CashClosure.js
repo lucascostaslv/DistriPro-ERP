@@ -31,7 +31,7 @@ const CashClosure = ({ sales }) => {
           <p className="text-3xl font-bold text-red-500 mt-1">- {formatCurrency(summary.fees)}</p>
         </div>
         <div className="bg-emerald-50 p-5 rounded-lg border border-emerald-100 shadow-sm">
-          <p className="text-emerald-800 text-xs uppercase font-bold">Líquido (Recebido)</p>
+          <p className="text-emerald-800 text-xs uppercase font-bold">Líquido (Recebido )</p>
           <p className="text-3xl font-bold text-emerald-700 mt-1">{formatCurrency(summary.netTotal)}</p>
         </div>
       </div>
