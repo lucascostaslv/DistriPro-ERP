@@ -1548,6 +1548,11 @@ const CashClosure = ({ sales, onSaveHistory }) => {
   );
 };
 
+const monthNames = [
+  "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+  "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
+];
+
 const FinancialReport = ({ sales, transactions, transactionCategories, companyInfo, showNotification, products, users }) => {
   const [month, setMonth] = useState(new Date().getMonth());
   const [year, setYear] = useState(new Date().getFullYear());
@@ -1617,57 +1622,88 @@ const FinancialReport = ({ sales, transactions, transactionCategories, companyIn
   ];
   const maxVal = Math.max(revenue, 1);
 
-  // --- GERADOR SPED FISCAL (SIMPLIFICADO) ---
-  const generateSPED = () => {
-      const dtIni = new Date(year, month, 1).toLocaleDateString('pt-BR').replace(/\//g, '');
-      const dtFin = new Date(year, month + 1, 0).toLocaleDateString('pt-BR').replace(/\//g, '');
-      const cnpj = companyInfo?.cnpj?.replace(/\D/g, '') || '';
-      
-      let txt = '';
-      const line = (content) => `|${content.join('|')}|\n`;
+const downloadPDF = async () => {
+  const element = document.getElementById('report-container');
+  if (!element) return;
 
-      // BLOCO 0: Abertura
-      txt += line(['0000', '006', '0', dtIni, dtFin, companyInfo?.name || '', cnpj, '', 'UF', '', '', '']);
-      txt += line(['0001', '0']); // Abertura do Bloco 0
-      txt += line(['0005', companyInfo?.name || '', '', '', '', '', '']); // Dados Complementares
-      txt += line(['0990', '4']); // Encerramento Bloco 0
+  showNotification('Preparando documento PDF...', 'info');
 
-      // BLOCO C: Documentos Fiscais (Vendas)
-      txt += line(['C001', '0']); // Abertura com movimento
-      validSales.forEach(s => {
-          // Exemplo simplificado de registro C100 (Nota)
-          // Na prática precisaria dos dados fiscais reais (Chave, Modelo, Série) que salvamos no 'nfeKey'
-          if(s.nfeStatus === 'AUTORIZADA') {
-             const dEmis = new Date(s.date).toLocaleDateString('pt-BR').replace(/\//g, '');
-             txt += line(['C100', '1', '0', '55', '00', 'SERIE', s.id.toString().slice(-9), '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
-          }
-      });
-      txt += line(['C990', (validSales.length + 2).toString()]);
+  try {
+    // 1. Criamos um container temporário para não bagunçar sua tela atual
+    const canvas = await window.html2canvas(element, {
+      scale: 3, // Qualidade ultra-alta
+      useCORS: true,
+      backgroundColor: "#ffffff",
+      windowWidth: element.scrollWidth,
+      windowHeight: element.scrollHeight
+    });
 
-      // BLOCO H: Inventário Físico (Posição em 31/12 ou final do período)
-      // Gera apenas se for o mês atual ou dezembro
-      txt += line(['H001', '0']);
-      const invTotal = products.reduce((acc, p) => acc + (p.stock * p.cost), 0);
-      txt += line(['H005', dtFin, formatCurrency(invTotal).replace('R$', '').trim(), '01']); // Totais
-      
-      products.forEach(p => {
-          if (p.stock > 0) {
-             txt += line(['H010', p.cbaCode || p.id, 'UN', p.stock, formatCurrency(p.cost).replace('R$', '').trim(), formatCurrency(p.stock * p.cost).replace('R$', '').trim(), '0', '', '', '']);
-          }
-      });
-      txt += line(['H990', (products.filter(p => p.stock > 0).length + 3).toString()]);
+    const imgData = canvas.toDataURL('image/png');
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF('p', 'mm', 'a4');
+    
+    const pdfWidth = pdf.internal.pageSize.getWidth();
+    const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
 
-      // Encerramento Arquivo
-      txt += line(['9999', '100']); // Contagem fictícia de linhas
+    // 2. Adiciona o título e o período no topo do PDF antes da imagem
+    const period = `${monthNames[month]} / ${year}`;
+    const operator = selectedUser === 'ALL' ? 'Geral da Loja' : users.find(u => u.id === selectedUser)?.username;
 
-      const blob = new Blob([txt], { type: 'text/plain' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `SPED_${month + 1}_${year}.txt`;
-      document.body.appendChild(link);
-      link.click();
-  };
+    pdf.setFontSize(18);
+    pdf.setTextColor(30, 41, 59); // Slate-800
+    pdf.text("RELATÓRIO FINANCEIRO MENSAL", 10, 15);
+    
+    pdf.setFontSize(10);
+    pdf.setTextColor(100, 116, 139); // Slate-500
+    pdf.text(`Período: ${period} | Operador: ${operator}`, 10, 22);
+    pdf.text(`Gerado em: ${new Date().toLocaleString()}`, 10, 27);
+
+    // 3. Insere o conteúdo (Tabelas e Gráficos) abaixo do cabeçalho
+    pdf.addImage(imgData, 'PNG', 0, 35, pdfWidth, pdfHeight);
+    
+    pdf.save(`Relatorio_Financeiro_${month + 1}_${year}.pdf`);
+    showNotification('Documento baixado com sucesso!', 'success');
+  } catch (error) {
+    console.error("Erro PDF:", error);
+    showNotification('Erro ao organizar PDF.', 'error');
+  }
+};
+
+const generateSPED = () => {
+  const fmt = (val) => Number(val).toFixed(2).replace('.', ',');
+  const dtIni = new Date(year, month, 1).toLocaleDateString('pt-BR').replace(/\//g, '');
+  const dtFin = new Date(year, month + 1, 0).toLocaleDateString('pt-BR').replace(/\//g, '');
+  const cnpj = companyInfo?.cnpj?.replace(/\D/g, '') || '';
+  
+  let txt = '';
+  const pipe = (fields) => `|${fields.join('|')}|\n`;
+
+  // BLOCO 0: Abertura
+  txt += pipe(['0000', '015', '0', dtIni, dtFin, (companyInfo?.name || 'EMPRESA').toUpperCase(), cnpj, '', 'UF', '', '', '', '']);
+  
+  // BLOCO C: Notas Fiscais
+  txt += pipe(['C001', '0']); 
+  validSales.forEach(s => {
+      if(s.nfeStatus === 'AUTORIZADA') {
+         const dEmis = new Date(s.date).toLocaleDateString('pt-BR').replace(/\//g, '');
+         // C100 ajustado: Pipe-line exato para validadores
+         txt += pipe(['C100', '1', '0', '55', '00', '1', s.id.toString().slice(-9), s.nfeKey || '', dEmis, dEmis, fmt(s.total), '0', '0', '0', fmt(s.total), '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0']);
+      }
+  });
+  txt += pipe(['C990', (validSales.length + 2).toString()]);
+
+  // BLOCO 9: Encerramento do Arquivo Digital
+  txt += pipe(['9001', '0']);
+  txt += pipe(['9990', '2']);
+  txt += pipe(['9999', (txt.split('\n').length + 1).toString()]);
+
+  const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `SPED_${month + 1}_${year}.txt`;
+  link.click();
+};
 
   const downloadXLS = () => {
     const xlsContent = `
@@ -1720,6 +1756,9 @@ const FinancialReport = ({ sales, transactions, transactionCategories, companyIn
         </div>
 
         <div className="flex gap-2">
+          <button onClick={downloadPDF} className="bg-white border border-red-600 text-red-700 px-3 py-2 rounded text-sm font-bold hover:bg-red-50 flex items-center gap-2">
+              <Download size={16}/> Baixar PDF
+          </button>
           <button onClick={downloadXLS} className="bg-white border border-green-600 text-green-700 px-3 py-2 rounded text-sm font-bold hover:bg-green-50 flex items-center gap-2">
               <Download size={16}/> Excel
           </button>
@@ -1729,7 +1768,7 @@ const FinancialReport = ({ sales, transactions, transactionCategories, companyIn
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div id="report-container" className="grid grid-cols-1 md:grid-cols-2 gap-6 p-4 bg-white">
         {/* DRE DETALHADO */}
         <div className="bg-white p-6 rounded border border-slate-200 shadow-sm space-y-3">
           <h3 className="font-bold text-slate-700 border-b pb-2 flex justify-between">
@@ -2537,6 +2576,26 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
     return () => unsubscribe();
   }, [store]);
 
+  const [allStoreUsers, setAllStoreUsers] = useState([]);
+
+  useEffect(() => {
+      if (!store?.id) return;
+      const appId = store.id;
+      // Busca todos os usuários vinculados a esta loja (Admin e Caixas)
+      const usersRef = collection(firebase.adminDB, "users");
+      const q = query(usersRef, where("storeId", "==", appId));
+      
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+          const usersList = snapshot.docs.map(doc => ({
+              id: doc.id,
+              ...doc.data()
+          }));
+          setAllStoreUsers(usersList);
+      });
+
+      return () => unsubscribe();
+  }, [store?.id]);
+
   // Função de Venda (com baixa de estoque)
   // Função de Venda (com baixa de estoque e COMANDA)
   const handleNewSale = async (sale) => {
@@ -3020,7 +3079,7 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
               />
             )}
             {activeModule === 'priceGroups' && <PriceGroups products={products} showNotification={showNotification} />}
-            {activeModule === 'finance' && <Finance sales={realtimeSales} transactions={store.transactions} transactionCategories={store.transactionCategories} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} onEmitNFe={handleEmitNFe} products={products} users={store.users || []}/>}
+            {activeModule === 'finance' && <Finance sales={realtimeSales} transactions={store.transactions} transactionCategories={store.transactionCategories} users={allStoreUsers} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} onEmitNFe={handleEmitNFe} products={products}/>}
             {activeModule === 'inventory' && (
                 <InventoryWMS 
                     storeConfig={store} 
