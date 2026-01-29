@@ -6,8 +6,13 @@ import {
 import { collection, getDocs, query, orderBy } from 'firebase/firestore';
 import { db } from '../firebase'; 
 
-// Utilitários de formatação
-const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val);
+// Utilitários de formatação (Blindados contra NaN)
+const formatCurrency = (val) => {
+    const numberVal = Number(val);
+    if (isNaN(numberVal)) return 'R$ 0,00';
+    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(numberVal);
+};
+
 const formatDate = (dateStr) => {
   if (!dateStr) return '-';
   const [y, m, d] = dateStr.split('-');
@@ -20,7 +25,7 @@ const AccountsPayable = ({ products }) => {
   
   // --- ESTADO DE DATA ---
   const [currentDate, setCurrentDate] = useState(new Date());
-  const [showMonthPicker, setShowMonthPicker] = useState(false); // Novo estado para o popup de meses
+  const [showMonthPicker, setShowMonthPicker] = useState(false); 
   
   // Filtros
   const [selectedCategory, setSelectedCategory] = useState('ALL');
@@ -56,7 +61,6 @@ const AccountsPayable = ({ products }) => {
     setCurrentDate(prev => new Date(newYear, prev.getMonth(), 1));
   };
 
-  // Nova função: Selecionar mês direto no Grid
   const handleSelectMonthSpecific = (monthIndex) => {
     setCurrentDate(prev => new Date(prev.getFullYear(), monthIndex, 1));
     setShowMonthPicker(false);
@@ -87,7 +91,7 @@ const AccountsPayable = ({ products }) => {
     fetchInvoices();
   }, []);
 
-  // Processamento dos dados (Filtragem)
+  // Processamento dos dados (Filtragem e Correção NaN)
   const payableItems = useMemo(() => {
     let items = [];
     
@@ -113,6 +117,10 @@ const AccountsPayable = ({ products }) => {
             return;
         }
 
+        // --- CORREÇÃO DO NaN AQUI ---
+        // Forçamos a conversão para número. Se falhar, assume 0.
+        const safeValue = Number(inst.value) || 0;
+
         items.push({
           uniqueId: `${inv.id}_${inst.number}`,
           invoiceId: inv.id,
@@ -122,7 +130,7 @@ const AccountsPayable = ({ products }) => {
           fullInvoice: inv,
           installmentNum: inst.number,
           dueDate: inst.dueDate,
-          value: inst.value,
+          value: safeValue, // Usa o valor seguro
           status: inst.status,
           daysToDue: Math.ceil((new Date(inst.dueDate) - new Date()) / (1000 * 60 * 60 * 24))
         });
@@ -132,13 +140,14 @@ const AccountsPayable = ({ products }) => {
     return items.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
   }, [invoices, selectedMonthStr, selectedCategory, searchTerm, products]);
 
+  // Totais (agora somando safeValue, não haverá NaN)
   const totalDueMonth = payableItems.reduce((acc, item) => acc + (item.status === 'PENDENTE' ? item.value : 0), 0);
   const totalPaidMonth = payableItems.reduce((acc, item) => acc + (item.status === 'PAGO' ? item.value : 0), 0);
 
-  // Lista de Anos para o Dropdown (Atual +/- 5 anos)
+  // Lista de Anos para o Dropdown
   const years = Array.from({length: 11}, (_, i) => new Date().getFullYear() - 5 + i);
 
-  // Fechar o picker se clicar fora (ref simples)
+  // Fechar o picker se clicar fora
   const pickerRef = useRef(null);
   useEffect(() => {
     const handleClickOutside = (event) => {
@@ -153,7 +162,7 @@ const AccountsPayable = ({ products }) => {
   return (
     <div className="space-y-6 animate-fade-in pb-10">
       
-      {/* 1. SELETOR DE DATA ESTILIZADO */}
+      {/* 1. SELETOR DE DATA */}
       <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm flex flex-col md:flex-row justify-between items-center gap-4">
           <div className="flex items-center gap-2">
               <div className="p-2 bg-indigo-50 text-indigo-600 rounded-full">
@@ -166,14 +175,11 @@ const AccountsPayable = ({ products }) => {
           </div>
 
           <div className="flex items-center bg-slate-50 rounded-lg p-1 border border-slate-200">
-              {/* Botão Mês Anterior */}
               <button onClick={handlePrevMonth} className="p-2 hover:bg-white hover:shadow-sm rounded-md transition-all text-slate-500 hover:text-indigo-600">
                   <ChevronLeft size={20} />
               </button>
               
               <div className="flex items-center px-4 gap-2 relative" ref={pickerRef}>
-                  
-                  {/* Nome do Mês (Clicável para abrir Grid) */}
                   <div className="relative">
                       <button 
                         onClick={() => setShowMonthPicker(!showMonthPicker)}
@@ -182,7 +188,6 @@ const AccountsPayable = ({ products }) => {
                           {monthNames[currentDate.getMonth()]}
                       </button>
 
-                      {/* POPUP GRID DE MESES */}
                       {showMonthPicker && (
                         <div className="absolute top-full left-1/2 -translate-x-1/2 mt-3 bg-white border border-slate-200 shadow-xl rounded-lg p-3 z-50 w-64 animate-in fade-in zoom-in-95 duration-200">
                             <div className="grid grid-cols-3 gap-2">
@@ -198,13 +203,11 @@ const AccountsPayable = ({ products }) => {
                                     </button>
                                 ))}
                             </div>
-                            {/* Setinha visual do popup */}
                             <div className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white border-t border-l border-slate-200 transform rotate-45"></div>
                         </div>
                       )}
                   </div>
 
-                  {/* Dropdown de Ano */}
                   <select 
                     value={currentDate.getFullYear()} 
                     onChange={handleYearChange}
@@ -214,7 +217,6 @@ const AccountsPayable = ({ products }) => {
                   </select>
               </div>
 
-              {/* Botão Próximo Mês */}
               <button onClick={handleNextMonth} className="p-2 hover:bg-white hover:shadow-sm rounded-md transition-all text-slate-500 hover:text-indigo-600">
                   <ChevronRight size={20} />
               </button>
@@ -318,7 +320,7 @@ const AccountsPayable = ({ products }) => {
         </div>
       )}
 
-      {/* Modal de Detalhes (Mantido) */}
+      {/* Modal de Detalhes */}
       {detailsModal && (
          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 animate-in fade-in">
             <div className="bg-white w-full max-w-2xl rounded-lg shadow-2xl flex flex-col max-h-[90vh]">
@@ -379,7 +381,7 @@ const AccountsPayable = ({ products }) => {
                                          {inst.status === 'PAGO' && <CheckCircle size={12} className="text-emerald-500"/>}
                                      </div>
                                      <div className="text-slate-500 text-xs mt-1">Vence: {formatDate(inst.dueDate)}</div>
-                                     <div className="font-bold text-slate-800">{formatCurrency(inst.value)}</div>
+                                     <div className="font-bold text-slate-800">{formatCurrency(Number(inst.value))}</div>
                                  </div>
                              ))}
                          </div>

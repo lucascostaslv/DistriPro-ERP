@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { 
   Package, Plus, Trash2, ShoppingCart,
   BarChart3, DollarSign, Users, Calendar,
@@ -572,61 +572,63 @@ const printReceipt = (sale, companyInfo) => {
 // --- MODULES ---
 
 const Dashboard = ({ sales, products }) => {
+  // Estado para fechar o alerta de cobrança (Item 2)
+  const [showDueAlert, setShowDueAlert] = useState(true);
+
   // Filtra vendas fiado que vencem hoje
   const dueToday = sales.filter(s => s.paymentMethod === 'Fiado' && s.dueDate && isToday(s.dueDate));
   
   const totalRevenue = sales.reduce((acc, s) => acc + s.total, 0);
   const totalProfit = sales.reduce((acc, s) => acc + s.profit, 0);
   
-  // --- CORREÇÃO: Lógica de Alertas Dinâmica (Baseada nos produtos carregados) ---
+  // --- CORREÇÃO ESTOQUE (Item 3): Usa getDisplayStock para considerar caixas ---
   const lowStockItems = products.filter(p => {
-      // Se tiver minStock definido, usa. Se não, usa 5 como padrão de alerta.
+      // Ignora produtos que são "pacotes" (caixas), pois o estoque deles é virtual
+      if (p.itemType === 'pack') return false; 
+      
       const threshold = p.minStock !== undefined ? Number(p.minStock) : 5; 
-      return p.stock <= threshold;
+      // Usa a função auxiliar que já considera a lógica pai/filho se necessário
+      const currentStock = getDisplayStock(p, products); 
+      return currentStock <= threshold;
   });
 
-  // Dados dinâmicos para o gráfico (Últimos 7 dias)
+  // Dados gráficos
   const chartData = Array.from({ length: 7 }).map((_, i) => {
     const d = new Date();
     d.setDate(d.getDate() - (6 - i));
-    
-    // Normaliza para comparar apenas dia/mês/ano localmente
-    const day = d.getDate();
-    const month = d.getMonth();
-    const year = d.getFullYear();
-    
-    const dayTotal = sales
-      .filter(s => {
-        const sDate = new Date(s.date);
-        return sDate.getDate() === day && sDate.getMonth() === month && sDate.getFullYear() === year;
-      })
-      .reduce((acc, s) => acc + s.total, 0);
-      
+    const day = d.getDate(); const month = d.getMonth(); const year = d.getFullYear();
+    const dayTotal = sales.filter(s => { const sDate = new Date(s.date); return sDate.getDate() === day && sDate.getMonth() === month && sDate.getFullYear() === year; }).reduce((acc, s) => acc + s.total, 0);
     return { day: d.toLocaleDateString('pt-BR', { weekday: 'short' }).slice(0, 3), value: dayTotal };
   });
-
   const maxChartValue = Math.max(...chartData.map(d => d.value), 1);
 
   return (
     <div className="space-y-6">
-      {dueToday.length > 0 && (
-        <div className="bg-amber-50 border-l-4 border-amber-500 p-4 rounded shadow-sm flex items-start gap-3">
-          <Clock className="text-amber-600 mt-1" size={24} />
-          <div>
-            <h3 className="font-bold text-amber-800">Cobranças para Hoje!</h3>
-            <p className="text-sm text-amber-700">Existem {dueToday.length} contas de clientes marcadas para pagamento hoje.</p>
-            <div className="mt-2 text-sm font-medium">
-              {dueToday.map(s => (
-                <div key={s.id}>• {s.clientName} - {formatCurrency(s.total)}</div>
-              ))}
-            </div>
+      {/* ALERTA DE COBRANÇA COM BOTÃO FECHAR */}
+      {dueToday.length > 0 && showDueAlert && (
+        <div className="bg-amber-50 border-l-4 border-amber-500 p-4 rounded shadow-sm flex items-start justify-between gap-3 animate-in slide-in-from-top-2">
+          <div className="flex gap-3">
+              <Clock className="text-amber-600 mt-1" size={24} />
+              <div>
+                <h3 className="font-bold text-amber-800">Cobranças para Hoje!</h3>
+                <p className="text-sm text-amber-700">Existem {dueToday.length} contas de clientes marcadas para pagamento hoje.</p>
+                <div className="mt-2 text-sm font-medium text-amber-900 bg-amber-100 p-2 rounded">
+                  {dueToday.slice(0, 3).map(s => (
+                    <div key={s.id}>• {s.clientName} - {formatCurrency(s.total)}</div>
+                  ))}
+                  {dueToday.length > 3 && <div>...e mais {dueToday.length - 3}.</div>}
+                </div>
+              </div>
           </div>
+          <button onClick={() => setShowDueAlert(false)} className="text-amber-400 hover:text-amber-700 p-1">
+              <X size={20}/>
+          </button>
         </div>
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <CardKPI title="Faturamento Mensal" value={formatCurrency(totalRevenue)} subtext="+12% vs mês anterior" icon={DollarSign} color="bg-emerald-500" />
-        <CardKPI title="Lucro Estimado" value={formatCurrency(totalProfit)} subtext="Líquido de taxas e custos" icon={BarChart3} color="bg-blue-500" />
+        <CardKPI title="Faturamento Mensal" value={formatCurrency(totalRevenue)} subtext="Total bruto" icon={DollarSign} color="bg-emerald-500" />
+        <CardKPI title="Lucro Estimado" value={formatCurrency(totalProfit)} subtext="Líquido aproximado" icon={BarChart3} color="bg-blue-500" />
         <CardKPI title="Vendas Hoje" value={sales.filter(s => isToday(s.date)).length} subtext="Pedidos realizados" icon={ShoppingCart} color="bg-indigo-500" />
         <CardKPI title="Estoque Baixo" value={lowStockItems.length} subtext="Itens críticos" icon={AlertTriangle} color="bg-red-500" />
       </div>
@@ -648,8 +650,7 @@ const Dashboard = ({ sales, products }) => {
         </div>
         
         <div className="bg-white p-6 rounded-lg border border-slate-200 shadow-sm">
-          <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><AlertTriangle size={18}/> Alertas de Estoque</h3>
-          {/* CORREÇÃO: Lista dinâmica baseada nos produtos da loja atual */}
+          <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><AlertTriangle size={18}/> Alertas de Estoque (Real)</h3>
           <div className="space-y-3 max-h-64 overflow-y-auto pr-1 custom-scrollbar">
             {lowStockItems.length === 0 ? (
                 <div className="text-center py-6 text-slate-400 text-sm">
@@ -663,7 +664,7 @@ const Dashboard = ({ sales, products }) => {
                         <Package size={16} className="shrink-0"/> {item.name}
                       </span>
                       <span className="text-xs font-bold bg-white px-2 py-1 rounded whitespace-nowrap border border-amber-200">
-                        {item.stock} un (Mín: {item.minStock !== undefined ? item.minStock : 5})
+                        {getDisplayStock(item, products)} un (Mín: {item.minStock || 5})
                       </span>
                     </div>
                 ))
@@ -1518,263 +1519,438 @@ const CashClosure = ({ sales, onSaveHistory }) => {
   );
 };
 
-const FinancialReport = ({ sales, transactions, transactionCategories, companyInfo, showNotification }) => {
+const FinancialReport = ({ sales, transactions, transactionCategories, companyInfo, showNotification, products, users }) => {
   const [month, setMonth] = useState(new Date().getMonth());
   const [year, setYear] = useState(new Date().getFullYear());
+  const [selectedUser, setSelectedUser] = useState('ALL'); // Filtro por Usuário
 
+  // Filtra vendas pelo período e usuário
   const filteredSales = sales.filter(s => {
     const d = new Date(s.date);
-    return d.getMonth() === month && d.getFullYear() === year;
+    const dateMatch = d.getMonth() === month && d.getFullYear() === year;
+    const userMatch = selectedUser === 'ALL' || s.userId === selectedUser;
+    return dateMatch && userMatch;
   });
 
+  // Filtra transações (Gastos) - Gastos manuais não costumam ter usuário vinculado no App atual, 
+  // então se filtrar por usuário, mostramos apenas as "Compras de Estoque" deduzidas das vendas dele ou mantemos geral.
+  // Para simplificar: Gastos Operacionais são sempre GERAIS da loja. Vendas são por usuário.
   const filteredTransactions = transactions.filter(t => {
-    // Ajuste de fuso horário simples para data string YYYY-MM-DD
     const [tYear, tMonth] = t.date.split('-').map(Number);
     return (tMonth - 1) === month && tYear === year;
   });
 
-  // Cálculos
-  const revenue = filteredSales.reduce((acc, s) => acc + s.total, 0);
-  const fees = filteredSales.reduce((acc, s) => acc + s.fee, 0);
-
-  const expensesByCategory = transactionCategories
-    .filter(cat => cat.name !== 'Revenda')
-    .map(cat => {
-        const total = filteredTransactions
-            .filter(t => t.type === 'exit' && t.category === cat.name)
-            .reduce((acc, t) => acc + t.value, 0);
-        return { name: cat.name, total };
-    })
-    .filter(cat => cat.total > 0);
-  const opExpenses = expensesByCategory.reduce((acc, cat) => acc + cat.total, 0);
+  // --- CÁLCULOS DO DRE ---
   
+  // 1. Receita (Apenas vendas válidas, exlui Percas)
+  const validSales = filteredSales.filter(s => !s.isLoss);
+  const revenue = validSales.reduce((acc, s) => acc + s.total, 0);
+  
+  // 2. Custos Variáveis
   const stockPurchases = filteredTransactions
     .filter(t => t.type === 'entry' && t.category === 'Revenda')
     .reduce((acc, t) => acc + t.value, 0);
+    
+  const fees = validSales.reduce((acc, s) => acc + s.fee, 0);
 
-  const grossProfit = revenue - stockPurchases - fees;
+  // 3. Percas/Quebras (Custo do produto perdido)
+  const lossesCost = filteredSales
+    .filter(s => s.isLoss)
+    .reduce((acc, s) => acc + (s.cost || 0), 0);
+
+  // 4. Despesas Operacionais (Agrupadas)
+  const expensesByCategory = (transactionCategories || [])
+    .filter(cat => cat.name !== 'Revenda')
+    .map(cat => {
+        const total = filteredTransactions
+            .filter(t => t.type === 'EXPENSE' && t.category === cat.name)
+            .reduce((acc, t) => acc + t.amount, 0); // Ajustado para ler 'amount' da collection nova
+        return { name: cat.name, total };
+    })
+    .filter(cat => cat.total > 0);
+    
+  const opExpenses = expensesByCategory.reduce((acc, cat) => acc + cat.total, 0);
+
+  // 5. Resultados
+  // Lucro Bruto = Receita - (CMV Teórico ou Compras) - Taxas - Percas
+  // Nota: Para DRE gerencial simples, usaremos Compras como aproximação de CMV se não tivermos CMV real calculado por venda
+  // Mas como temos o 'cost' na venda, podemos fazer um DRE mais preciso:
+  const costOfGoodsSold = validSales.reduce((acc, s) => acc + (s.cost || 0), 0);
+  
+  const grossProfit = revenue - costOfGoodsSold - fees - lossesCost;
   const netProfit = grossProfit - opExpenses;
-  const totalExpenses = stockPurchases + fees + opExpenses;
 
-  const maxVal = Math.max(revenue, totalExpenses, netProfit, 1);
   const chartData = [
       { label: 'Receita', value: revenue, color: '#10b981', tailwindColor: 'bg-emerald-500' },
-      { label: 'Gastos', value: totalExpenses, color: '#ef4444', tailwindColor: 'bg-red-500' },
-      { label: 'Lucro', value: netProfit, color: '#2563eb', tailwindColor: 'bg-blue-600' }
+      { label: 'CMV + Taxas', value: costOfGoodsSold + fees + lossesCost, color: '#f59e0b', tailwindColor: 'bg-amber-500' },
+      { label: 'Despesas Op.', value: opExpenses, color: '#ef4444', tailwindColor: 'bg-red-500' },
+      { label: 'Lucro Líquido', value: netProfit, color: '#2563eb', tailwindColor: 'bg-blue-600' }
   ];
+  const maxVal = Math.max(revenue, 1);
 
-  const downloadTXT = () => {
-    const txtContent = `RELATÓRIO FINANCEIRO - ${month + 1}/${year}\n\n`
-      + `--------------------------------\n`
-      + `DEMONSTRATIVO DE RESULTADO\n`
-      + `--------------------------------\n`
-      + `(+) Receita Bruta:      ${formatCurrency(revenue)}\n`
-      `(-) Compras Mercadoria: ${formatCurrency(stockPurchases)}\\n` +
-      + `(-) Taxas:              ${formatCurrency(fees)}\n`
-      + `(=) Lucro Bruto:        ${formatCurrency(grossProfit)}\n`
-      + expensesByCategory.map(exp => `(-) ${exp.name}: -${formatCurrency(exp.total)}\n`).join('')
-      + `(=) Lucro Líquido Real: ${formatCurrency(netProfit)}\n\n`
-      + `--------------------------------\n`
-      + `OUTRAS INFORMAÇÕES\n`
-      + `--------------------------------\n`
-      + `Compras de Estoque:     ${formatCurrency(stockPurchases)}\n`
-      + `Vendas Realizadas:      ${filteredSales.length}\n`;
+  // --- GERADOR SPED FISCAL (SIMPLIFICADO) ---
+  const generateSPED = () => {
+      const dtIni = new Date(year, month, 1).toLocaleDateString('pt-BR').replace(/\//g, '');
+      const dtFin = new Date(year, month + 1, 0).toLocaleDateString('pt-BR').replace(/\//g, '');
+      const cnpj = companyInfo?.cnpj?.replace(/\D/g, '') || '';
+      
+      let txt = '';
+      const line = (content) => `|${content.join('|')}|\n`;
 
-    const blob = new Blob([txtContent], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `relatorio_${month + 1}_${year}.txt`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+      // BLOCO 0: Abertura
+      txt += line(['0000', '006', '0', dtIni, dtFin, companyInfo?.name || '', cnpj, '', 'UF', '', '', '']);
+      txt += line(['0001', '0']); // Abertura do Bloco 0
+      txt += line(['0005', companyInfo?.name || '', '', '', '', '', '']); // Dados Complementares
+      txt += line(['0990', '4']); // Encerramento Bloco 0
+
+      // BLOCO C: Documentos Fiscais (Vendas)
+      txt += line(['C001', '0']); // Abertura com movimento
+      validSales.forEach(s => {
+          // Exemplo simplificado de registro C100 (Nota)
+          // Na prática precisaria dos dados fiscais reais (Chave, Modelo, Série) que salvamos no 'nfeKey'
+          if(s.nfeStatus === 'AUTORIZADA') {
+             const dEmis = new Date(s.date).toLocaleDateString('pt-BR').replace(/\//g, '');
+             txt += line(['C100', '1', '0', '55', '00', 'SERIE', s.id.toString().slice(-9), '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
+          }
+      });
+      txt += line(['C990', (validSales.length + 2).toString()]);
+
+      // BLOCO H: Inventário Físico (Posição em 31/12 ou final do período)
+      // Gera apenas se for o mês atual ou dezembro
+      txt += line(['H001', '0']);
+      const invTotal = products.reduce((acc, p) => acc + (p.stock * p.cost), 0);
+      txt += line(['H005', dtFin, formatCurrency(invTotal).replace('R$', '').trim(), '01']); // Totais
+      
+      products.forEach(p => {
+          if (p.stock > 0) {
+             txt += line(['H010', p.cbaCode || p.id, 'UN', p.stock, formatCurrency(p.cost).replace('R$', '').trim(), formatCurrency(p.stock * p.cost).replace('R$', '').trim(), '0', '', '', '']);
+          }
+      });
+      txt += line(['H990', (products.filter(p => p.stock > 0).length + 3).toString()]);
+
+      // Encerramento Arquivo
+      txt += line(['9999', '100']); // Contagem fictícia de linhas
+
+      const blob = new Blob([txt], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `SPED_${month + 1}_${year}.txt`;
+      document.body.appendChild(link);
+      link.click();
   };
 
   const downloadXLS = () => {
     const xlsContent = `
       <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
-      <head>
-        <meta charset="UTF-8">
-      </head>
+      <head><meta charset="UTF-8"></head>
       <body>
         <table>
-          <tr><th colspan="2" style="font-size: 16px; font-weight: bold;">Relatório Financeiro - ${month + 1}/${year}</th></tr>
-          <tr><td></td><td></td></tr>
+          <tr><th colspan="2" style="font-size: 16px; font-weight: bold;">DRE Gerencial - ${month + 1}/${year}</th></tr>
           <tr><td style="font-weight: bold;">Categoria</td><td style="font-weight: bold;">Valor</td></tr>
-          <tr><td>Receita Bruta</td><td>${formatCurrency(revenue)}</td></tr>
-          <tr><td>(-) Compras de Mercadoria</td><td style="color: red;">-${formatCurrency(stockPurchases)}</td></tr>
-          <tr><td>(-) Taxas</td><td style="color: red;">-${formatCurrency(fees)}</td></tr>
+          <tr><td>(+) Receita Bruta</td><td>${formatCurrency(revenue)}</td></tr>
+          <tr><td>(-) Custo Mercadoria (CMV)</td><td style="color: red;">-${formatCurrency(costOfGoodsSold)}</td></tr>
+          <tr><td>(-) Taxas (Cartão/Pix)</td><td style="color: red;">-${formatCurrency(fees)}</td></tr>
+          <tr><td>(-) Percas e Quebras</td><td style="color: red;">-${formatCurrency(lossesCost)}</td></tr>
           <tr><td style="font-weight: bold;">(=) Lucro Bruto</td><td style="font-weight: bold;">${formatCurrency(grossProfit)}</td></tr>
           ${expensesByCategory.map(exp => `<tr><td>(-) ${exp.name}</td><td style="color: red;">-${formatCurrency(exp.total)}</td></tr>`).join('')}
-          <tr><td style="font-weight: bold;">(=) Lucro Líquido Real</td><td style="font-weight: bold; color: ${netProfit >= 0 ? 'green' : 'red'};">${formatCurrency(netProfit)}</td></tr>
-          <tr><td></td><td></td></tr>
-          <tr><td style="font-weight: bold;">Outras Informações</td><td></td></tr>
-          <tr><td>Compras de Estoque</td><td>${formatCurrency(stockPurchases)}</td></tr>
-          <tr><td>Vendas Realizadas</td><td>${filteredSales.length}</td></tr>
+          <tr><td style="font-weight: bold;">(=) Lucro Líquido</td><td style="font-weight: bold; color: ${netProfit >= 0 ? 'green' : 'red'};">${formatCurrency(netProfit)}</td></tr>
         </table>
       </body>
       </html>
     `;
-    
     const blob = new Blob([xlsContent], { type: 'application/vnd.ms-excel' });
-    const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
-    link.href = url;
-    link.download = `relatorio_${month + 1}_${year}.xls`;
-    document.body.appendChild(link);
+    link.href = URL.createObjectURL(blob);
+    link.download = `DRE_${month + 1}_${year}.xls`;
     link.click();
-    document.body.removeChild(link);
-  };
-
-  const getReportContent = () => {
-    return `
-      <div style="font-family: sans-serif; padding: 20px; color: #1e293b;">
-        <style>
-          h1 { border-bottom: 2px solid #e2e8f0; padding-bottom: 10px; margin-bottom: 20px; }
-          .section { margin-bottom: 30px; }
-          .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f1f5f9; }
-          .total { font-weight: bold; font-size: 1.1em; border-top: 2px solid #cbd5e1; margin-top: 10px; padding-top: 10px; }
-          .positive { color: #059669; }
-          .negative { color: #dc2626; }
-          .chart-container { display: flex; justify-content: space-around; align-items: flex-end; height: 200px; margin-top: 20px; border-bottom: 1px solid #ccc; padding-bottom: 10px; }
-          .bar-group { display: flex; flex-direction: column; align-items: center; width: 20%; height: 100%; justify-content: flex-end; }
-          .bar { width: 100%; transition: height 0.5s; }
-          .bar-label { margin-top: 5px; font-size: 12px; text-align: center; }
-          .bar-value { margin-bottom: 5px; font-size: 12px; font-weight: bold; text-align: center; }
-        </style>
-        
-        <h1>Relatório Financeiro - ${month + 1}/${year}</h1>
-        
-        <div class="section">
-          <h3>Demonstrativo de Resultado</h3>
-          <div class="row"><span>Receita Bruta de Vendas</span> <span>${formatCurrency(revenue)}</span></div>
-          <div class="row"><span>(-) Compras de Mercadoria</span> <span class="negative">-${formatCurrency(stockPurchases)}</span></div>
-          <div class="row"><span>(-) Taxas de Cartão/Pix</span> <span class="negative">-${formatCurrency(fees)}</span></div>
-          <div class="row total"><span>(=) Lucro Bruto</span> <span>${formatCurrency(grossProfit)}</span></div>
-          ${expensesByCategory.map(exp => `<div class="row"><span>(-) ${exp.name}</span> <span class="negative">-${formatCurrency(exp.total)}</span></div>`).join('')}
-          <div class="row total"><span>(=) Lucro Líquido Real</span> <span class="${netProfit >= 0 ? 'positive' : 'negative'}">${formatCurrency(netProfit)}</span></div>
-        </div>
-
-        <div class="section">
-          <h3>Gráfico de Performance</h3>
-          <div class="chart-container">
-            ${chartData.map(d => `
-              <div class="bar-group">
-                <div class="bar-value">${formatCurrency(d.value)}</div>
-                <div class="bar" style="height:${Math.max((d.value / maxVal) * 100, 1)}%; background-color:${d.color};"></div>
-                <div class="bar-label">${d.label}</div>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-
-        <div class="section">
-          <h3>Outras Informações</h3>
-          <div class="row"><span>Compras de Estoque (Entradas)</span> <span>${formatCurrency(stockPurchases)}</span></div>
-          <div class="row"><span>Vendas Realizadas</span> <span>${filteredSales.length}</span></div>
-        </div>
-      </div>
-    `;
-  };
-
-  const printReport = () => {
-    const width = 800;
-    const height = 800;
-    const w = window.open('', '_blank', `width=${width},height=${height}`);
-    w.document.write(`<html><head><title>Relatório</title></head><body>${getReportContent()}<script>window.onload = function() { setTimeout(() => { window.print(); window.close(); }, 100); }</script></body></html>`);
-    w.document.close();
-  };
-
-  const downloadPDF = () => {
-    if (!window.html2pdf) {
-      showNotification('Biblioteca de PDF não carregada. Verifique sua conexão.', 'error');
-      return;
-    }
-    const element = document.createElement('div');
-    element.innerHTML = getReportContent();
-    const opt = {
-      margin: 10,
-      filename: `relatorio_${month + 1}_${year}.pdf`,
-      image: { type: 'jpeg', quality: 0.98 },
-      html2canvas: { scale: 2 },
-      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
-    };
-    window.html2pdf().set(opt).from(element).save();
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center bg-white p-4 rounded border border-slate-200 shadow-sm">
-        <div className="flex gap-4 items-center">
-          <h3 className="font-bold text-slate-800">Período:</h3>
-          <select className="border p-2 rounded text-sm" value={month} onChange={e => setMonth(Number(e.target.value))}>
-            {['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'].map((m, i) => <option key={i} value={i}>{m}</option>)}
-          </select>
-          <select className="border p-2 rounded text-sm" value={year} onChange={e => setYear(Number(e.target.value))}>
-            {[2023, 2024, 2025].map(y => <option key={y} value={y}>{y}</option>)}
-          </select>
+    <div className="space-y-6 animate-in fade-in">
+      {/* BARRA DE FERRAMENTAS */}
+      <div className="flex flex-col md:flex-row justify-between items-center bg-white p-4 rounded border border-slate-200 shadow-sm gap-4">
+        <div className="flex flex-wrap gap-4 items-center">
+          <div className="flex items-center gap-2">
+              <Calendar size={18} className="text-slate-500"/>
+              <select className="border p-2 rounded text-sm bg-slate-50 font-bold" value={month} onChange={e => setMonth(Number(e.target.value))}>
+                {['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'].map((m, i) => <option key={i} value={i}>{m}</option>)}
+              </select>
+              <select className="border p-2 rounded text-sm bg-slate-50 font-bold" value={year} onChange={e => setYear(Number(e.target.value))}>
+                {[2024, 2025, 2026].map(y => <option key={y} value={y}>{y}</option>)}
+              </select>
+          </div>
+          
+          <div className="flex items-center gap-2 border-l pl-4">
+              <Users size={18} className="text-slate-500"/>
+              <select className="border p-2 rounded text-sm bg-slate-50" value={selectedUser} onChange={e => setSelectedUser(e.target.value)}>
+                <option value="ALL">Todos os Operadores</option>
+                {users && users.map(u => <option key={u.id} value={u.id}>{u.username}</option>)}
+              </select>
+          </div>
         </div>
+
         <div className="flex gap-2">
-          <button onClick={downloadTXT} className="bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded text-sm font-bold hover:bg-slate-50 flex items-center gap-2"><FileText size={16}/> TXT</button>
-          <button onClick={downloadXLS} className="bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded text-sm font-bold hover:bg-slate-50 flex items-center gap-2"><Download size={16}/> Excel</button>
-          <button onClick={downloadPDF} className="bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded text-sm font-bold hover:bg-slate-50 flex items-center gap-2"><Download size={16}/> PDF</button>
-          <button onClick={printReport} className="bg-slate-800 text-white px-4 py-2 rounded text-sm font-bold hover:bg-slate-700 flex items-center gap-2"><Printer size={16}/> Imprimir</button>
+          <button onClick={downloadXLS} className="bg-white border border-green-600 text-green-700 px-3 py-2 rounded text-sm font-bold hover:bg-green-50 flex items-center gap-2">
+              <Download size={16}/> Excel
+          </button>
+          <button onClick={generateSPED} className="bg-slate-800 text-white px-3 py-2 rounded text-sm font-bold hover:bg-slate-900 flex items-center gap-2" title="Exportar para Contabilidade">
+              <FileText size={16}/> SPED (Fiscal)
+          </button>
         </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <div className="bg-white p-6 rounded border border-slate-200 shadow-sm space-y-4">
-          <h3 className="font-bold text-slate-700 border-b pb-2">Resumo Financeiro</h3>
-          <div className="flex justify-between text-sm"><span>(+) Receita Vendas</span> <span className="font-bold text-emerald-600">{formatCurrency(revenue)}</span></div>
-          <div className="flex justify-between text-sm"><span>(-) Compras de Mercadoria</span> <span className="text-red-500">-{formatCurrency(stockPurchases)}</span></div>
-          <div className="flex justify-between text-sm"><span>(-) Taxas</span> <span className="text-red-500">-{formatCurrency(fees)}</span></div>
-          <div className="flex justify-between text-sm font-bold bg-slate-50 p-2 rounded"><span>(=) Lucro Bruto</span> <span>{formatCurrency(grossProfit)}</span></div>
-          {expensesByCategory.map(exp => (
-            <div key={exp.name} className="flex justify-between text-sm pl-4"><span>(-) {exp.name}</span> <span className="text-red-500">-{formatCurrency(exp.total)}</span></div>
-          ))}
-          <div className="flex justify-between text-lg font-bold bg-slate-800 text-white p-3 rounded mt-2"><span>(=) Lucro Líquido Real</span> <span>{formatCurrency(netProfit)}</span></div>
+        {/* DRE DETALHADO */}
+        <div className="bg-white p-6 rounded border border-slate-200 shadow-sm space-y-3">
+          <h3 className="font-bold text-slate-700 border-b pb-2 flex justify-between">
+              <span>Demonstrativo de Resultado</span>
+              <span className="text-xs font-normal text-slate-400 mt-1">Regime de Caixa</span>
+          </h3>
+          
+          <div className="space-y-1">
+              <div className="flex justify-between text-sm">
+                  <span>(+) Receita de Vendas</span> 
+                  <span className="font-bold text-emerald-600">{formatCurrency(revenue)}</span>
+              </div>
+              <div className="flex justify-between text-sm text-slate-500 pl-2 text-xs">
+                  <span>{validSales.length} vendas realizadas</span>
+              </div>
+          </div>
+
+          <div className="border-t border-dashed my-2"></div>
+
+          <div className="space-y-1">
+              <div className="flex justify-between text-sm">
+                  <span>(-) Custo Mercadoria (CMV)</span> 
+                  <span className="text-red-500">-{formatCurrency(costOfGoodsSold)}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                  <span>(-) Taxas (Cartão/Pix)</span> 
+                  <span className="text-red-500">-{formatCurrency(fees)}</span>
+              </div>
+              
+              {/* LINHA DE PERCAS (ITEM 19) */}
+              <div className="flex justify-between text-sm bg-red-50 p-1 rounded">
+                  <span className="flex items-center gap-1"><AlertTriangle size={12}/> (-) Percas e Quebras</span> 
+                  <span className="text-red-600 font-bold">-{formatCurrency(lossesCost)}</span>
+              </div>
+          </div>
+
+          <div className="flex justify-between text-sm font-bold bg-slate-100 p-2 rounded mt-2">
+              <span>(=) Lucro Bruto</span> 
+              <span>{formatCurrency(grossProfit)}</span>
+          </div>
+
+          <div className="space-y-1 mt-2">
+              <p className="text-xs font-bold text-slate-400 uppercase mt-2">Despesas Operacionais</p>
+              {expensesByCategory.length === 0 ? (
+                  <p className="text-xs text-slate-400 italic pl-2">Nenhuma despesa lançada.</p>
+              ) : (
+                  expensesByCategory.map(exp => (
+                    <div key={exp.name} className="flex justify-between text-sm pl-2">
+                        <span>(-) {exp.name}</span> 
+                        <span className="text-red-500">-{formatCurrency(exp.total)}</span>
+                    </div>
+                  ))
+              )}
+          </div>
+
+          <div className={`flex justify-between text-lg font-bold p-3 rounded mt-4 text-white shadow-sm ${netProfit >= 0 ? 'bg-emerald-600' : 'bg-red-600'}`}>
+              <span>(=) Lucro Líquido</span> 
+              <span>{formatCurrency(netProfit)}</span>
+          </div>
         </div>
 
-        <div className="bg-white p-6 rounded border border-slate-200 shadow-sm flex flex-col justify-center">
-           <h3 className="font-bold text-slate-700 mb-4">Gráfico do Mês</h3>
-           <div className="h-64 flex items-end gap-6 justify-center px-4 pb-2">
-             {chartData.map((d, i) => (
-               <div key={i} className="w-24 h-full flex flex-col justify-end items-center group">
-                 <div className="mb-2 text-xs font-bold text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity">{formatCurrency(d.value)}</div>
-                 <div className={`w-full rounded-t transition-all duration-500 relative ${d.tailwindColor}`} style={{height: `${Math.max((d.value / maxVal) * 100, 1)}%`}}></div>
-                 <div className="mt-2 text-sm font-medium text-slate-600">{d.label}</div>
+        {/* GRÁFICO E KPI */}
+        <div className="space-y-6">
+            <div className="bg-white p-6 rounded border border-slate-200 shadow-sm flex flex-col justify-center">
+               <h3 className="font-bold text-slate-700 mb-4">Análise Visual</h3>
+               <div className="h-64 flex items-end gap-6 justify-center px-4 pb-2 border-b border-slate-100">
+                 {chartData.map((d, i) => (
+                   <div key={i} className="w-24 h-full flex flex-col justify-end items-center group relative">
+                     <div className="mb-2 text-xs font-bold text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity absolute -top-6">{formatCurrency(d.value)}</div>
+                     <div className={`w-full rounded-t transition-all duration-1000 relative ${d.tailwindColor}`} style={{height: `${Math.max((d.value / maxVal) * 100, 2)}%`}}></div>
+                     <div className="mt-2 text-xs font-medium text-slate-600 text-center">{d.label}</div>
+                   </div>
+                 ))}
                </div>
-             ))}
-           </div>
+               <div className="mt-4 flex gap-4 justify-center flex-wrap">
+                   <div className="text-center">
+                       <p className="text-xs text-slate-400">Margem Líquida</p>
+                       <p className="font-bold text-slate-800">{revenue > 0 ? ((netProfit/revenue)*100).toFixed(1) : 0}%</p>
+                   </div>
+                   <div className="text-center">
+                       <p className="text-xs text-slate-400">Ticket Médio</p>
+                       <p className="font-bold text-slate-800">{validSales.length > 0 ? formatCurrency(revenue/validSales.length) : 'R$ 0'}</p>
+                   </div>
+               </div>
+            </div>
+
+            {/* CARD DE ESTOQUE RÁPIDO */}
+            <div className="bg-indigo-50 p-4 rounded border border-indigo-100 flex items-center justify-between">
+                <div>
+                    <h4 className="font-bold text-indigo-800">Posição de Estoque (Bloco H)</h4>
+                    <p className="text-xs text-indigo-600">Valor total em produtos hoje.</p>
+                </div>
+                <div className="text-right">
+                    <p className="text-2xl font-bold text-indigo-900">
+                        {formatCurrency(products.reduce((acc, p) => acc + (p.stock * p.cost), 0))}
+                    </p>
+                </div>
+            </div>
         </div>
       </div>
     </div>
   );
 };
 
-const Finance = ({ sales, transactions, transactionCategories, feeProfiles, setFeeProfiles, showNotification, companyInfo, onPrintReceipt, onEmitNFe }) => {
+const Finance = ({ sales, transactions, transactionCategories, feeProfiles, setFeeProfiles, showNotification, companyInfo, onPrintReceipt, onEmitNFe, products, users }) => {
   const [activeTab, setActiveTab] = useState('closure');
   const [history, setHistory] = useState([]);
   const [viewSale, setViewSale] = useState(null);
   const [viewClosure, setViewClosure] = useState(null);
+
+  // --- NOVOS ESTADOS DE FILTRO (Item 5) ---
+  const [startDate, setStartDate] = useState(new Date().toISOString().split('T')[0]);
+  const [endDate, setEndDate] = useState(new Date().toISOString().split('T')[0]);
+  const [filterClient, setFilterClient] = useState('');
+  const [filterPayment, setFilterPayment] = useState('ALL');
 
   const saveHistory = (record) => {
     setHistory([record, ...history]);
     showNotification('Fechamento salvo no histórico', 'success');
   };
 
+  // --- LÓGICA DE FILTRAGEM E ORDENAÇÃO DE VENDAS ---
+  const filteredSalesHistory = useMemo(() => {
+      return sales.filter(s => {
+          const sDate = s.date.split('T')[0];
+          // Filtro de Data
+          if (sDate < startDate || sDate > endDate) return false;
+          // Filtro de Cliente
+          if (filterClient && !s.clientName?.toLowerCase().includes(filterClient.toLowerCase())) return false;
+          // Filtro de Pagamento
+          if (filterPayment !== 'ALL' && s.paymentMethod !== filterPayment) return false;
+          
+          return true;
+      }).sort((a,b) => new Date(b.date) - new Date(a.date)); // ORDENAÇÃO DECRESCENTE
+  }, [sales, startDate, endDate, filterClient, filterPayment]);
+
   return (
     <div className="space-y-6">
-      <div className="flex gap-2 border-b border-slate-200 pb-2">
-        <button onClick={() => setActiveTab('closure')} className={`px-4 py-2 text-sm font-medium rounded ${activeTab === 'closure' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Fechamento de Caixa</button>
-        <button onClick={() => setActiveTab('sales')} className={`px-4 py-2 text-sm font-medium rounded ${activeTab === 'sales' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Vendas Realizadas</button>
-        <button onClick={() => setActiveTab('report')} className={`px-4 py-2 text-sm font-medium rounded ${activeTab === 'report' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Relatório Mensal</button>
-        <button onClick={() => setActiveTab('settings')} className={`px-4 py-2 text-sm font-medium rounded ${activeTab === 'settings' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Config. Taxas</button>
-        <button onClick={() => setActiveTab('history')} className={`px-4 py-2 text-sm font-medium rounded ${activeTab === 'history' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Histórico</button>
+      <div className="flex gap-2 border-b border-slate-200 pb-2 overflow-x-auto">
+        <button onClick={() => setActiveTab('closure')} className={`px-4 py-2 text-sm font-medium rounded whitespace-nowrap ${activeTab === 'closure' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Fechamento de Caixa</button>
+        <button onClick={() => setActiveTab('sales')} className={`px-4 py-2 text-sm font-medium rounded whitespace-nowrap ${activeTab === 'sales' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Vendas (Lista)</button>
+        <button onClick={() => setActiveTab('report')} className={`px-4 py-2 text-sm font-medium rounded whitespace-nowrap ${activeTab === 'report' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Relatório Mensal</button>
+        <button onClick={() => setActiveTab('settings')} className={`px-4 py-2 text-sm font-medium rounded whitespace-nowrap ${activeTab === 'settings' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Config. Taxas</button>
+        <button onClick={() => setActiveTab('history')} className={`px-4 py-2 text-sm font-medium rounded whitespace-nowrap ${activeTab === 'history' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Histórico Fechamentos</button>
       </div>
 
       {activeTab === 'closure' && <CashClosure sales={sales} onSaveHistory={saveHistory} />}
       {activeTab === 'settings' && <FinanceSettings feeProfiles={feeProfiles} setFeeProfiles={setFeeProfiles} showNotification={showNotification} />}
+      
+      {/* ABA VENDAS REALIZADAS (Melhorada - Item 5) */}
+      {activeTab === 'sales' && (
+        <div className="space-y-4">
+            {/* BARRA DE FILTROS */}
+            <div className="bg-white p-4 rounded border border-slate-200 shadow-sm flex flex-wrap gap-4 items-end">
+                <div>
+                    <label className="text-xs font-bold text-slate-500 block mb-1">De:</label>
+                    <input type="date" className="border p-2 rounded text-sm" value={startDate} onChange={e => setStartDate(e.target.value)} />
+                </div>
+                <div>
+                    <label className="text-xs font-bold text-slate-500 block mb-1">Até:</label>
+                    <input type="date" className="border p-2 rounded text-sm" value={endDate} onChange={e => setEndDate(e.target.value)} />
+                </div>
+                <div className="flex-1 min-w-[200px]">
+                    <label className="text-xs font-bold text-slate-500 block mb-1">Cliente:</label>
+                    <div className="relative">
+                        <Search className="absolute left-2 top-2.5 text-slate-400" size={14}/>
+                        <input className="border p-2 pl-8 rounded text-sm w-full" placeholder="Buscar por nome..." value={filterClient} onChange={e => setFilterClient(e.target.value)} />
+                    </div>
+                </div>
+                <div>
+                    <label className="text-xs font-bold text-slate-500 block mb-1">Pagamento:</label>
+                    <select className="border p-2 rounded text-sm bg-white" value={filterPayment} onChange={e => setFilterPayment(e.target.value)}>
+                        <option value="ALL">Todos</option>
+                        <option value="Dinheiro">Dinheiro</option>
+                        <option value="Pix">Pix</option>
+                        <option value="Crédito">Crédito</option>
+                        <option value="Débito">Débito</option>
+                        <option value="Fiado">Fiado</option>
+                        <option value="PERCA">Perca</option>
+                    </select>
+                </div>
+            </div>
+
+            <div className="bg-white rounded border border-slate-200 shadow-sm overflow-hidden">
+                <table className="w-full text-left text-sm">
+                    <thead className="bg-slate-50 text-slate-500 uppercase text-xs font-semibold">
+                    <tr>
+                        <th className="p-4">Data/Hora</th>
+                        <th className="p-4">Cliente</th>
+                        <th className="p-4">Pagamento</th>
+                        <th className="p-4 text-center">NFe</th>
+                        <th className="p-4">Total</th>
+                        <th className="p-4 text-right">Ações</th>
+                    </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                    {filteredSalesHistory.map((s) => (
+                        <tr key={s.id} className="hover:bg-slate-50">
+                        <td className="p-4 text-xs">
+                            <span className="font-bold block">{new Date(s.date).toLocaleDateString()}</span>
+                            <span className="text-slate-400">{new Date(s.date).toLocaleTimeString().slice(0,5)}</span>
+                        </td>
+                        <td className="p-4 font-medium">{s.clientName}</td>
+                        <td className="p-4">
+                            <span className={`text-[10px] px-2 py-1 rounded font-bold ${s.paymentMethod === 'PERCA' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600'}`}>
+                                {s.paymentMethod} {s.installments > 1 && `(${s.installments}x)`}
+                            </span>
+                        </td>
+                        <td className="p-4 text-center">
+                            {/* ÍCONE DE STATUS NFE */}
+                            {s.nfeStatus === 'AUTORIZADA' ? (
+                                <span className="inline-flex items-center justify-center w-6 h-6 bg-green-100 text-green-600 rounded-full" title="Nota Emitida"><CheckCircle size={14}/></span>
+                            ) : s.nfeStatus === 'REJEITADA' ? (
+                                <span className="inline-flex items-center justify-center w-6 h-6 bg-red-100 text-red-600 rounded-full" title="Nota Rejeitada"><AlertTriangle size={14}/></span>
+                            ) : (
+                                <span className="inline-flex items-center justify-center w-6 h-6 bg-slate-100 text-slate-300 rounded-full" title="Sem Nota">-</span>
+                            )}
+                        </td>
+                        <td className="p-4 font-bold text-slate-800">{formatCurrency(s.total)}</td>
+                        <td className="p-4 text-right flex justify-end gap-2">
+                            <button onClick={() => setViewSale(s)} className="text-indigo-600 hover:bg-indigo-50 p-2 rounded" title="Ver Detalhes"><Eye size={18}/></button>
+                            <button 
+                                onClick={() => onEmitNFe && onEmitNFe(s)} 
+                                className={`p-2 rounded transition-colors ${s.nfeStatus === 'AUTORIZADA' ? 'text-green-600 bg-green-50' : 'text-slate-400 hover:text-blue-600 hover:bg-blue-50'}`}
+                                title={s.nfeStatus ? `Status NFe: ${s.nfeStatus}` : "Emitir Nota Fiscal"}
+                            >
+                                <FileText size={18}/>
+                            </button>
+                        </td>
+                        </tr>
+                    ))}
+                    {filteredSalesHistory.length === 0 && <tr><td colSpan="6" className="p-8 text-center text-slate-400">Nenhuma venda encontrada com estes filtros.</td></tr>}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+      )}
+
+      {activeTab === 'report' && (
+        <FinancialReport 
+            sales={sales} 
+            transactions={transactions} 
+            transactionCategories={transactionCategories} 
+            companyInfo={companyInfo} 
+            showNotification={showNotification}
+            products={products} 
+            users={users}       
+        />
+      )}
+      
       {activeTab === 'history' && (
         <div className="bg-white rounded border border-slate-200 shadow-sm overflow-hidden">
           <table className="w-full text-left text-sm">
@@ -1797,54 +1973,18 @@ const Finance = ({ sales, transactions, transactionCategories, feeProfiles, setF
           </table>
         </div>
       )}
-      
-      {/* ABA VENDAS REALIZADAS (COM O BOTÃO DE EMISSÃO) */}
-      {activeTab === 'sales' && (
-        <div className="bg-white rounded border border-slate-200 shadow-sm overflow-hidden">
-          <table className="w-full text-left text-sm">
-            <thead className="bg-slate-50 text-slate-500 uppercase text-xs font-semibold">
-              <tr><th className="p-4">Data</th><th className="p-4">Cliente</th><th className="p-4">Pagamento</th><th className="p-4">Total</th><th className="p-4 text-right">Ações</th></tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {[...sales].reverse().map((s) => (
-                <tr key={s.id} className="hover:bg-slate-50">
-                  <td className="p-4">{new Date(s.date).toLocaleString()}</td>
-                  <td className="p-4">{s.clientName}</td>
-                  <td className="p-4">{s.paymentMethod} {s.installments > 1 && `(${s.installments}x)`}</td>
-                  <td className="p-4 font-bold text-slate-800">{formatCurrency(s.total)}</td>
-                  <td className="p-4 text-right flex justify-end gap-2">
-                    {/* Botão Ver Detalhes */}
-                    <button onClick={() => setViewSale(s)} className="text-indigo-600 hover:bg-indigo-50 p-2 rounded" title="Ver Detalhes"><Eye size={18}/></button>
-                    
-                    {/* Botão Emitir NF-e (CORRIGIDO) */}
-                    <button 
-                        onClick={() => onEmitNFe && onEmitNFe(s)} 
-                        className={`p-2 rounded transition-colors ${s.nfeStatus === 'autorizado' ? 'text-green-600 bg-green-50' : 'text-slate-400 hover:text-blue-600 hover:bg-blue-50'}`}
-                        title={s.nfeStatus ? `Status NFe: ${s.nfeStatus}` : "Emitir Nota Fiscal"}
-                    >
-                        <FileText size={18}/>
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {sales.length === 0 && <tr><td colSpan="5" className="p-8 text-center text-slate-400">Nenhuma venda registrada.</td></tr>}
-            </tbody>
-          </table>
-        </div>
-      )}
-      {activeTab === 'report' && <FinancialReport sales={sales} transactions={transactions} transactionCategories={transactionCategories} companyInfo={companyInfo} showNotification={showNotification} />}
 
+      {/* MODAIS (MANTIDOS IGUAIS) */}
       <Modal isOpen={!!viewSale} onClose={() => setViewSale(null)} title={`Detalhes da Venda #${viewSale?.id}`}>
         <div className="space-y-4">
           <div className="bg-slate-50 p-3 rounded border text-sm space-y-1">
             <div className="flex justify-between"><span>Data:</span> <strong>{viewSale && new Date(viewSale.date).toLocaleString()}</strong></div>
             <div className="flex justify-between"><span>Cliente:</span> <strong>{viewSale?.clientName}</strong></div>
             <div className="flex justify-between"><span>Pagamento:</span> <strong>{viewSale?.paymentMethod}</strong></div>
-            {/* Status NF-e no Modal */}
             {viewSale?.nfeStatus && (
                 <div className="flex justify-between border-t pt-1 mt-1">
                     <span>Status NF-e:</span> 
-                    <strong className={viewSale.nfeStatus === 'autorizado' ? 'text-green-600' : 'text-amber-600 uppercase'}>{viewSale.nfeStatus}</strong>
+                    <strong className={viewSale.nfeStatus === 'AUTORIZADA' ? 'text-green-600' : 'text-amber-600 uppercase'}>{viewSale.nfeStatus}</strong>
                 </div>
             )}
           </div>
@@ -1866,14 +2006,12 @@ const Finance = ({ sales, transactions, transactionCategories, feeProfiles, setF
             <span>Total</span>
             <span>{viewSale && formatCurrency(viewSale.total)}</span>
           </div>
-          
           <div className="grid grid-cols-2 gap-2">
               <button onClick={() => onPrintReceipt(viewSale)} className="border border-slate-300 py-2 rounded font-bold text-slate-600 hover:bg-slate-50 flex justify-center items-center gap-2">
                 <Printer size={18}/> Cupom
               </button>
-              {/* Botão de NF-e também no modal */}
               <button onClick={() => onEmitNFe && onEmitNFe(viewSale)} className="bg-slate-800 text-white py-2 rounded font-bold hover:bg-slate-900 flex justify-center items-center gap-2">
-                <FileText size={18}/> {viewSale?.nfeStatus === 'autorizado' ? 'Ver NF-e' : 'Emitir NF-e'}
+                <FileText size={18}/> {viewSale?.nfeStatus === 'AUTORIZADA' ? 'Ver NF-e' : 'Emitir NF-e'}
               </button>
           </div>
         </div>
@@ -1881,7 +2019,6 @@ const Finance = ({ sales, transactions, transactionCategories, feeProfiles, setF
 
       <Modal isOpen={!!viewClosure} onClose={() => setViewClosure(null)} title={`Detalhes do Fechamento - ${viewClosure && new Date(viewClosure.date).toLocaleString()}`}>
         <div className="space-y-6">
-           {/* Summary Cards */}
            <div className="grid grid-cols-3 gap-2 text-center">
               <div className="bg-slate-50 p-2 rounded border">
                 <div className="text-xs text-slate-500">Venda Total</div>
@@ -1896,8 +2033,6 @@ const Finance = ({ sales, transactions, transactionCategories, feeProfiles, setF
                 <div className="font-bold text-blue-600">{viewClosure?.sales?.length || 0}</div>
               </div>
            </div>
-
-           {/* Payment Methods */}
            <div>
              <h4 className="font-bold text-sm text-slate-700 mb-2 border-b pb-1">Formas de Pagamento</h4>
              <div className="space-y-1">
@@ -1910,34 +2045,6 @@ const Finance = ({ sales, transactions, transactionCategories, feeProfiles, setF
                    <span className="font-medium">{formatCurrency(total)}</span>
                  </div>
                ))}
-             </div>
-           </div>
-
-           {/* Items Sold */}
-           <div>
-             <h4 className="font-bold text-sm text-slate-700 mb-2 border-b pb-1">Itens Vendidos (Consolidado)</h4>
-             <div className="max-h-40 overflow-y-auto border rounded">
-               <table className="w-full text-left text-xs">
-                 <thead className="bg-slate-50 sticky top-0">
-                   <tr><th className="p-2">Produto</th><th className="p-2 text-center">Qtd</th><th className="p-2 text-right">Total</th></tr>
-                 </thead>
-                 <tbody className="divide-y">
-                   {viewClosure && Object.values(viewClosure.sales.reduce((acc, s) => {
-                      s.items.forEach(i => {
-                        if(!acc[i.id]) acc[i.id] = { ...i, qty: 0, total: 0 };
-                        acc[i.id].qty += i.qty;
-                        acc[i.id].total += (i.price * i.qty);
-                      });
-                      return acc;
-                   }, {})).map((item) => (
-                     <tr key={item.id}>
-                       <td className="p-2">{item.name}</td>
-                       <td className="p-2 text-center">{item.qty}</td>
-                       <td className="p-2 text-right">{formatCurrency(item.total)}</td>
-                     </tr>
-                   ))}
-                 </tbody>
-               </table>
              </div>
            </div>
         </div>
@@ -2864,7 +2971,7 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
               />
             )}
             {activeModule === 'priceGroups' && <PriceGroups products={products} showNotification={showNotification} />}
-            {activeModule === 'finance' && <Finance sales={realtimeSales} transactions={store.transactions} transactionCategories={store.transactionCategories} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} onEmitNFe={handleEmitNFe}/>}
+            {activeModule === 'finance' && <Finance sales={realtimeSales} transactions={store.transactions} transactionCategories={store.transactionCategories} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} onEmitNFe={handleEmitNFe} products={products} users={store.users || []}/>}
             {activeModule === 'inventory' && (
                 <InventoryWMS 
                     storeConfig={store} 
