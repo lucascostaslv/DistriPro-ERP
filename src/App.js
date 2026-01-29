@@ -1473,76 +1473,153 @@ const FinanceSettings = ({ feeProfiles, setFeeProfiles, showNotification }) => {
   );
 };
 
-const CashClosure = ({ sales, onSaveHistory }) => {
-  // Filtra vendas de hoje
-  const todaySales = sales.filter(s => isToday(s.date));
-  
-  const summary = todaySales.reduce((acc, s) => ({
-    total: acc.total + s.total,
-    cost: acc.cost + s.cost,
-    fee: acc.fee + s.fee,
-    net: acc.net + s.net,
-    profit: acc.profit + s.profit
-  }), { total: 0, cost: 0, fee: 0, net: 0, profit: 0 });
+// Substitua todo o componente CashClosure por este:
 
-  const handleSave = () => {
-    onSaveHistory({ date: new Date().toISOString(), summary, sales: todaySales });
+const CashClosure = ({ sales, transactions, onSaveHistory, feeProfiles, transactionCategories }) => {
+  const [summary, setSummary] = useState({ total: 0, cost: 0, profit: 0, fee: 0, operational: 0 });
+
+  useEffect(() => {
+      let totalSales = 0;
+      let totalCost = 0;
+      let totalFee = 0;
+      let totalOperational = 0;
+      
+      // Proteção contra valores undefined/null
+      const safeTransactions = transactions || [];
+      const safeFeeProfiles = feeProfiles || {};
+      const safeCategories = transactionCategories || [];
+
+      // 1. Criar lista de nomes de categorias que SÃO Operacionais
+      const operationalCatNames = safeCategories
+          .filter(cat => cat.isOperational === true)
+          .map(cat => cat.name);
+
+      // 2. Processar Vendas
+      if (sales) {
+          sales.forEach(sale => {
+              const val = Number(sale.total) || 0;
+              totalSales += val;
+              
+              if (sale.items) {
+                  sale.items.forEach(item => {
+                      totalCost += (Number(item.costPrice || item.cost) || 0) * (Number(item.qty) || 0);
+                  });
+              } else {
+                  totalCost += Number(sale.cost) || 0;
+              }
+
+              const method = sale.paymentMethod;
+              const feePct = (safeFeeProfiles && safeFeeProfiles[method]) ? Number(safeFeeProfiles[method]) : 0;
+              if (!isNaN(feePct) && feePct > 0) {
+                  totalFee += (val * feePct) / 100;
+              }
+          });
+      }
+
+      // 3. Processar Despesas Operacionais
+      if (safeTransactions.length > 0) {
+          safeTransactions.forEach(trans => {
+              const isExpense = trans.type === 'EXPENSE';
+              const isPaid = trans.status === 'PAGO';
+              
+              const isCatOperational = operationalCatNames.includes(trans.category);
+              const isLegacyOperational = trans.isOperational === true;
+
+              if (isExpense && isPaid && (isCatOperational || isLegacyOperational)) {
+                  totalOperational += Number(trans.amount) || 0;
+              }
+          });
+      }
+
+      const realProfit = totalSales - totalCost - totalFee - totalOperational;
+
+      // Só atualiza se houver mudança nos valores (Evita loop extra)
+      setSummary(prev => {
+          if (prev.total === totalSales && prev.profit === realProfit && prev.operational === totalOperational) {
+              return prev;
+          }
+          return {
+              total: totalSales,
+              cost: totalCost,
+              fee: totalFee,
+              operational: totalOperational,
+              profit: realProfit
+          };
+      });
+
+  }, [sales, transactions, feeProfiles, transactionCategories]); 
+
+  const calcW = (val, max) => {
+      if (!max || max === 0) return '0%';
+      const numVal = Number(val) || 0;
+      const pct = (numVal / max) * 100;
+      return `${Math.min(pct, 100)}%`; 
   };
-
-  // Gráfico simples com CSS
-  const maxVal = Math.max(summary.total, 1); // Evitar divisão por zero
+  const maxVal = Math.max(summary.total, 1);
 
   return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2"><PieChart size={24}/> Fechamento de Hoje</h3>
-        <button onClick={handleSave} className="bg-emerald-600 text-white px-4 py-2 rounded text-sm font-bold hover:bg-emerald-700 flex items-center gap-2"><Save size={16}/> Salvar no Histórico</button>
+    <div className="space-y-4 animate-in fade-in">
+      {/* Cards Superiores */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="bg-white p-4 rounded border border-slate-200 shadow-sm">
+           <div className="text-xs font-bold text-slate-400 uppercase">Venda Bruta</div>
+           <div className="text-2xl font-bold text-slate-800">
+               {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(summary.total)}
+           </div>
+        </div>
+        <div className="bg-white p-4 rounded border border-slate-200 shadow-sm">
+           <div className="text-xs font-bold text-slate-400 uppercase">Custos (CMV + Op)</div>
+           <div className="text-2xl font-bold text-red-500">
+               {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(summary.cost + summary.operational)}
+           </div>
+        </div>
+        <div className="bg-white p-4 rounded border border-slate-200 shadow-sm">
+           <div className="text-xs font-bold text-slate-400 uppercase">Taxas</div>
+           <div className="text-2xl font-bold text-orange-500">
+               {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(summary.fee)}
+           </div>
+        </div>
+        <div className="bg-white p-4 rounded border border-slate-200 shadow-sm">
+           <div className="text-xs font-bold text-slate-400 uppercase">Lucro Líquido</div>
+           <div className={`text-2xl font-bold ${summary.profit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+               {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(summary.profit)}
+           </div>
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-        <div className="bg-white p-4 rounded border border-slate-200 shadow-sm">
-          <p className="text-xs text-slate-500 uppercase font-bold">Venda Bruta</p>
-          <p className="text-xl font-bold text-slate-800">{formatCurrency(summary.total)}</p>
-        </div>
-        <div className="bg-white p-4 rounded border border-slate-200 shadow-sm">
-          <p className="text-xs text-slate-500 uppercase font-bold">Custo Mercadoria</p>
-          <p className="text-xl font-bold text-red-600">-{formatCurrency(summary.cost)}</p>
-        </div>
-        <div className="bg-white p-4 rounded border border-slate-200 shadow-sm">
-          <p className="text-xs text-slate-500 uppercase font-bold">Taxas Pagto</p>
-          <p className="text-xl font-bold text-red-600">-{formatCurrency(summary.fee)}</p>
-        </div>
-        <div className="bg-slate-50 p-4 rounded border border-slate-200 shadow-sm">
-          <p className="text-xs text-slate-500 uppercase font-bold">Líquido</p>
-          <p className="text-xl font-bold text-blue-600">{formatCurrency(summary.net)}</p>
-        </div>
-        <div className="bg-emerald-50 p-4 rounded border border-emerald-200 shadow-sm">
-          <p className="text-xs text-emerald-700 uppercase font-bold">Lucro Final</p>
-          <p className="text-xl font-bold text-emerald-700">{formatCurrency(summary.profit)}</p>
-        </div>
-      </div>
-
-      {/* Gráfico Visual */}
+      {/* Gráfico */}
       <div className="bg-white p-6 rounded border border-slate-200 shadow-sm">
-        <h4 className="font-bold text-slate-700 mb-6">Análise Gráfica</h4>
+        <h4 className="font-bold text-slate-700 mb-6">Análise Financeira</h4>
         <div className="space-y-4">
           <div>
-            <div className="flex justify-between text-xs mb-1"><span>Venda Total</span><span>{formatCurrency(summary.total)}</span></div>
+            <div className="flex justify-between text-xs mb-1"><span>Faturamento</span><span>{new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(summary.total)}</span></div>
             <div className="w-full bg-slate-100 rounded-full h-4"><div className="bg-slate-800 h-4 rounded-full" style={{width: '100%'}}></div></div>
           </div>
           <div>
-            <div className="flex justify-between text-xs mb-1"><span>Custo do Item</span><span>{formatCurrency(summary.cost)}</span></div>
-            <div className="w-full bg-slate-100 rounded-full h-4"><div className="bg-red-400 h-4 rounded-full" style={{width: `${(summary.cost/maxVal)*100}%`}}></div></div>
+            <div className="flex justify-between text-xs mb-1"><span>Custo Mercadoria (CMV)</span><span>{new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(summary.cost)}</span></div>
+            <div className="w-full bg-slate-100 rounded-full h-4"><div className="bg-red-300 h-4 rounded-full" style={{width: calcW(summary.cost, maxVal)}}></div></div>
+          </div>
+          {summary.operational > 0 && (
+            <div>
+                <div className="flex justify-between text-xs mb-1"><span>Custo Operacional</span><span>{new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(summary.operational)}</span></div>
+                <div className="w-full bg-slate-100 rounded-full h-4"><div className="bg-red-500 h-4 rounded-full" style={{width: calcW(summary.operational, maxVal)}}></div></div>
+            </div>
+          )}
+          <div>
+            <div className="flex justify-between text-xs mb-1"><span>Taxas</span><span>{new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(summary.fee)}</span></div>
+            <div className="w-full bg-slate-100 rounded-full h-4"><div className="bg-orange-400 h-4 rounded-full" style={{width: calcW(summary.fee, maxVal)}}></div></div>
           </div>
           <div>
-            <div className="flex justify-between text-xs mb-1"><span>Taxas</span><span>{formatCurrency(summary.fee)}</span></div>
-            <div className="w-full bg-slate-100 rounded-full h-4"><div className="bg-orange-400 h-4 rounded-full" style={{width: `${(summary.fee/maxVal)*100}%`}}></div></div>
-          </div>
-          <div>
-            <div className="flex justify-between text-xs mb-1"><span>Lucro Real</span><span>{formatCurrency(summary.profit)}</span></div>
-            <div className="w-full bg-slate-100 rounded-full h-4"><div className="bg-emerald-500 h-4 rounded-full" style={{width: `${(summary.profit/maxVal)*100}%`}}></div></div>
+            <div className="flex justify-between text-xs mb-1"><span>Lucro Real</span><span>{new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(summary.profit)}</span></div>
+            <div className="w-full bg-slate-100 rounded-full h-4"><div className="bg-emerald-500 h-4 rounded-full" style={{width: calcW(summary.profit, maxVal)}}></div></div>
           </div>
         </div>
+      </div>
+      
+      <div className="flex justify-end">
+          <button onClick={() => onSaveHistory(summary)} className="bg-indigo-600 text-white px-6 py-3 rounded font-bold hover:bg-indigo-700 flex items-center gap-2">
+              <CheckCircle size={20}/> Fechar Caixa
+          </button>
       </div>
     </div>
   );
@@ -1625,47 +1702,26 @@ const FinancialReport = ({ sales, transactions, transactionCategories, companyIn
 const downloadPDF = async () => {
   const element = document.getElementById('report-container');
   if (!element) return;
-
-  showNotification('Preparando documento PDF...', 'info');
+  showNotification('Gerando PDF...', 'info');
 
   try {
-    // 1. Criamos um container temporário para não bagunçar sua tela atual
-    const canvas = await window.html2canvas(element, {
-      scale: 3, // Qualidade ultra-alta
-      useCORS: true,
-      backgroundColor: "#ffffff",
-      windowWidth: element.scrollWidth,
-      windowHeight: element.scrollHeight
+    const canvas = await window.html2canvas(element, { 
+        scale: 2, 
+        useCORS: true,
+        backgroundColor: '#ffffff'
     });
-
+    
     const imgData = canvas.toDataURL('image/png');
     const { jsPDF } = window.jspdf;
     const pdf = new jsPDF('p', 'mm', 'a4');
-    
-    const pdfWidth = pdf.internal.pageSize.getWidth();
+    const pdfWidth = 210; 
     const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
 
-    // 2. Adiciona o título e o período no topo do PDF antes da imagem
-    const period = `${monthNames[month]} / ${year}`;
-    const operator = selectedUser === 'ALL' ? 'Geral da Loja' : users.find(u => u.id === selectedUser)?.username;
-
-    pdf.setFontSize(18);
-    pdf.setTextColor(30, 41, 59); // Slate-800
-    pdf.text("RELATÓRIO FINANCEIRO MENSAL", 10, 15);
-    
-    pdf.setFontSize(10);
-    pdf.setTextColor(100, 116, 139); // Slate-500
-    pdf.text(`Período: ${period} | Operador: ${operator}`, 10, 22);
-    pdf.text(`Gerado em: ${new Date().toLocaleString()}`, 10, 27);
-
-    // 3. Insere o conteúdo (Tabelas e Gráficos) abaixo do cabeçalho
-    pdf.addImage(imgData, 'PNG', 0, 35, pdfWidth, pdfHeight);
-    
+    pdf.addImage(imgData, 'PNG', 0, 10, pdfWidth, pdfHeight);
     pdf.save(`Relatorio_Financeiro_${month + 1}_${year}.pdf`);
-    showNotification('Documento baixado com sucesso!', 'success');
-  } catch (error) {
-    console.error("Erro PDF:", error);
-    showNotification('Erro ao organizar PDF.', 'error');
+  } catch (e) { 
+      console.error(e);
+      showNotification('Erro ao gerar PDF', 'error'); 
   }
 };
 
@@ -2182,6 +2238,15 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
   const [newUser, setNewUser] = useState({ username: '', password: '', role: 'cashier' });
   const [storeUsers, setStoreUsers] = useState([]); 
 
+  const [editingUserId, setEditingUserId] = useState(null);
+
+  const handleEditUserClick = (user) => {
+      setNewUser({ username: user.username, password: user.password, role: user.role || 'cashier' });
+      setEditingUserId(user.id);
+      // Foca no input para facilitar
+      document.querySelector('input[placeholder="Ex: caixa01"]')?.focus();
+  };
+
   // NOVO: ESTADOS DE CATEGORIAS
   const [categories, setCategories] = useState([]);
   const [newCategory, setNewCategory] = useState('');
@@ -2287,15 +2352,144 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
       }
   };
 
-  // ... (Funções existentes: handleSaveCertSettings, handleSaveCompany, handleAddProfile, handleDeleteProfile, handleAddUser, handleToggleUserStatus - MANTENHA IGUAL) ...
-  // [MANTENHA TODO O CÓDIGO DAS OUTRAS FUNÇÕES AQUI, NÃO REMOVA NADA DO QUE JÁ EXISTIA]
-  // Vou apenas replicar as assinaturas para o contexto:
-  const handleSaveCertSettings = async () => { /* ... código existente ... */ };
-  const handleSaveCompany = async () => { /* ... código existente ... */ };
-  const handleAddProfile = async () => { /* ... código existente ... */ };
-  const handleDeleteProfile = async (id) => { /* ... código existente ... */ };
-  const handleAddUser = async () => { /* ... código existente ... */ };
-  const handleToggleUserStatus = async (user) => { /* ... código existente ... */ };
+  // DENTRO DE SettingsManager, substitua as funções "const handle..." pelos códigos abaixo:
+
+  // 1. SALVAR DADOS DA EMPRESA
+  const handleSaveCompany = async () => {
+    try {
+        const storeIdStr = String(storeConfig.id);
+        const payload = {
+            firebase_store_id: storeIdStr,
+            x_nome: formData.name,
+            cnpj: formData.cnpj,
+            ie: formData.ie,
+            crt: parseInt(formData.crt),
+            cnae: formData.cnae,
+            cep: formData.address.zip,
+            x_lgr: formData.address.street,
+            nro: formData.address.number,
+            xcpl: formData.address.complement,
+            xbairro: formData.address.neighborhood,
+            xmun: formData.address.city,
+            uf: formData.address.state,
+            cmun: formData.address.ibgeCode
+        };
+        
+        // Salva no Supabase
+        const { error } = await supabase.from('fiscal_emitters').upsert(payload, { onConflict: 'firebase_store_id' });
+        if (error) throw error;
+
+        // Atualiza no Firebase (Config Local)
+        setCompanyInfo(formData); 
+        showNotification('Dados da empresa atualizados!', 'success');
+    } catch (e) { 
+        showNotification('Erro ao salvar empresa: ' + e.message, 'error'); 
+    }
+  };
+
+  // 2. SALVAR CERTIFICADO
+  const handleSaveCertSettings = async () => {
+    try {
+        const storeIdStr = String(storeConfig.id);
+        const { error } = await supabase.from('fiscal_settings').upsert({
+            firebase_store_id: storeIdStr,
+            cert_password: certData.password,
+            api_token: certData.api_token,
+            environment: certData.environment,
+            csc_id: certData.csc_id,
+            csc_token: certData.csc_token,
+            ...(certData.base64 ? { cert_base64: certData.base64 } : {}) 
+        }, { onConflict: 'firebase_store_id' });
+
+        if (error) throw error;
+        showNotification('Configurações salvas!', 'success');
+    } catch (e) { 
+        console.error(e);
+        showNotification('Erro ao salvar certificado.', 'error'); 
+    }
+  };
+
+  // 3. PERFIS TRIBUTÁRIOS (Adicionar e Remover)
+  const handleAddProfile = async () => {
+    if (!newProfile.name) return showNotification('Nome obrigatório', 'error');
+    try {
+      const storeIdStr = String(storeConfig.id);
+      const { error } = await supabase.from('fiscal_tax_profiles').insert({
+          firebase_store_id: storeIdStr,
+          name: newProfile.name.toUpperCase(),
+          origin: newProfile.origin,
+          cst_nfe: newProfile.cst_nfe,
+          cst_pis_cofins: newProfile.cst_pis_cofins,
+          cfop_state: newProfile.cfop,
+          cfop_interstate: newProfile.cfop 
+      });
+      if (error) throw error;
+
+      // Recarrega lista localmente
+      const { data } = await supabase.from('fiscal_tax_profiles').select('*').eq('firebase_store_id', storeIdStr);
+      if(data) setTaxProfiles(data);
+      setNewProfile({ name: '', origin: '0', cst_nfe: '102', cst_pis_cofins: '49', cfop: '5102' });
+      showNotification('Perfil adicionado!', 'success');
+    } catch (e) { showNotification('Erro ao criar perfil', 'error'); }
+  };
+
+  const handleDeleteProfile = async (id) => {
+      if (!window.confirm("Excluir perfil?")) return;
+      const { error } = await supabase.from('fiscal_tax_profiles').delete().eq('id', id);
+      if (!error) {
+          setTaxProfiles(prev => prev.filter(p => p.id !== id));
+          showNotification('Perfil removido', 'success');
+      }
+  };
+
+  // 4. GESTÃO DE USUÁRIOS (Criar, Editar e Status)
+  // Estado auxiliar para edição (adicione isso no início do componente SettingsManager se não tiver)
+
+  const handleAddUser = async () => {
+    if (!newUser.username || !newUser.password) return showNotification('Preencha login e senha', 'error');
+    
+    try {
+        const usersRef = collection(firebase.adminDB, "users");
+
+        if (editingUserId) {
+            // MODO EDIÇÃO
+            const userDoc = doc(firebase.adminDB, "users", editingUserId);
+            await updateDoc(userDoc, { 
+                username: newUser.username, 
+                password: newUser.password, 
+                role: newUser.role 
+            });
+            showNotification('Usuário atualizado!', 'success');
+            setEditingUserId(null); // Sai do modo edição
+        } else {
+            // MODO CRIAÇÃO
+            const q = query(usersRef, where("username", "==", newUser.username));
+            const snap = await getDocs(q);
+            if (!snap.empty) return showNotification('Usuário já existe!', 'error');
+
+            await addDoc(usersRef, {
+                ...newUser,
+                storeId: storeConfig.id,
+                active: true,
+                createdAt: serverTimestamp()
+            });
+            showNotification('Usuário criado!', 'success');
+        }
+        
+        setNewUser({ username: '', password: '', role: 'cashier' }); // Limpa form
+    } catch (e) { 
+        console.error(e);
+        showNotification('Erro ao salvar usuário', 'error'); 
+    }
+  };
+
+  const handleToggleUserStatus = async (user) => {
+      try {
+          const ref = doc(firebase.adminDB, "users", user.id);
+          await updateDoc(ref, { active: !user.active });
+          showNotification(`Usuário ${!user.active ? 'ativado' : 'bloqueado'}`, 'success');
+      } catch (e) { showNotification('Erro ao alterar status', 'error'); }
+  };
 
 
   return (
@@ -2338,34 +2532,110 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
        )}
 
        {/* --- NOVA ABA: CATEGORIAS --- */}
+
+       {/* --- ABA DE CATEGORIAS DE TRANSAÇÃO (CORRIGIDA) --- */}
        {activeTab === 'categories' && (
            <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
-               <h3 className="font-bold mb-4 flex items-center gap-2 text-amber-700"><PieChart size={20}/> Categorias Financeiras</h3>
-               <p className="text-sm text-slate-500 mb-6">Cadastre aqui os tipos de gastos para organizar seu relatório (ex: Energia, Aluguel, Pessoal).</p>
+               <h3 className="font-bold mb-4 flex items-center gap-2 text-indigo-800"><Tags size={20}/> Categorias Financeiras</h3>
                
-               <div className="flex gap-2 mb-6">
-                   <input 
-                        className="flex-1 border p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500" 
-                        placeholder="Nome da nova categoria (ex: Manutenção)"
-                        value={newCategory}
-                        onChange={e => setNewCategory(e.target.value)}
-                        onKeyDown={e => e.key === 'Enter' && handleAddCategory()}
-                   />
-                   <button onClick={handleAddCategory} className="bg-amber-600 text-white px-4 py-2 rounded font-bold hover:bg-amber-700 flex items-center gap-2">
-                       <Plus size={16}/> Adicionar
-                   </button>
+               <div className="bg-slate-50 p-4 rounded border border-slate-200 mb-6 flex flex-col md:flex-row gap-3 items-end">
+                  <div className="flex-1">
+                      <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Nova Categoria</label>
+                      <input 
+                        className="w-full border p-2 rounded text-sm" 
+                        placeholder="Ex: Combustível, Manutenção..." 
+                        value={newCategory.name} 
+                        onChange={e => setNewCategory({...newCategory, name: e.target.value})} 
+                      />
+                  </div>
+                  
+                  {/* CHECKBOX PARA CONFIGURAR SE É OPERACIONAL */}
+                  <div className="bg-white p-2 rounded border border-slate-200 h-[38px] flex items-center px-3">
+                      <div className="flex items-center gap-2">
+                          <input 
+                              type="checkbox" 
+                              id="catIsOp"
+                              className="w-4 h-4 text-indigo-600 rounded cursor-pointer"
+                              checked={newCategory.isOperational !== false} // Padrão true
+                              onChange={e => setNewCategory({...newCategory, isOperational: e.target.checked})}
+                          />
+                          <label htmlFor="catIsOp" className="text-xs font-bold text-slate-700 cursor-pointer select-none">
+                              É Custo Operacional?
+                          </label>
+                      </div>
+                  </div>
+
+                  <button 
+                    onClick={async () => {
+                        if(!newCategory.name) return showNotification('Nome obrigatório', 'error');
+                        try {
+                            const storeIdStr = String(storeConfig.id); // <--- CORRIGIDO AQUI (storeConfig)
+                            await addDoc(collection(firebase.db, 'artifacts', storeIdStr, 'public', 'data', 'transaction_categories'), {
+                                name: newCategory.name,
+                                type: 'EXPENSE',
+                                isOperational: newCategory.isOperational !== false, 
+                                createdAt: serverTimestamp()
+                            });
+                            setNewCategory({ name: '', type: 'EXPENSE', isOperational: true }); 
+                            showNotification('Categoria criada!', 'success');
+                        } catch(e) { showNotification('Erro ao criar.', 'error'); }
+                    }} 
+                    className="bg-indigo-600 text-white px-4 py-2 rounded font-bold h-[38px] hover:bg-indigo-700 flex items-center gap-2"
+                  >
+                      <Plus size={16}/> Adicionar
+                  </button>
                </div>
 
-               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                   {categories.map(cat => (
-                       <div key={cat.id} className="flex justify-between items-center p-3 bg-slate-50 border rounded hover:bg-white hover:shadow-sm transition-all">
-                           <span className="font-bold text-slate-700">{cat.name}</span>
-                           <button onClick={() => handleDeleteCategory(cat.id)} className="text-slate-400 hover:text-red-500">
-                               <Trash2 size={16}/>
-                           </button>
-                       </div>
-                   ))}
-                   {categories.length === 0 && <p className="text-slate-400 text-sm italic">Nenhuma categoria cadastrada.</p>}
+               <div className="border rounded overflow-hidden">
+                   <table className="w-full text-sm text-left">
+                       <thead className="bg-slate-50 uppercase text-xs text-slate-500">
+                           <tr>
+                               <th className="p-3">Nome da Categoria</th>
+                               <th className="p-3 text-center">Tipo</th>
+                               <th className="p-3 text-center">Configuração</th>
+                               <th className="p-3 text-right">Ação</th>
+                           </tr>
+                       </thead>
+                       <tbody className="divide-y divide-slate-100">
+                           {/* CORRIGIDO DE store. PARA storeConfig. */}
+                           {(storeConfig.transactionCategories || []).map(cat => (
+                               <tr key={cat.id} className="hover:bg-slate-50">
+                                   <td className="p-3 font-bold text-slate-700">{cat.name}</td>
+                                   <td className="p-3 text-center">
+                                       <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-1 rounded font-bold uppercase">Despesa</span>
+                                   </td>
+                                   <td className="p-3 text-center">
+                                       {cat.isOperational !== false ? (
+                                           <span className="text-[10px] bg-red-100 text-red-700 px-2 py-1 rounded font-bold border border-red-200 flex items-center justify-center gap-1 w-fit mx-auto">
+                                               <Settings size={10}/> Custo Operacional
+                                           </span>
+                                       ) : (
+                                           <span className="text-[10px] bg-slate-100 text-slate-400 px-2 py-1 rounded font-bold border border-slate-200 flex items-center justify-center gap-1 w-fit mx-auto">
+                                               Não Operacional
+                                           </span>
+                                       )}
+                                   </td>
+                                   <td className="p-3 text-right">
+                                       <button 
+                                            onClick={async () => {
+                                                if(!window.confirm('Excluir categoria?')) return;
+                                                const storeIdStr = String(storeConfig.id); // <--- CORRIGIDO
+                                                await deleteDoc(doc(firebase.db, 'artifacts', storeIdStr, 'public', 'data', 'transaction_categories', cat.id));
+                                                showNotification('Categoria removida', 'success');
+                                            }}
+                                            className="text-red-500 hover:bg-red-50 p-2 rounded"
+                                       >
+                                           <Trash2 size={16}/>
+                                       </button>
+                                   </td>
+                               </tr>
+                           ))}
+                           {/* CORRIGIDO DE store. PARA storeConfig. */}
+                           {(storeConfig.transactionCategories || []).length === 0 && (
+                               <tr><td colSpan={4} className="p-8 text-center text-slate-400 italic">Nenhuma categoria cadastrada.</td></tr>
+                           )}
+                       </tbody>
+                   </table>
                </div>
            </div>
        )}
@@ -2373,8 +2643,9 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
        {/* ABA USUÁRIOS (MANTENHA IGUAL) */}
        {activeTab === 'users' && (
            <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
-               {/* ... Código da aba usuários que fizemos anteriormente ... */}
                <h3 className="font-bold mb-4 flex items-center gap-2 text-indigo-800"><Users size={20}/> Equipe e Permissões</h3>
+               
+               {/* --- ÁREA DE CADASTRO/EDIÇÃO (Trecho 1) --- */}
                <div className="bg-indigo-50 p-4 rounded border border-indigo-100 mb-6 flex flex-col md:flex-row gap-3 items-end">
                   <div className="flex-1">
                       <label className="text-xs font-bold text-indigo-700">Usuário (Login)</label>
@@ -2391,8 +2662,28 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
                           <option value="admin">Gerente (Total)</option>
                       </select>
                   </div>
-                  <button onClick={handleAddUser} className="bg-indigo-600 text-white px-4 py-2 rounded font-bold hover:bg-indigo-700 h-[38px] flex items-center gap-2"><Plus size={16}/> Criar</button>
+
+                  {/* AQUI ESTÁ A CORREÇÃO DOS BOTÕES DE AÇÃO */}
+                  <div className="flex gap-1">
+                      {editingUserId && (
+                          <button 
+                            onClick={() => { setEditingUserId(null); setNewUser({ username: '', password: '', role: 'cashier' }); }} 
+                            className="bg-slate-300 text-slate-700 px-3 rounded font-bold hover:bg-slate-400 h-[38px]"
+                          >
+                            Cancelar
+                          </button>
+                      )}
+                      <button 
+                        onClick={handleAddUser} 
+                        className={`${editingUserId ? 'bg-orange-600 hover:bg-orange-700' : 'bg-indigo-600 hover:bg-indigo-700'} text-white px-4 py-2 rounded font-bold h-[38px] flex items-center gap-2`}
+                      >
+                          {editingUserId ? <Edit size={16}/> : <Plus size={16}/>} 
+                          {editingUserId ? 'Salvar' : 'Criar'}
+                      </button>
+                  </div>
                </div>
+               {/* --------------------------------------------- */}
+
                <div className="border rounded overflow-hidden">
                    <table className="w-full text-sm text-left">
                        <thead className="bg-slate-50 uppercase text-xs text-slate-500"><tr><th className="p-3">Usuário</th><th className="p-3">Função</th><th className="p-3">Status</th><th className="p-3 text-right">Ação</th></tr></thead>
@@ -2402,7 +2693,13 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
                                    <td className="p-3 font-bold text-slate-700">{u.username}</td>
                                    <td className="p-3"><span className={`text-[10px] uppercase font-bold px-2 py-1 rounded ${u.role === 'admin' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}`}>{u.role === 'admin' ? 'Gerente' : 'Caixa'}</span></td>
                                    <td className="p-3"><span className={`text-[10px] font-bold px-2 py-1 rounded ${u.active !== false ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{u.active !== false ? 'Ativo' : 'Bloqueado'}</span></td>
-                                   <td className="p-3 text-right"><button onClick={() => handleToggleUserStatus(u)} className={`text-xs font-bold px-3 py-1 rounded border ${u.active !== false ? 'border-red-200 text-red-600 hover:bg-red-50' : 'border-green-200 text-green-600 hover:bg-green-50'}`}>{u.active !== false ? 'Bloquear' : 'Ativar'}</button></td>
+                                   
+                                   {/* --- AQUI VAI O TRECHO 2 (CÉLULA DA TABELA) --- */}
+                                   <td className="p-3 text-right flex justify-end gap-2">
+                                        <button onClick={() => handleEditUserClick(u)} className="text-xs font-bold px-3 py-1 rounded border border-blue-200 text-blue-600 hover:bg-blue-50">Editar</button>
+                                        <button onClick={() => handleToggleUserStatus(u)} className={`text-xs font-bold px-3 py-1 rounded border ${u.active !== false ? 'border-red-200 text-red-600 hover:bg-red-50' : 'border-green-200 text-green-600 hover:bg-green-50'}`}>{u.active !== false ? 'Bloquear' : 'Ativar'}</button>
+                                   </td>
+                                   {/* --------------------------------------------- */}
                                </tr>
                            ))}
                        </tbody>
@@ -2501,6 +2798,8 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
   const [currentSaleToEmit, setCurrentSaleToEmit] = useState(null);
   const [pricingMode, setPricingMode] = useState('retail');
   const [showCashierEmitModal, setShowCashierEmitModal] = useState({ open: false, sale: null });
+  const [realtimeTransactions, setRealtimeTransactions] = useState([]);
+  const [transactionCategories, setTransactionCategories] = useState([]);
 
   // --- CORREÇÃO: Estado EXCLUSIVO para clientes do Supabase ---
   // Isso garante que não usamos dados antigos do Firebase/LocalStorage
@@ -2510,6 +2809,19 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
     if (store && store.id) return String(store.id);
     return typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
   };
+
+  useEffect(() => {
+      if (!store || !store.id) return;
+      const appId = String(store.id);
+      const catRef = collection(firebase.db, 'artifacts', appId, 'public', 'data', 'transaction_categories');
+      
+      const unsubscribe = onSnapshot(catRef, (snapshot) => {
+          const cats = snapshot.docs.map(doc => ({id: doc.id, ...doc.data()}));
+          setTransactionCategories(cats);
+      }, (error) => console.error("Erro categories:", error));
+      
+      return () => unsubscribe();
+  }, [store]);
 
   // --- BUSCA DE CLIENTES (Somente Supabase) ---
   useEffect(() => {
@@ -2595,6 +2907,20 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
 
       return () => unsubscribe();
   }, [store?.id]);
+
+  useEffect(() => {
+    if (!store || !store.id) return;
+    const appId = String(store.id);
+    // Escuta a coleção de movimentações financeiras
+    const transRef = collection(firebase.db, 'artifacts', appId, 'public', 'data', 'financial_movements');
+    
+    const unsubscribe = onSnapshot(transRef, (snapshot) => {
+        const transData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setRealtimeTransactions(transData);
+    }, (error) => console.error("Erro transactions:", error));
+    
+    return () => unsubscribe();
+  }, [store]);
 
   // Função de Venda (com baixa de estoque)
   // Função de Venda (com baixa de estoque e COMANDA)
@@ -3079,7 +3405,7 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
               />
             )}
             {activeModule === 'priceGroups' && <PriceGroups products={products} showNotification={showNotification} />}
-            {activeModule === 'finance' && <Finance sales={realtimeSales} transactions={store.transactions} transactionCategories={store.transactionCategories} users={allStoreUsers} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} onEmitNFe={handleEmitNFe} products={products}/>}
+            {activeModule === 'finance' && <Finance sales={realtimeSales} transactions={realtimeTransactions}transactionCategories={store.transactionCategories} users={allStoreUsers} feeProfiles={store.feeProfiles} setFeeProfiles={(fp) => updateStore({...store, feeProfiles: fp})} showNotification={showNotification} companyInfo={store.companyInfo} onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} onEmitNFe={handleEmitNFe} products={products}/>}
             {activeModule === 'inventory' && (
                 <InventoryWMS 
                     storeConfig={store} 
@@ -3093,7 +3419,7 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
                 setUsers={(u) => updateStore({...store, users: u})} 
                 companyInfo={store.companyInfo} 
                 setCompanyInfo={(ci) => updateStore({...store, companyInfo: ci})}
-                storeConfig={store}
+                storeConfig={{...store, transactionCategories}}
                 setStoreConfig={updateStore} 
                 showNotification={showNotification} 
               />

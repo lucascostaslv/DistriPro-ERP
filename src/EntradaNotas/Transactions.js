@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { PlusCircle, FileText, ScrollText, Minus, Save, X, Calendar, DollarSign, Tag, CheckSquare } from 'lucide-react';
+import { PlusCircle, FileText, ScrollText, Minus, Save, X, Calendar, DollarSign, Tag, CheckSquare, Settings } from 'lucide-react';
 import { collection, addDoc, serverTimestamp, getDocs } from 'firebase/firestore';
-import { db } from '../firebase'; // Ajuste o caminho se necessário
+import { db } from '../firebase'; 
 import EntradaNotas from './EntradaNotas'; 
 import AccountsPayable from './AccountsPayable';
 import FiscalInvoices from './FiscalInvoices'; 
@@ -9,19 +9,24 @@ import FiscalInvoices from './FiscalInvoices';
 const Transactions = (props) => {
   const [activeTab, setActiveTab] = useState('entry'); 
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
-  const [categories, setCategories] = useState([]);
   
-  // Estado do Formulário de Despesa
+  // Lista de categorias (vindo do banco)
+  const [categories, setCategories] = useState([]);
+
+  // Estados para criação rápida de categoria
+  const [isAddingCat, setIsAddingCat] = useState(false);
+  const [tempCatName, setTempCatName] = useState('');
+  const [tempCatIsOp, setTempCatIsOp] = useState(true); // Novo: Define se a nova cat é operacional
+
+  // Formulário Limpo (Sem flags complexas)
   const [expenseForm, setExpenseForm] = useState({
       description: '',
       value: '',
       date: new Date().toISOString().split('T')[0],
-      category: '',
-      isOvertime: false, // Item 23
-      isHoliday: false   // Item 23
+      category: ''
   });
 
-  // Carregar categorias ao abrir
+  // Carregar categorias ao abrir o modal
   useEffect(() => {
       const fetchCategories = async () => {
           if(!props.storeConfig?.id) return;
@@ -29,24 +34,11 @@ const Transactions = (props) => {
           try {
               const catRef = collection(db, 'artifacts', storeId, 'public', 'data', 'transaction_categories');
               const snap = await getDocs(catRef);
-              const cats = snap.docs.map(d => ({id: d.id, ...d.data()}));
-              
-              // Se não tiver categorias criadas, usa padrão
-              if (cats.length === 0) {
-                  setCategories([
-                      {name: 'Custos Fixos (Luz/Água/Aluguel)'},
-                      {name: 'Pessoal'},
-                      {name: 'Manutenção'},
-                      {name: 'Impostos'},
-                      {name: 'Outros'}
-                  ]);
-              } else {
-                  setCategories(cats);
-              }
-          } catch(e) { console.error("Erro ao buscar categorias", e); }
+              setCategories(snap.docs.map(d => ({id: d.id, ...d.data()})));
+          } catch(e) { console.error(e); }
       };
-      fetchCategories();
-  }, [props.storeConfig]);
+      if(isExpenseModalOpen) fetchCategories();
+  }, [isExpenseModalOpen, props.storeConfig]);
 
   const handleSaveExpense = async () => {
       if (!expenseForm.description || !expenseForm.value || !expenseForm.category) {
@@ -56,161 +48,161 @@ const Transactions = (props) => {
 
       try {
           const storeId = String(props.storeConfig.id);
-          
+          const todayStr = new Date().toISOString().split('T')[0];
+          // Se data futura = Pendente, se hoje/passado = Pago
+          const calculatedStatus = expenseForm.date > todayStr ? 'PENDENTE' : 'PAGO';
+
           await addDoc(collection(db, 'artifacts', storeId, 'public', 'data', 'financial_movements'), {
               type: 'EXPENSE',
-              category: expenseForm.category,
+              category: expenseForm.category, // Apenas o nome da categoria
               description: expenseForm.description,
               amount: parseFloat(expenseForm.value.replace(',', '.')),
               date: expenseForm.date,
               
-              // Flags Especiais (Item 23)
-              isOvertime: expenseForm.isOvertime,
-              isHoliday: expenseForm.isHoliday,
-              
-              status: 'PAGO', // Lançamento avulso geralmente já foi pago
+              status: calculatedStatus,
               createdAt: serverTimestamp(),
-              userId: 'manager' // Ou pegar do props.currentUser
+              userId: 'manager' 
           });
 
-          alert("Despesa lançada com sucesso!");
+          const msg = calculatedStatus === 'PENDENTE' ? "Agendado no Contas a Pagar!" : "Despesa lançada!";
+          alert(msg);
           setIsExpenseModalOpen(false);
-          setExpenseForm({ description: '', value: '', date: new Date().toISOString().split('T')[0], category: '', isOvertime: false, isHoliday: false });
+          setExpenseForm({ 
+              description: '', value: '', date: new Date().toISOString().split('T')[0], category: '' 
+          });
       } catch (e) {
           console.error(e);
           alert("Erro ao salvar: " + e.message);
       }
   };
 
+  const handleQuickAddCategory = async () => {
+    if (!tempCatName) return;
+    try {
+        const storeId = String(props.storeConfig.id);
+        // SALVA A CATEGORIA COM A FLAG 'isOperational'
+        const ref = await addDoc(collection(db, 'artifacts', storeId, 'public', 'data', 'transaction_categories'), {
+            name: tempCatName, 
+            type: 'EXPENSE', 
+            isOperational: tempCatIsOp, // <--- A MÁGICA ACONTECE AQUI
+            createdAt: serverTimestamp()
+        });
+        
+        // Atualiza localmente
+        setCategories([...categories, { id: ref.id, name: tempCatName, isOperational: tempCatIsOp }]);
+        setExpenseForm({...expenseForm, category: tempCatName}); // Já seleciona
+        
+        // Limpa form de categoria
+        setIsAddingCat(false); 
+        setTempCatName('');
+        setTempCatIsOp(true);
+    } catch (e) { alert('Erro ao criar categoria'); }
+  };
+
   return (
-    <div className="space-y-4">
-      {/* Navegação de Abas + Botão de Despesa */}
-      <div className="flex justify-between items-center bg-white p-2 rounded-lg border border-slate-200 shadow-sm mb-2">
-          <div className="inline-flex gap-1">
-            <button 
-              onClick={() => setActiveTab('entry')}
-              className={`px-4 py-2 rounded text-sm font-bold flex items-center gap-2 transition-all ${activeTab === 'entry' ? 'bg-slate-800 text-white shadow' : 'text-slate-500 hover:bg-slate-100'}`}
-            >
-               <PlusCircle size={16}/> Nova Nota (XML)
-            </button>
-            <button 
-              onClick={() => setActiveTab('payable')}
-              className={`px-4 py-2 rounded text-sm font-bold flex items-center gap-2 transition-all ${activeTab === 'payable' ? 'bg-slate-800 text-white shadow' : 'text-slate-500 hover:bg-slate-100'}`}
-            >
-               <FileText size={16}/> Contas a Pagar
-            </button>
-            <button 
-              onClick={() => setActiveTab('fiscal')}
-              className={`px-4 py-2 rounded text-sm font-bold flex items-center gap-2 transition-all ${activeTab === 'fiscal' ? 'bg-slate-800 text-white shadow' : 'text-slate-500 hover:bg-slate-100'}`}
-            >
-               <ScrollText size={16}/> Notas Emitidas
-            </button>
-          </div>
-
-          {/* BOTÃO DE LANÇAR DESPESA (Item 20, 21, 22) */}
-          <button 
-              onClick={() => setIsExpenseModalOpen(true)}
-              className="px-4 py-2 bg-red-100 text-red-700 border border-red-200 rounded text-sm font-bold flex items-center gap-2 hover:bg-red-200 transition-colors"
-          >
-              <Minus size={16}/> Lançar Saída/Despesa
+    <div className="bg-white rounded border shadow-sm h-full flex flex-col overflow-hidden animate-in fade-in">
+      {/* Navegação das Abas */}
+      <div className="flex border-b overflow-x-auto shrink-0">
+          <button onClick={() => setActiveTab('entry')} className={`px-6 py-4 font-bold text-sm flex items-center gap-2 ${activeTab === 'entry' ? 'border-b-2 border-slate-800 text-slate-800' : 'text-slate-500 hover:bg-slate-50'}`}>
+              <ScrollText size={18}/> Entrada de Notas
           </button>
+          <button onClick={() => setActiveTab('payable')} className={`px-6 py-4 font-bold text-sm flex items-center gap-2 ${activeTab === 'payable' ? 'border-b-2 border-red-600 text-red-600' : 'text-slate-500 hover:bg-slate-50'}`}>
+              <Calendar size={18}/> Contas a Pagar
+          </button>
+          <button onClick={() => setActiveTab('invoices')} className={`px-6 py-4 font-bold text-sm flex items-center gap-2 ${activeTab === 'invoices' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-slate-500 hover:bg-slate-50'}`}>
+              <FileText size={18}/> Notas Fiscais
+          </button>
+          <div className="flex-1 flex justify-end items-center px-4">
+              <button onClick={() => setIsExpenseModalOpen(true)} className="bg-red-100 text-red-700 px-4 py-2 rounded font-bold hover:bg-red-200 flex items-center gap-2 text-sm">
+                  <Minus size={16}/> Lançar Despesa
+              </button>
+          </div>
       </div>
 
-      {/* Renderização Condicional */}
-      <div className="min-h-[600px]">
-        {activeTab === 'entry' && <EntradaNotas {...props} />}
-        {activeTab === 'payable' && <AccountsPayable products={props.products || []} />}
-        {activeTab === 'fiscal' && <FiscalInvoices storeConfig={props.storeConfig} showNotification={props.showNotification || alert} />}
+      <div className="flex-1 bg-slate-50 overflow-hidden relative">
+          {activeTab === 'entry' && <EntradaNotas storeConfig={props.storeConfig} showNotification={props.showNotification} />}
+          {activeTab === 'payable' && <AccountsPayable products={[]} />}
+          {activeTab === 'invoices' && <FiscalInvoices storeConfig={props.storeConfig} />}
       </div>
 
-      {/* MODAL DE LANÇAMENTO DE DESPESA */}
+      {/* MODAL SIMPLIFICADO */}
       {isExpenseModalOpen && (
-          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 animate-in fade-in">
-              <div className="bg-white w-full max-w-md rounded-xl shadow-2xl overflow-hidden flex flex-col">
+          <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+              <div className="bg-white w-full max-w-lg rounded-lg shadow-xl overflow-hidden animate-in zoom-in duration-200">
                   <div className="bg-slate-800 text-white p-4 flex justify-between items-center">
-                      <h3 className="font-bold flex items-center gap-2"><Minus size={18} className="text-red-400"/> Nova Despesa Avulsa</h3>
+                      <h3 className="font-bold flex items-center gap-2"><Minus size={18}/> Nova Despesa</h3>
                       <button onClick={() => setIsExpenseModalOpen(false)}><X size={20}/></button>
                   </div>
                   
                   <div className="p-6 space-y-4">
                       <div>
-                          <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Descrição do Gasto</label>
-                          <input 
-                              className="w-full border p-2 rounded text-sm focus:ring-2 focus:ring-red-500 outline-none" 
-                              placeholder="Ex: Conta de Luz referente Maio"
-                              value={expenseForm.description}
-                              onChange={e => setExpenseForm({...expenseForm, description: e.target.value})}
-                              autoFocus
-                          />
+                          <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Descrição</label>
+                          <input className="w-full border p-2 rounded text-sm" placeholder="Ex: Pagamento Extra, Limpeza..." value={expenseForm.description} onChange={e => setExpenseForm({...expenseForm, description: e.target.value})} autoFocus />
                       </div>
 
                       <div className="grid grid-cols-2 gap-4">
                           <div>
-                              <label className="text-xs font-bold text-slate-500 uppercase block mb-1 flex items-center gap-1"><DollarSign size={12}/> Valor (R$)</label>
-                              <input 
-                                  type="number" 
-                                  step="0.01"
-                                  className="w-full border p-2 rounded text-sm font-bold text-red-600" 
-                                  placeholder="0.00"
-                                  value={expenseForm.value}
-                                  onChange={e => setExpenseForm({...expenseForm, value: e.target.value})}
-                              />
+                              <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Valor (R$)</label>
+                              <div className="relative">
+                                  <DollarSign size={14} className="absolute left-3 top-3 text-slate-400"/>
+                                  <input type="number" step="0.01" className="w-full border pl-8 p-2 rounded text-sm font-bold text-red-600" placeholder="0.00" value={expenseForm.value} onChange={e => setExpenseForm({...expenseForm, value: e.target.value})} />
+                              </div>
                           </div>
                           <div>
-                              <label className="text-xs font-bold text-slate-500 uppercase block mb-1 flex items-center gap-1"><Calendar size={12}/> Data Pagto</label>
-                              <input 
-                                  type="date" 
-                                  className="w-full border p-2 rounded text-sm" 
-                                  value={expenseForm.date}
-                                  onChange={e => setExpenseForm({...expenseForm, date: e.target.value})}
-                              />
+                              <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Data Competência</label>
+                              <input type="date" className="w-full border p-2 rounded text-sm" value={expenseForm.date} onChange={e => setExpenseForm({...expenseForm, date: e.target.value})} />
                           </div>
                       </div>
 
+                      {/* SELEÇÃO DE CATEGORIA */}
                       <div>
                           <label className="text-xs font-bold text-slate-500 uppercase block mb-1 flex items-center gap-1"><Tag size={12}/> Categoria</label>
-                          <select 
-                              className="w-full border p-2 rounded text-sm bg-white"
-                              value={expenseForm.category}
-                              onChange={e => setExpenseForm({...expenseForm, category: e.target.value})}
-                          >
-                              <option value="">Selecione...</option>
-                              {categories.map((c, i) => (
-                                  <option key={i} value={c.name}>{c.name}</option>
-                              ))}
-                          </select>
-                      </div>
+                          
+                          {!isAddingCat ? (
+                              <div className="flex gap-1">
+                                  <select className="w-full border p-2 rounded text-sm bg-white" value={expenseForm.category} onChange={e => setExpenseForm({...expenseForm, category: e.target.value})}>
+                                      <option value="">Selecione...</option>
+                                      {categories.map((c, i) => <option key={i} value={c.name}>{c.name}</option>)}
+                                  </select>
+                                  <button onClick={() => setIsAddingCat(true)} className="bg-slate-200 px-3 rounded hover:bg-slate-300 text-slate-600" title="Criar Nova Categoria">
+                                      <PlusCircle size={16}/>
+                                  </button>
+                              </div>
+                          ) : (
+                              <div className="bg-slate-100 p-3 rounded border border-slate-200 animate-in fade-in">
+                                  <p className="text-xs font-bold text-slate-600 mb-2">Criando Nova Categoria:</p>
+                                  <div className="flex gap-2 mb-2">
+                                      <input className="w-full border p-2 rounded text-sm" placeholder="Nome da categoria..." value={tempCatName} onChange={e => setTempCatName(e.target.value)} autoFocus />
+                                  </div>
+                                  
+                                  {/* NOVO CHECKBOX: DEFINE SE É OPERACIONAL NO CADASTRO */}
+                                  <div className="flex items-center gap-2 mb-3">
+                                      <input 
+                                          type="checkbox" id="newCatOp" 
+                                          className="w-4 h-4 text-indigo-600 rounded"
+                                          checked={tempCatIsOp}
+                                          onChange={e => setTempCatIsOp(e.target.checked)}
+                                      />
+                                      <label htmlFor="newCatOp" className="text-xs font-bold text-slate-700 cursor-pointer">
+                                          É Custo Operacional? <span className="text-slate-400 font-normal">(Abate do Lucro Líquido)</span>
+                                      </label>
+                                  </div>
 
-                      {/* ITEM 23: FLAGS ESPECIAIS */}
-                      <div className="bg-slate-50 p-3 rounded border border-slate-200">
-                          <label className="text-[10px] font-bold text-slate-400 uppercase block mb-2">Classificação Especial (RH)</label>
-                          <div className="flex gap-4">
-                              <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
-                                  <input 
-                                      type="checkbox" 
-                                      className="rounded text-red-600 focus:ring-red-500"
-                                      checked={expenseForm.isOvertime}
-                                      onChange={e => setExpenseForm({...expenseForm, isOvertime: e.target.checked})}
-                                  />
-                                  Hora Extra
-                              </label>
-                              <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
-                                  <input 
-                                      type="checkbox" 
-                                      className="rounded text-red-600 focus:ring-red-500"
-                                      checked={expenseForm.isHoliday}
-                                      onChange={e => setExpenseForm({...expenseForm, isHoliday: e.target.checked})}
-                                  />
-                                  Feriado / Domingo
-                              </label>
-                          </div>
+                                  <div className="flex justify-end gap-2">
+                                      <button onClick={() => setIsAddingCat(false)} className="text-xs text-red-600 font-bold px-3 py-1 hover:bg-red-50 rounded border border-transparent hover:border-red-200">Cancelar</button>
+                                      <button onClick={handleQuickAddCategory} className="text-xs bg-slate-800 text-white font-bold px-3 py-1 rounded hover:bg-slate-900 flex items-center gap-1">
+                                          <CheckSquare size={12}/> Criar
+                                      </button>
+                                  </div>
+                              </div>
+                          )}
                       </div>
                   </div>
 
                   <div className="p-4 bg-slate-50 border-t flex justify-end gap-2">
                       <button onClick={() => setIsExpenseModalOpen(false)} className="px-4 py-2 text-slate-600 font-bold hover:bg-slate-200 rounded text-sm">Cancelar</button>
-                      <button onClick={handleSaveExpense} className="px-6 py-2 bg-red-600 text-white rounded font-bold text-sm hover:bg-red-700 flex items-center gap-2">
-                          <Save size={16}/> Confirmar Despesa
+                      <button onClick={handleSaveExpense} className="px-6 py-2 bg-slate-800 text-white rounded font-bold text-sm hover:bg-slate-900 flex items-center gap-2">
+                          <Save size={16}/> Salvar
                       </button>
                   </div>
               </div>

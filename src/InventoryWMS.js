@@ -133,7 +133,11 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [deadStockDays, setDeadStockDays] = useState(30);
-  
+
+  const [quotationItems, setQuotationItems] = useState([]); // Permite edição
+  const [lossModalOpen, setLossModalOpen] = useState(false);
+  const [lossData, setLossData] = useState({ product: null, qty: 0, reason: '' });
+
   // Dados Auxiliares
   const [taxProfiles, setTaxProfiles] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
@@ -294,20 +298,52 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
   };
 
   const handleUpdateStock = async (product, qtyChange) => {
+      // Se for saída (negativo), abre o modal de motivo
+      if (qtyChange < 0) {
+          setLossData({ product, qty: qtyChange, reason: '' }); // Guarda qty negativo
+          setLossModalOpen(true);
+          return;
+      }
+      
+      // Se for entrada, processa direto
+      await processStockUpdate(product, qtyChange);
+  };
+
+  // Nova função auxiliar para efetivar a mudança (usada pela entrada direta e pelo modal de perda)
+  const processStockUpdate = async (product, qtyChange, reason = '') => {
       try {
           const storeId = String(storeConfig.id);
+          
+          // Lógica Pack vs Unidade
           if (product.itemType === 'pack' && product.parentId) {
               const factor = product.conversionFactor || product.packQuantity || 1;
               const parentRef = doc(db, 'artifacts', storeId, 'public', 'data', 'products', product.parentId);
               await updateDoc(parentRef, { stock: increment(qtyChange * factor) });
-              showNotification('Estoque do item pai atualizado via caixa!', 'success');
           } else {
               const ref = doc(db, 'artifacts', storeId, 'public', 'data', 'products', product.id);
               await updateDoc(ref, { stock: increment(qtyChange) });
-              showNotification("Estoque atualizado!", "success");
           }
+
+          // Se tiver motivo (Perca), registra no histórico de vendas como "PERCA" para constar no financeiro
+          if (reason) {
+              const saleRef = collection(db, 'artifacts', storeId, 'public', 'data', 'sales');
+              await addDoc(saleRef, {
+                  date: new Date().toISOString(),
+                  total: 0, // Financeiro zero
+                  cost: (product.cost || 0) * Math.abs(qtyChange),
+                  items: [{ ...product, qty: Math.abs(qtyChange) }],
+                  paymentMethod: 'PERCA',
+                  isLoss: true,
+                  lossReason: reason,
+                  userId: 'WMS',
+                  clientName: 'AJUSTE ESTOQUE'
+              });
+          }
+
+          showNotification(qtyChange > 0 ? "Estoque adicionado!" : "Baixa realizada.", "success");
+          setLossModalOpen(false);
       } catch (e) {
-          showNotification("Erro ao mover estoque.", "error");
+          showNotification("Erro ao atualizar estoque.", "error");
       }
   };
 
@@ -356,21 +392,44 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
   }, [products, deadStockDays]); // Adicione deadStockDays na dependência
 
   // Lista para Cotação (Estoque < Mínimo) agrupada por Fornecedor
-  const quotationData = useMemo(() => {
-      const lowStock = products.filter(p => p.stock <= (p.minStock || 5) && p.itemType !== 'pack');
-      const grouped = {};
-      
-      lowStock.forEach(p => {
-          const supId = p.supplierId || 'unknown';
-          const supName = suppliers.find(s => s.id === supId)?.name || 'Fornecedor Não Definido';
-          if (!grouped[supId]) grouped[supId] = { name: supName, items: [] };
-          grouped[supId].items.push({
-              ...p,
-              missing: (p.minStock || 5) - p.stock + 5 // Sugere comprar para ficar com +5 de folga
+  // Substitua o useMemo quotationData por isso:
+  
+  // 1. Carrega dados ao entrar na aba
+  useEffect(() => {
+      if (activeTab === 'quotation') {
+          const lowStock = products.filter(p => {
+             const stock = getDisplayStock(p);
+             const min = Number(p.minStock) || 5;
+             return stock <= min && p.itemType !== 'pack';
           });
+          
+          setQuotationItems(lowStock.map(p => ({
+              ...p,
+              // Calcula sugestão inicial, mas permite edição
+              buyQty: (Number(p.minStock) || 5) - getDisplayStock(p) + 5 
+          })));
+      }
+  }, [activeTab, products]);
+
+  // 2. Agrupa baseado no estado local (editável)
+  const groupedQuotation = useMemo(() => {
+      const grouped = {};
+      quotationItems.forEach(item => {
+          // Fix: Converte ID para string para evitar erro de comparação
+          const supId = item.supplierId ? String(item.supplierId) : 'unknown';
+          const supplierObj = suppliers.find(s => String(s.id) === supId);
+          const supName = supplierObj ? supplierObj.name : 'Fornecedor Não Definido';
+          
+          if (!grouped[supId]) grouped[supId] = { name: supName, items: [] };
+          grouped[supId].items.push(item);
       });
       return Object.values(grouped);
-  }, [products, suppliers]);
+  }, [quotationItems, suppliers]);
+
+  // 3. Função para editar quantidade na tabela
+  const handleUpdateQuoteQty = (id, val) => {
+      setQuotationItems(prev => prev.map(i => i.id === id ? { ...i, buyQty: Number(val) } : i));
+  };
 
   return (
     <div className="space-y-4 animate-in fade-in h-full flex flex-col">
@@ -567,14 +626,15 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
       {/* --- ABA 4: COTAÇÃO INTELIGENTE --- */}
       {activeTab === 'quotation' && (
           <div className="flex-1 overflow-y-auto space-y-4">
-              {quotationData.length === 0 ? (
+              {/* CORREÇÃO: Usar groupedQuotation ao invés de quotationData */}
+              {groupedQuotation.length === 0 ? (
                   <div className="text-center p-10 text-slate-400 bg-white rounded border border-slate-200">
                       <CheckCircle size={48} className="mx-auto mb-4 text-emerald-200"/>
                       <h3 className="text-lg font-bold text-emerald-700">Estoque Abastecido!</h3>
                       <p>Nenhum item abaixo do estoque mínimo.</p>
                   </div>
               ) : (
-                  quotationData.map((group, idx) => (
+                  groupedQuotation.map((group, idx) => (
                       <div key={idx} className="bg-white rounded border border-slate-200 shadow-sm overflow-hidden">
                           <div className="p-4 bg-slate-50 border-b flex justify-between items-center">
                               <h3 className="font-bold text-slate-700 flex items-center gap-2">
@@ -593,16 +653,27 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                                       <th className="p-3">Produto</th>
                                       <th className="p-3 text-center">Atual</th>
                                       <th className="p-3 text-center">Mínimo</th>
-                                      <th className="p-3 text-center bg-blue-50 text-blue-700">Comprar</th>
+                                      <th className="p-3 text-center bg-blue-50 text-blue-700">Comprar (Qtd)</th>
                                   </tr>
                               </thead>
                               <tbody className="divide-y">
-                                  {group.items.map((item, i) => (
-                                      <tr key={i}>
-                                          <td className="p-3">{item.name}</td>
-                                          <td className="p-3 text-center text-red-600 font-bold">{item.stock}</td>
+                                  {group.items.map((item) => (
+                                      <tr key={item.id}>
+                                          <td className="p-3">
+                                              <div className="font-bold text-slate-800">{item.name}</div>
+                                              <div className="text-xs text-slate-400">Estoque: {item.stock}</div>
+                                          </td>
+                                          <td className="p-3 text-center text-red-600 font-bold">{getDisplayStock(item)}</td>
                                           <td className="p-3 text-center text-slate-500">{item.minStock || 5}</td>
-                                          <td className="p-3 text-center bg-blue-50 font-bold text-blue-700">+{item.missing}</td>
+                                          <td className="p-3 text-center bg-blue-50">
+                                              {/* Input para editar a quantidade a comprar */}
+                                              <input 
+                                                type="number" 
+                                                className="w-20 text-center font-bold text-blue-700 border border-blue-200 rounded p-1 outline-none focus:ring-2 focus:ring-blue-400"
+                                                value={item.buyQty}
+                                                onChange={(e) => handleUpdateQuoteQty(item.id, e.target.value)}
+                                              />
+                                          </td>
                                       </tr>
                                   ))}
                               </tbody>
@@ -885,6 +956,37 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
               </div>
           </div>
       )}
+
+      {lossModalOpen && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+            <div className="bg-white p-6 rounded-lg w-full max-w-sm shadow-xl">
+                <h3 className="font-bold text-red-600 mb-2 flex items-center gap-2"><AlertTriangle/> Confirmar Baixa</h3>
+                <p className="text-sm text-slate-600 mb-4">Você está removendo <strong>{Math.abs(lossData.qty)}</strong> itens de <strong>{lossData.product?.name}</strong>.</p>
+                
+                <label className="block text-xs font-bold text-slate-500 mb-1">Motivo (Obrigatório)</label>
+                <input 
+                    className="w-full border p-2 rounded mb-4" 
+                    placeholder="Ex: Validade, Quebra, Consumo Interno..." 
+                    value={lossData.reason}
+                    onChange={e => setLossData({...lossData, reason: e.target.value})}
+                    autoFocus
+                />
+                
+                <div className="flex justify-end gap-2">
+                    <button onClick={() => setLossModalOpen(false)} className="px-4 py-2 border rounded text-sm font-bold">Cancelar</button>
+                    <button 
+                        onClick={() => {
+                            if(!lossData.reason) return alert('Informe o motivo!');
+                            processStockUpdate(lossData.product, lossData.qty, lossData.reason);
+                        }} 
+                        className="px-4 py-2 bg-red-600 text-white rounded text-sm font-bold hover:bg-red-700"
+                    >
+                        Confirmar Perda
+                    </button>
+                </div>
+            </div>
+        </div>
+    )}
 
     </div>
   );

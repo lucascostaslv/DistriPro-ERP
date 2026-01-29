@@ -3,7 +3,7 @@ import {
   Calendar, Search, CheckCircle, Eye, X, Package, 
   ChevronLeft, ChevronRight, CalendarDays
 } from 'lucide-react';
-import { collection, getDocs, query, orderBy } from 'firebase/firestore';
+import { collection, getDocs, query, orderBy, where } from 'firebase/firestore';
 import { db } from '../firebase'; 
 
 // Utilitários de formatação (Blindados contra NaN)
@@ -72,24 +72,70 @@ const AccountsPayable = ({ products }) => {
     return ['ALL', ...Array.from(cats)];
   }, [products]);
 
-  // Carregar Notas
+  // Carregar Dados (Notas + Despesas)
   useEffect(() => {
-    const fetchInvoices = async () => {
+    const fetchData = async () => {
       setLoading(true);
       try {
         const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
-        const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'invoices'), orderBy('createdAt', 'desc'));
-        const snap = await getDocs(q);
-        const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        setInvoices(data);
+        
+        // 1. Busca Invoices (Notas Fiscais)
+        const qInvoices = query(collection(db, 'artifacts', appId, 'public', 'data', 'invoices'), orderBy('createdAt', 'desc'));
+        const snapInvoices = await getDocs(qInvoices);
+        const invoicesData = snapInvoices.docs.map(d => ({ id: d.id, source: 'invoice', ...d.data() }));
+
+        // 2. Busca Despesas (Transactions)
+        const qExpenses = query(
+            collection(db, 'artifacts', appId, 'public', 'data', 'financial_movements'), 
+            where('type', '==', 'EXPENSE')
+        );
+        const snapExpenses = await getDocs(qExpenses);
+        
+        const expensesData = snapExpenses.docs.map(d => {
+            const data = d.data();
+            
+            // Define status
+            let currentStatus = data.status || 'PENDENTE';
+            // Se não tiver status definido, calcula pela data
+            if (!data.status) {
+                const today = new Date().toISOString().split('T')[0];
+                currentStatus = data.date <= today ? 'ATRASADO' : 'PENDENTE';
+            }
+
+            return {
+                id: d.id,
+                source: 'expense',
+                // Header para pesquisa e título
+                header: {
+                    number: 'DESP', 
+                    entityName: (data.category || 'Geral') + ' - ' + (data.description || 'Despesa'), 
+                    issueDate: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : data.date,
+                    total: Number(data.amount) || 0
+                },
+                items: [],
+                // FINANCIALS É O SEGREDO: O componente filtra usando inst.dueDate
+                financials: [{
+                    number: '1',
+                    dueDate: data.date, // Ex: "2026-03-19"
+                    value: Number(data.amount) || 0,
+                    status: currentStatus
+                }],
+                // Campos originais para referência
+                ...data
+            };
+        });
+
+        // 3. Combina e Atualiza
+        setInvoices([...invoicesData, ...expensesData]);
+
       } catch (error) {
-        console.error("Erro ao buscar contas:", error);
+          console.error("Erro ao buscar contas:", error);
       } finally {
-        setLoading(false);
+          setLoading(false);
       }
     };
-    fetchInvoices();
-  }, []);
+    fetchData();
+  }, [products]);
 
   // Processamento dos dados (Filtragem e Correção NaN)
   const payableItems = useMemo(() => {

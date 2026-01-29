@@ -504,13 +504,18 @@ const handleSaveSupplier = async () => {
     const xNome = getTagContent(partnerNode, "xNome");
     const cnpj = getTagContent(partnerNode, "CNPJ") || getTagContent(partnerNode, "CPF");
 
+    let docIdentificador = getTagContent(partnerNode, "CNPJ");
+    if (!docIdentificador) {
+        docIdentificador = getTagContent(partnerNode, "CPF");
+    }
+
     // Parsing dos Itens
     const detList = infNFe.getElementsByTagName("det");
     
     let supplier = { name: xNome, id: 'AUTO' };
     if (auth.currentUser) {
         try {
-            supplier = await getOrCreateSupplier(cnpj, xNome);
+            supplier = await getOrCreateSupplier(docIdentificador, xNome);
         } catch (e) {
             console.warn("Erro ao cadastrar fornecedor auto:", e);
         }
@@ -1288,7 +1293,7 @@ const handleSaveSupplier = async () => {
                             <DenseInput value={supplierForm.name} onChange={e => setSupplierForm({...supplierForm, name: e.target.value})} className="uppercase"/>
                         </div>
                         <div className="col-span-4">
-                            <Label required>CNPJ</Label>
+                            <Label required>CNPJ / CPF</Label>
                             <DenseInput value={supplierForm.tax_id} onChange={e => setSupplierForm({...supplierForm, tax_id: e.target.value})} placeholder="Apenas números"/>
                         </div>
                         
