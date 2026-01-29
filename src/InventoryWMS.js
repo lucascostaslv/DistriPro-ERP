@@ -2,25 +2,40 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Search, Plus, Edit, Trash2, Package, Save, X, AlertTriangle, 
   CheckCircle, BarChart3, Boxes, ArrowRightLeft, Lock, ArrowUpCircle, ArrowDownCircle,
-  DollarSign, Layers, Calculator
+  DollarSign, Layers, Calculator, Clock, Share, Copy, Truck, FileText, Calendar, Filter
 } from 'lucide-react';
-import { collection, doc, updateDoc, deleteDoc, addDoc, serverTimestamp, increment } from "firebase/firestore";
+import { collection, doc, updateDoc, deleteDoc, addDoc, serverTimestamp, increment, query, where, getDocs } from "firebase/firestore";
 import { db } from './firebase'; 
 import { supabase } from './supabaseClient';
 
-// Máscaras e Utilitários
+// --- UTILITÁRIOS ---
 const masks = {
   ncm: (val) => val ? String(val).replace(/\D/g, '').replace(/^(\d{4})(\d{2})(\d{2})/, '$1.$2.$3').substring(0, 10) : '',
   cest: (val) => val ? String(val).replace(/\D/g, '').replace(/^(\d{2})(\d{3})(\d{2})/, '$1.$2.$3').substring(0, 9) : '',
   ean: (val) => val ? String(val).replace(/\D/g, '').substring(0, 14) : '',
   currency: (val) => {
-      if (!val) return '';
+      if (val === undefined || val === null) return 'R$ 0,00';
       return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val);
   }
 };
 
+const formatDate = (timestamp) => {
+    if (!timestamp) return 'Nunca';
+    // Suporta tanto timestamp do Firebase quanto data string normal
+    const date = timestamp.seconds ? new Date(timestamp.seconds * 1000) : new Date(timestamp);
+    return date.toLocaleDateString('pt-BR');
+};
+
+const getDaysDiff = (dateVal) => {
+    if (!dateVal) return 0;
+    const date = dateVal.seconds ? new Date(dateVal.seconds * 1000) : new Date(dateVal);
+    const now = new Date();
+    const diffTime = Math.abs(now - date);
+    return Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
+};
+
 // --- CARD DE MOVIMENTAÇÃO RÁPIDA (ABA 1) ---
-const StockCard = ({ product, getDisplayStock, getParentName, onUpdateStock }) => {
+const StockCard = ({ product, getDisplayStock, getParentName, onUpdateStock, onOpenHistory }) => {
     const [qtyInput, setQtyInput] = useState('');
     const isPack = product.itemType === 'pack';
     const displayStock = getDisplayStock(product);
@@ -32,13 +47,22 @@ const StockCard = ({ product, getDisplayStock, getParentName, onUpdateStock }) =
 
     return (
         <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm flex flex-col justify-between hover:shadow-md transition-shadow relative overflow-hidden group">
-             <div className={`absolute top-0 right-0 p-1 px-2 rounded-bl text-[10px] font-bold uppercase ${isPack ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}`}>
-                {isPack ? 'Caixa/Fardo' : 'Unidade'}
+             {/* Botão Informações (Capivara) */}
+             <button 
+                onClick={() => onOpenHistory(product)}
+                className="absolute top-2 right-2 p-1 text-slate-300 hover:text-blue-600 z-10"
+                title="Ver Histórico Completo"
+             >
+                 <FileText size={16}/>
+             </button>
+
+             <div className={`absolute top-0 left-0 p-1 px-2 rounded-br text-[9px] font-bold uppercase ${isPack ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}`}>
+                {isPack ? 'Caixa' : 'Unidade'}
              </div>
 
-             <div>
-                <div className="flex justify-between items-start pr-16">
-                    <h3 className="font-bold text-slate-800 line-clamp-2 min-h-[40px] text-sm" title={product.name}>
+             <div className="mt-4">
+                <div className="flex justify-between items-start pr-4">
+                    <h3 className="font-bold text-slate-800 line-clamp-2 min-h-[40px] text-sm leading-tight cursor-pointer hover:text-indigo-600" onClick={() => onOpenHistory(product)}>
                         {product.name}
                     </h3>
                 </div>
@@ -60,18 +84,16 @@ const StockCard = ({ product, getDisplayStock, getParentName, onUpdateStock }) =
                         <span className="font-bold text-slate-700">{masks.currency(product.price)}</span>
                     </div>
                     <div>
-                        <span className="text-slate-400 block text-[10px]">Atacado</span>
-                        <span className="font-bold text-emerald-600">
-                            {product.wholesalePrice > 0 ? masks.currency(product.wholesalePrice) : '-'}
-                        </span>
+                        <span className="text-slate-400 block text-[10px]">Custo</span>
+                        <span className="font-bold text-slate-500">{masks.currency(product.cost)}</span>
                     </div>
                 </div>
              </div>
 
-             <div className="mt-4 pt-3 border-t border-slate-100">
+             <div className="mt-3 pt-2 border-t border-slate-100">
                 <div className="flex justify-between items-end mb-2">
                     <span className="text-[10px] font-bold text-slate-400 uppercase">Estoque Atual</span>
-                    <span className={`text-xl font-bold ${displayStock < 10 ? 'text-red-500' : 'text-slate-800'}`}>
+                    <span className={`text-xl font-bold ${displayStock < (product.minStock || 5) ? 'text-red-500' : 'text-slate-800'}`}>
                         {displayStock} <span className="text-xs font-normal text-slate-400">{product.unit}</span>
                     </span>
                 </div>
@@ -87,14 +109,14 @@ const StockCard = ({ product, getDisplayStock, getParentName, onUpdateStock }) =
                      <button 
                         onClick={() => { if(qtyInput) handleQuickStock(Number(qtyInput)); }}
                         className="bg-emerald-100 text-emerald-700 px-2 rounded hover:bg-emerald-200"
-                        title="Entrada"
+                        title="Entrada (+)"
                      >
                         <Plus size={16}/>
                      </button>
                      <button 
                         onClick={() => { if(qtyInput) handleQuickStock(Number(qtyInput) * -1); }}
                         className="bg-red-100 text-red-700 px-2 rounded hover:bg-red-200"
-                        title="Saída"
+                        title="Saída (-)"
                      >
                         <Trash2 size={16}/>
                      </button>
@@ -104,56 +126,59 @@ const StockCard = ({ product, getDisplayStock, getParentName, onUpdateStock }) =
     );
 };
 
+// --- COMPONENTE PRINCIPAL ---
 const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig }) => {
   const [activeTab, setActiveTab] = useState('quick'); 
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [taxProfiles, setTaxProfiles] = useState([]);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [deadStockDays, setDeadStockDays] = useState(30);
   
+  // Dados Auxiliares
+  const [taxProfiles, setTaxProfiles] = useState([]);
+  const [suppliers, setSuppliers] = useState([]);
+  
+  // Estados de Formulário e Seleção
   const initialFormState = {
-      name: '',
-      barcode: '', 
-      price: '', 
-      wholesalePrice: '', 
-      costPrice: '', 
-      profitMargin: '', 
-      stock: 0,
-      minStock: 5,
-      unit: 'UN',
-      category: 'Geral',
-      ncm: '',
-      cest: '',
-      taxProfileId: '',
-      itemType: 'unit',
-      parentId: '',
-      packQuantity: 0
+      name: '', barcode: '', price: '', wholesalePrice: '', costPrice: '', 
+      profitMargin: '', stock: 0, minStock: 5, unit: 'UN', category: 'Geral',
+      ncm: '', cest: '', taxProfileId: '', itemType: 'unit', parentId: '', packQuantity: 0,
+      supplierId: '' // NOVO CAMPO: Fornecedor
   };
 
   const [currentProduct, setCurrentProduct] = useState(initialFormState);
+  const [selectedHistoryProduct, setSelectedHistoryProduct] = useState(null);
+  
   const [createPackMode, setCreatePackMode] = useState(false);
   const [packFormData, setPackFormData] = useState({
-      barcode: '',
-      quantity: 12,
-      price: '',
-      wholesalePrice: '',
-      costPrice: ''
+      barcode: '', quantity: 12, price: '', wholesalePrice: '', costPrice: ''
   });
 
+  // Carregar Dados Auxiliares (Perfis e Fornecedores)
   useEffect(() => {
-    const loadTaxProfiles = async () => {
+    const loadAuxData = async () => {
         if (!storeConfig?.id) return;
-        const { data } = await supabase.from('fiscal_tax_profiles').select('*').eq('firebase_store_id', String(storeConfig.id));
-        if (data) setTaxProfiles(data);
+        const storeId = String(storeConfig.id);
+        
+        // Perfis Fiscais
+        const { data: profiles } = await supabase.from('fiscal_tax_profiles').select('*').eq('firebase_store_id', storeId);
+        if (profiles) setTaxProfiles(profiles);
+
+        // Fornecedores (Tabela unificada fiscal_clients)
+        const { data: suppliersData } = await supabase.from('fiscal_clients').select('*').eq('firebase_store_id', storeId).order('name');
+        if (suppliersData) setSuppliers(suppliersData);
     };
-    loadTaxProfiles();
+    loadAuxData();
   }, [storeConfig]);
 
+  // Cálculos de Custo/Margem
   const handleCostCalculation = (field, value) => {
       let newData = { ...currentProduct, [field]: value };
+      const getNum = (v) => parseFloat(String(v).replace(',', '.')) || 0;
       
-      const cost = parseFloat(newData.costPrice) || 0;
-      const margin = parseFloat(newData.profitMargin) || 0;
-      const price = parseFloat(newData.price) || 0;
+      const cost = getNum(newData.costPrice);
+      const margin = getNum(newData.profitMargin);
+      const price = getNum(newData.price);
 
       if (field === 'costPrice' && margin > 0) {
           newData.price = (cost * (1 + margin / 100)).toFixed(2);
@@ -171,19 +196,18 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
       if (createPackMode) {
           const packQty = Number(packFormData.quantity) || 1;
           const unitCost = Number(newData.costPrice) || 0;
-          setPackFormData(prev => ({
-              ...prev,
-              costPrice: (unitCost * packQty).toFixed(2)
-          }));
+          setPackFormData(prev => ({ ...prev, costPrice: (unitCost * packQty).toFixed(2) }));
       }
   };
 
+  // Ações de CRUD
   const handleEdit = (prod) => {
       setCurrentProduct({
           ...prod,
           barcode: prod.barcode || prod.cbaCode || prod.ean || '',
           costPrice: prod.cost || prod.costPrice || 0,
-          packQuantity: prod.conversionFactor || prod.packQuantity || 0
+          packQuantity: prod.conversionFactor || prod.packQuantity || 0,
+          supplierId: prod.supplierId || ''
       });
       setCreatePackMode(false); 
       setIsModalOpen(true);
@@ -198,9 +222,7 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
   const handleSave = async () => {
     try {
         const storeId = String(storeConfig.id);
-        if (!currentProduct.name || !currentProduct.price) {
-            return showNotification('Nome e Preço de Venda são obrigatórios.', 'error');
-        }
+        if (!currentProduct.name || !currentProduct.price) return showNotification('Nome e Preço são obrigatórios.', 'error');
 
         const productData = {
             ...currentProduct,
@@ -215,6 +237,7 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
             stock: Number(currentProduct.stock),
             conversionFactor: Number(currentProduct.packQuantity) || 1,
             packQuantity: Number(currentProduct.packQuantity) || 1,
+            supplierId: currentProduct.supplierId, // Salva o fornecedor
             last_updated: serverTimestamp()
         };
 
@@ -224,15 +247,13 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
             mainDocRef = { id: currentProduct.id };
             showNotification('Produto atualizado!', 'success');
         } else {
-            const docRef = await addDoc(collection(db, 'artifacts', storeId, 'public', 'data', 'products'), {
-                ...productData,
-                created_at: serverTimestamp()
-            });
+            const docRef = await addDoc(collection(db, 'artifacts', storeId, 'public', 'data', 'products'), { ...productData, created_at: serverTimestamp() });
             mainDocRef = docRef;
             showNotification('Produto criado!', 'success');
         }
 
         if (!currentProduct.id && createPackMode && mainDocRef.id) {
+            // Criação automática da Caixa
             const packData = {
                 name: `CX ${currentProduct.name}`,
                 cbaCode: packFormData.barcode,
@@ -250,9 +271,8 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                 unit: 'CX',
                 created_at: serverTimestamp()
             };
-
             await addDoc(collection(db, 'artifacts', storeId, 'public', 'data', 'products'), packData);
-            showNotification('Caixa vinculada criada com sucesso!', 'success');
+            showNotification('Caixa vinculada criada!', 'success');
         }
 
         setIsModalOpen(false);
@@ -291,6 +311,7 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
       }
   };
 
+  // --- FUNÇÕES DE LÓGICA DE NEGÓCIO ---
   const getParentName = (parentId) => {
       const parent = products.find(p => p.id === parentId);
       return parent ? parent.name : '...';
@@ -305,73 +326,130 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
       return prod.stock; 
   };
 
+  const handleCopyQuote = (supplierName, items) => {
+      const text = `*COTAÇÃO - ${supplierName}*\n\n` + 
+                   items.map(i => `- ${i.missing}x ${i.name} (${i.stock} em estoque)`).join('\n') +
+                   `\n\nGerado em ${new Date().toLocaleDateString()}`;
+      navigator.clipboard.writeText(text);
+      showNotification('Pedido copiado para área de transferência!', 'success');
+  };
+
+  // --- FILTROS ---
   const filteredProducts = useMemo(() => {
       return products.filter(p => {
           const term = searchTerm.toLowerCase();
-          return p.name.toLowerCase().includes(term) || (p.barcode && p.barcode.includes(term)) || (p.cbaCode && p.cbaCode.includes(term));
+          return p.name.toLowerCase().includes(term) || (p.barcode && p.barcode.includes(term));
       });
   }, [products, searchTerm]);
 
-  return (
-    <div className="space-y-4 animate-in fade-in">
+  // Lista de Produtos Parados (> 30 dias sem venda)
+  const deadStockProducts = useMemo(() => {
+      const limitDays = deadStockDays > 0 ? deadStockDays : 30; // Se zero/vazio, usa 30
       
-      <div className="bg-white rounded border border-slate-200 shadow-sm overflow-hidden">
-          <div className="flex border-b">
+      return products.filter(p => {
+          // Se lastSale não existe, considera infinito (9999 dias)
+          const days = p.lastSale ? getDaysDiff(p.lastSale) : 9999;
+          
+          // Lógica: Dias parado >= Limite E (tem estoque físico OU é pacote com estoque virtual)
+          return days >= limitDays && (p.stock > 0 || getDisplayStock(p) > 0);
+      }).sort((a,b) => (a.lastSale?.seconds || 0) - (b.lastSale?.seconds || 0));
+  }, [products, deadStockDays]); // Adicione deadStockDays na dependência
+
+  // Lista para Cotação (Estoque < Mínimo) agrupada por Fornecedor
+  const quotationData = useMemo(() => {
+      const lowStock = products.filter(p => p.stock <= (p.minStock || 5) && p.itemType !== 'pack');
+      const grouped = {};
+      
+      lowStock.forEach(p => {
+          const supId = p.supplierId || 'unknown';
+          const supName = suppliers.find(s => s.id === supId)?.name || 'Fornecedor Não Definido';
+          if (!grouped[supId]) grouped[supId] = { name: supName, items: [] };
+          grouped[supId].items.push({
+              ...p,
+              missing: (p.minStock || 5) - p.stock + 5 // Sugere comprar para ficar com +5 de folga
+          });
+      });
+      return Object.values(grouped);
+  }, [products, suppliers]);
+
+  return (
+    <div className="space-y-4 animate-in fade-in h-full flex flex-col">
+      
+      <div className="bg-white rounded border border-slate-200 shadow-sm overflow-hidden flex-shrink-0">
+          <div className="flex border-b overflow-x-auto">
               <button 
                 onClick={() => setActiveTab('quick')}
-                className={`flex-1 py-3 text-sm font-bold flex items-center justify-center gap-2 transition-colors ${activeTab === 'quick' ? 'bg-slate-800 text-white' : 'hover:bg-slate-50 text-slate-500'}`}
+                className={`px-6 py-3 text-sm font-bold flex items-center gap-2 whitespace-nowrap transition-colors ${activeTab === 'quick' ? 'bg-slate-800 text-white' : 'hover:bg-slate-50 text-slate-500'}`}
               >
-                  <ArrowRightLeft size={18}/> Movimentação Rápida
+                  <ArrowRightLeft size={18}/> Rápido
               </button>
               <button 
                 onClick={() => setActiveTab('management')}
-                className={`flex-1 py-3 text-sm font-bold flex items-center justify-center gap-2 transition-colors ${activeTab === 'management' ? 'bg-indigo-600 text-white' : 'hover:bg-slate-50 text-slate-500'}`}
+                className={`px-6 py-3 text-sm font-bold flex items-center gap-2 whitespace-nowrap transition-colors ${activeTab === 'management' ? 'bg-indigo-600 text-white' : 'hover:bg-slate-50 text-slate-500'}`}
               >
-                  <Package size={18}/> Gestão e Cadastro
+                  <Package size={18}/> Cadastro
+              </button>
+              <button 
+                onClick={() => setActiveTab('analysis')}
+                className={`px-6 py-3 text-sm font-bold flex items-center gap-2 whitespace-nowrap transition-colors ${activeTab === 'analysis' ? 'bg-amber-600 text-white' : 'hover:bg-slate-50 text-slate-500'}`}
+              >
+                  <BarChart3 size={18}/> Produtos Parados
+              </button>
+              <button 
+                onClick={() => setActiveTab('quotation')}
+                className={`px-6 py-3 text-sm font-bold flex items-center gap-2 whitespace-nowrap transition-colors ${activeTab === 'quotation' ? 'bg-emerald-600 text-white' : 'hover:bg-slate-50 text-slate-500'}`}
+              >
+                  <Truck size={18}/> Cotação Inteligente
               </button>
           </div>
 
-          <div className="p-4 flex justify-between items-center bg-slate-50">
-             <div className="relative flex-1 max-w-md">
-                <Search className="absolute left-3 top-2.5 text-slate-400" size={18}/>
-                <input 
-                    className="w-full pl-10 pr-4 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none bg-white"
-                    placeholder="Buscar produto..."
-                    value={searchTerm}
-                    onChange={e => setSearchTerm(e.target.value)}
-                />
-             </div>
-             {activeTab === 'management' && (
-                <button onClick={handleAddNew} className="bg-slate-800 text-white px-4 py-2 rounded font-bold hover:bg-slate-700 flex gap-2 ml-4">
-                    <Plus size={20}/> Novo Produto
-                </button>
-             )}
-          </div>
+          {(activeTab === 'quick' || activeTab === 'management') && (
+            <div className="p-4 flex justify-between items-center bg-slate-50">
+                <div className="relative flex-1 max-w-md">
+                    <Search className="absolute left-3 top-2.5 text-slate-400" size={18}/>
+                    <input 
+                        className="w-full pl-10 pr-4 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none bg-white"
+                        placeholder="Buscar produto (Nome, Código)..."
+                        value={searchTerm}
+                        onChange={e => setSearchTerm(e.target.value)}
+                    />
+                </div>
+                {activeTab === 'management' && (
+                    <button onClick={handleAddNew} className="bg-slate-800 text-white px-4 py-2 rounded font-bold hover:bg-slate-700 flex gap-2 ml-4">
+                        <Plus size={20}/> Novo Produto
+                    </button>
+                )}
+            </div>
+          )}
       </div>
 
+      {/* --- ABA 1: MOVIMENTAÇÃO RÁPIDA --- */}
       {activeTab === 'quick' && (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-              {filteredProducts.map(prod => (
-                 <StockCard 
-                    key={prod.id}
-                    product={prod} 
-                    getDisplayStock={getDisplayStock}
-                    getParentName={getParentName}
-                    onUpdateStock={handleUpdateStock}
-                 />
-              ))}
+          <div className="flex-1 overflow-y-auto">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 p-1">
+                {filteredProducts.map(prod => (
+                    <StockCard 
+                        key={prod.id}
+                        product={prod} 
+                        getDisplayStock={getDisplayStock}
+                        getParentName={getParentName}
+                        onUpdateStock={handleUpdateStock}
+                        onOpenHistory={(p) => { setSelectedHistoryProduct(p); setIsHistoryOpen(true); }}
+                    />
+                ))}
+            </div>
           </div>
       )}
 
-      {/* Tabela de Gestão com Coluna ATACADO adicionada */}
+      {/* --- ABA 2: CADASTRO E GESTÃO --- */}
       {activeTab === 'management' && (
-        <div className="bg-white rounded border border-slate-200 shadow-sm overflow-hidden">
+        <div className="flex-1 overflow-y-auto bg-white rounded border border-slate-200 shadow-sm">
              <table className="w-full text-left text-sm">
-                <thead className="bg-slate-100 text-slate-600 uppercase text-xs font-bold">
+                <thead className="bg-slate-100 text-slate-600 uppercase text-xs font-bold sticky top-0 z-10">
                     <tr>
                         <th className="p-4">Produto</th>
-                        <th className="p-4 text-right">Preço Varejo</th>
-                        <th className="p-4 text-right text-emerald-600">Preço Atacado</th>
+                        <th className="p-4 text-right">Venda</th>
+                        <th className="p-4 text-right text-emerald-600">Atacado</th>
                         <th className="p-4">Custo</th>
                         <th className="p-4 text-center">Tipo</th>
                         <th className="p-4 text-right">Ações</th>
@@ -379,7 +457,11 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                     {filteredProducts.map(prod => (
-                        <tr key={prod.id} className="hover:bg-slate-50">
+                        <tr 
+                            key={prod.id} 
+                            className="hover:bg-slate-50 cursor-pointer" // Adicionei cursor-pointer para indicar clique
+                            onClick={() => { setSelectedHistoryProduct(prod); setIsHistoryOpen(true); }} // ABRE A CAPIVARA
+                        >
                             <td className="p-4">
                                 <div className="font-bold text-slate-800">{prod.name}</div>
                                 <div className="text-xs text-slate-500">{prod.barcode || prod.cbaCode}</div>
@@ -395,8 +477,19 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                                 </span>
                             </td>
                             <td className="p-4 text-right flex justify-end gap-2">
-                                <button onClick={() => handleEdit(prod)} className="bg-blue-100 text-blue-600 p-1.5 rounded hover:bg-blue-200"><Edit size={14}/></button>
-                                <button onClick={() => handleDelete(prod.id)} className="bg-red-100 text-red-600 p-1.5 rounded hover:bg-red-200"><Trash2 size={14}/></button>
+                                {/* BOTÕES COM STOP PROPAGATION (Para não abrir a modal ao clicar neles) */}
+                                <button 
+                                    onClick={(e) => { e.stopPropagation(); handleEdit(prod); }} 
+                                    className="bg-blue-100 text-blue-600 p-1.5 rounded hover:bg-blue-200"
+                                >
+                                    <Edit size={14}/>
+                                </button>
+                                <button 
+                                    onClick={(e) => { e.stopPropagation(); handleDelete(prod.id); }} 
+                                    className="bg-red-100 text-red-600 p-1.5 rounded hover:bg-red-200"
+                                >
+                                    <Trash2 size={14}/>
+                                </button>
                             </td>
                         </tr>
                     ))}
@@ -405,6 +498,122 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
         </div>
       )}
 
+      {/* --- ABA 3: PRODUTOS PARADOS (DEAD STOCK) --- */}
+      {activeTab === 'analysis' && (
+          <div className="flex-1 overflow-y-auto">
+                <div className="bg-amber-50 p-3 rounded border border-amber-200 mb-4 flex flex-col md:flex-row md:items-center gap-3 shadow-sm mx-1 mt-1">
+                  <div className="flex items-center gap-2 text-amber-800 font-bold">
+                      <Filter size={20} className="text-amber-600"/>
+                      <span>Filtro de Inatividade:</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                      <span className="text-sm text-amber-700">Mostrar itens sem venda há</span>
+                      <input
+                          type="number"
+                          min="1"
+                          className="w-16 border border-amber-300 rounded p-1 text-center font-bold text-amber-900 focus:ring-2 focus:ring-amber-500 outline-none bg-white"
+                          value={deadStockDays}
+                          onFocus={(e) => e.target.select()}
+                          onChange={e => setDeadStockDays(Number(e.target.value))}
+                      />
+                      <span className="text-sm text-amber-700">dias ou mais.</span>
+                  </div>
+              </div>
+              {deadStockProducts.length === 0 ? (
+                  <div className="text-center p-10 text-slate-400 bg-white rounded border border-slate-200">
+                      <CheckCircle size={48} className="mx-auto mb-4 text-emerald-200"/>
+                      <h3 className="text-lg font-bold text-emerald-700">Tudo fluindo bem!</h3>
+                      <p>Nenhum produto parado há mais de 30 dias.</p>
+                  </div>
+              ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {deadStockProducts.map(prod => {
+                          const hasSale = !!prod.lastSale;
+                            const days = hasSale ? getDaysDiff(prod.lastSale) : 0;
+                            
+                            const moneyStuck = (prod.stock || 0) * (prod.cost || 0);
+                            const suggestedPromo = (prod.price * 0.85).toFixed(2);
+
+                          return (
+                              <div key={prod.id} className="bg-white p-4 rounded border border-red-200 shadow-sm relative overflow-hidden">
+                                  <div className={`absolute top-0 right-0 text-xs font-bold px-2 py-1 rounded-bl ${hasSale ? 'bg-red-100 text-red-700' : 'bg-slate-700 text-white'}`}>
+                                        {hasSale ? `${days} dias sem venda` : 'Nunca Vendido'}
+                                    </div>
+
+                                    <h3 className="font-bold text-slate-800 pr-20 truncate">{prod.name}</h3>
+                                    
+                                    <div className="mt-2 text-sm text-slate-500">
+                                        Última venda: {formatDate(prod.lastSale)}
+                                    </div>
+                                  
+                                  <div className="mt-4 grid grid-cols-2 gap-2 bg-slate-50 p-2 rounded">
+                                      <div>
+                                          <span className="text-[10px] uppercase font-bold text-slate-400">Dinheiro Parado</span>
+                                          <div className="text-red-600 font-bold">{masks.currency(moneyStuck)}</div>
+                                      </div>
+                                      <div>
+                                          <span className="text-[10px] uppercase font-bold text-slate-400">Sugestão Promo</span>
+                                          <div className="text-emerald-600 font-bold">{masks.currency(suggestedPromo)}</div>
+                                      </div>
+                                  </div>
+                              </div>
+                          );
+                      })}
+                  </div>
+              )}
+          </div>
+      )}
+
+      {/* --- ABA 4: COTAÇÃO INTELIGENTE --- */}
+      {activeTab === 'quotation' && (
+          <div className="flex-1 overflow-y-auto space-y-4">
+              {quotationData.length === 0 ? (
+                  <div className="text-center p-10 text-slate-400 bg-white rounded border border-slate-200">
+                      <CheckCircle size={48} className="mx-auto mb-4 text-emerald-200"/>
+                      <h3 className="text-lg font-bold text-emerald-700">Estoque Abastecido!</h3>
+                      <p>Nenhum item abaixo do estoque mínimo.</p>
+                  </div>
+              ) : (
+                  quotationData.map((group, idx) => (
+                      <div key={idx} className="bg-white rounded border border-slate-200 shadow-sm overflow-hidden">
+                          <div className="p-4 bg-slate-50 border-b flex justify-between items-center">
+                              <h3 className="font-bold text-slate-700 flex items-center gap-2">
+                                  <Truck size={20} className="text-blue-600"/> {group.name}
+                              </h3>
+                              <button 
+                                onClick={() => handleCopyQuote(group.name, group.items)}
+                                className="bg-white border border-slate-300 text-slate-700 px-3 py-1 rounded text-sm font-bold hover:bg-blue-50 flex items-center gap-2"
+                              >
+                                  <Copy size={14}/> Copiar Pedido
+                              </button>
+                          </div>
+                          <table className="w-full text-sm text-left">
+                              <thead className="text-xs uppercase bg-slate-100 text-slate-500">
+                                  <tr>
+                                      <th className="p-3">Produto</th>
+                                      <th className="p-3 text-center">Atual</th>
+                                      <th className="p-3 text-center">Mínimo</th>
+                                      <th className="p-3 text-center bg-blue-50 text-blue-700">Comprar</th>
+                                  </tr>
+                              </thead>
+                              <tbody className="divide-y">
+                                  {group.items.map((item, i) => (
+                                      <tr key={i}>
+                                          <td className="p-3">{item.name}</td>
+                                          <td className="p-3 text-center text-red-600 font-bold">{item.stock}</td>
+                                          <td className="p-3 text-center text-slate-500">{item.minStock || 5}</td>
+                                          <td className="p-3 text-center bg-blue-50 font-bold text-blue-700">+{item.missing}</td>
+                                      </tr>
+                                  ))}
+                              </tbody>
+                          </table>
+                      </div>
+                  ))
+              )}
+          </div>
+      )}
+
+      {/* --- MODAL DE CADASTRO/EDIÇÃO --- */}
       {isModalOpen && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 overflow-y-auto">
             <div className="bg-white w-full max-w-4xl rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
@@ -416,19 +625,15 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                 </div>
 
                 <div className="p-6 overflow-y-auto custom-scrollbar space-y-6">
-                    {/* (O restante do modal é igual ao anterior, mantendo toda a lógica de cadastro) */}
                     <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
                         <div className="md:col-span-3">
                             <label className="text-[10px] font-bold text-slate-500 uppercase">Código de Barras</label>
-                            <div className="relative">
-                                <input 
-                                    className="w-full border p-2 rounded text-sm pl-8" 
-                                    value={currentProduct.barcode} 
-                                    onChange={e => setCurrentProduct({...currentProduct, barcode: masks.ean(e.target.value)})}
-                                    placeholder="Sem GTIN"
-                                />
-                                <span className="absolute left-2 top-2.5 text-slate-400"><ScanningIcon/></span>
-                            </div>
+                            <input 
+                                className="w-full border p-2 rounded text-sm" 
+                                value={currentProduct.barcode} 
+                                onChange={e => setCurrentProduct({...currentProduct, barcode: masks.ean(e.target.value)})}
+                                placeholder="Sem GTIN"
+                            />
                         </div>
                         <div className="md:col-span-6">
                             <label className="text-[10px] font-bold text-slate-500 uppercase">Descrição</label>
@@ -512,6 +717,21 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                             <label className="text-[10px] font-bold text-slate-500 uppercase">Estoque</label>
                             <input type="number" className="w-full border p-2 rounded text-sm" value={currentProduct.stock} onChange={e => setCurrentProduct({...currentProduct, stock: e.target.value})}/>
                         </div>
+                        <div className="md:col-span-2">
+                            <label className="text-[10px] font-bold text-slate-500 uppercase">Mínimo</label>
+                            <input type="number" className="w-full border p-2 rounded text-sm bg-amber-50" value={currentProduct.minStock} onChange={e => setCurrentProduct({...currentProduct, minStock: e.target.value})}/>
+                        </div>
+                        <div className="md:col-span-4">
+                            <label className="text-[10px] font-bold text-slate-500 uppercase">Fornecedor Padrão (Cotação)</label>
+                            <select 
+                                className="w-full border p-2 rounded text-sm bg-white" 
+                                value={currentProduct.supplierId || ''} 
+                                onChange={e => setCurrentProduct({...currentProduct, supplierId: e.target.value})}
+                            >
+                                <option value="">-- Selecione --</option>
+                                {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                            </select>
+                        </div>
                         <div className="md:col-span-4">
                             <label className="text-[10px] font-bold text-slate-500 uppercase">Perfil Tributário</label>
                             <select className="w-full border p-2 rounded text-sm bg-white" value={currentProduct.taxProfileId} onChange={e => setCurrentProduct({...currentProduct, taxProfileId: e.target.value})}>
@@ -522,10 +742,6 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                         <div className="md:col-span-2">
                             <label className="text-[10px] font-bold text-slate-500 uppercase">NCM</label>
                             <input className="w-full border p-2 rounded text-sm" value={currentProduct.ncm} onChange={e => setCurrentProduct({...currentProduct, ncm: masks.ncm(e.target.value)})}/>
-                        </div>
-                        <div className="md:col-span-2">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase">CEST</label>
-                            <input className="w-full border p-2 rounded text-sm" value={currentProduct.cest} onChange={e => setCurrentProduct({...currentProduct, cest: masks.cest(e.target.value)})}/>
                         </div>
                     </div>
 
@@ -578,7 +794,6 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                                             className="w-full border border-purple-200 p-2 rounded text-sm bg-purple-100 text-purple-700" 
                                             value={packFormData.costPrice}
                                             readOnly
-                                            title="Calculado automaticamente"
                                         />
                                     </div>
                                     <div className="md:col-span-2">
@@ -588,16 +803,6 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                                             className="w-full border border-purple-200 p-2 rounded text-sm focus:border-purple-500" 
                                             value={packFormData.price}
                                             onChange={e => setPackFormData({...packFormData, price: e.target.value})}
-                                            placeholder="R$"
-                                        />
-                                    </div>
-                                    <div className="md:col-span-3">
-                                        <label className="text-[10px] font-bold text-purple-800 uppercase">Atacado Caixa</label>
-                                        <input 
-                                            type="number"
-                                            className="w-full border border-purple-200 p-2 rounded text-sm focus:border-purple-500" 
-                                            value={packFormData.wholesalePrice}
-                                            onChange={e => setPackFormData({...packFormData, wholesalePrice: e.target.value})}
                                             placeholder="R$"
                                         />
                                     </div>
@@ -616,13 +821,73 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
             </div>
         </div>
       )}
+
+      {/* --- MODAL CAPIVARA (HISTÓRICO DO PRODUTO) --- */}
+      {isHistoryOpen && selectedHistoryProduct && (
+          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+              <div className="bg-white w-full max-w-lg rounded-xl shadow-2xl overflow-hidden">
+                  <div className="bg-slate-800 text-white p-4 flex justify-between items-center">
+                      <h3 className="font-bold flex items-center gap-2"><FileText size={18}/> Ficha Técnica do Produto</h3>
+                      <button onClick={() => setIsHistoryOpen(false)}><X size={20}/></button>
+                  </div>
+                  
+                  <div className="p-6">
+                      <h2 className="text-xl font-bold text-slate-800 mb-1">{selectedHistoryProduct.name}</h2>
+                      <p className="text-sm text-slate-500 mb-6 font-mono bg-slate-100 w-fit px-2 rounded">
+                          {selectedHistoryProduct.barcode || selectedHistoryProduct.cbaCode}
+                      </p>
+
+                      <div className="grid grid-cols-2 gap-4 mb-6">
+                          <div className="bg-slate-50 p-3 rounded border">
+                              <p className="text-xs text-slate-500 uppercase font-bold">Data de Cadastro</p>
+                              <p className="font-bold text-slate-800 flex items-center gap-2">
+                                  <Calendar size={14}/> {formatDate(selectedHistoryProduct.created_at || selectedHistoryProduct.createdAt)}
+                              </p>
+                          </div>
+                          <div className="bg-slate-50 p-3 rounded border">
+                              <p className="text-xs text-slate-500 uppercase font-bold">Última Venda</p>
+                              <p className={`font-bold flex items-center gap-2 ${selectedHistoryProduct.lastSale ? 'text-green-600' : 'text-slate-400'}`}>
+                                  <Clock size={14}/> {formatDate(selectedHistoryProduct.lastSale)}
+                              </p>
+                          </div>
+                          <div className="bg-slate-50 p-3 rounded border">
+                              <p className="text-xs text-slate-500 uppercase font-bold">Margem Atual</p>
+                              <p className="font-bold text-blue-600">
+                                  {selectedHistoryProduct.profitMargin ? `${selectedHistoryProduct.profitMargin}%` : '-'}
+                              </p>
+                          </div>
+                          <div className="bg-slate-50 p-3 rounded border">
+                              <p className="text-xs text-slate-500 uppercase font-bold">Dinheiro em Estoque</p>
+                              <p className="font-bold text-slate-800">
+                                  {masks.currency((selectedHistoryProduct.stock || 0) * (selectedHistoryProduct.cost || 0))}
+                              </p>
+                          </div>
+                      </div>
+
+                      <div className="border-t pt-4">
+                          <h4 className="text-xs font-bold text-slate-500 uppercase mb-2">Fornecedor Padrão</h4>
+                          {selectedHistoryProduct.supplierId ? (
+                              <div className="flex items-center gap-2 text-sm font-bold text-slate-700 bg-slate-100 p-2 rounded">
+                                  <Truck size={16}/>
+                                  {suppliers.find(s => s.id === selectedHistoryProduct.supplierId)?.name || 'Desconhecido'}
+                              </div>
+                          ) : (
+                              <p className="text-sm text-slate-400 italic">Nenhum fornecedor vinculado.</p>
+                          )}
+                      </div>
+                  </div>
+                  
+                  <div className="bg-slate-50 p-4 text-center">
+                      <button onClick={() => { setIsHistoryOpen(false); handleEdit(selectedHistoryProduct); }} className="text-blue-600 font-bold text-sm hover:underline">
+                          Editar Cadastro Completo
+                      </button>
+                  </div>
+              </div>
+          </div>
+      )}
+
     </div>
   );
 };
-
-// Componente simples de icone para input
-const ScanningIcon = () => (
-    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/></svg>
-);
 
 export default InventoryWMS;

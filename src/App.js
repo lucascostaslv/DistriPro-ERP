@@ -675,7 +675,7 @@ const Dashboard = ({ sales, products }) => {
   );
 };
 
-const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClients, feeProfiles = [], onNewSale, showNotification, companyInfo, storeConfig}) => {
+const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct, clients = [], setClients, feeProfiles = [], onNewSale, showNotification, companyInfo, storeConfig}) => {
   const [cart, setCart] = useState([]);
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('');
@@ -694,6 +694,8 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
   const [modalStep, setModalStep] = useState('config'); 
   const [shouldPrint, setShouldPrint] = useState(false);
   const [pendingSale, setPendingSale] = useState(null);
+  const [lossReason, setLossReason] = useState('');
+  const [showHistory, setShowHistory] = useState(false);
 
   // Estados de Edição
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
@@ -736,6 +738,14 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
           };
       }));
   }, [pricingMode]); // Removemos 'products' da dependência para evitar re-render loops, mas mantemos pricingMode
+
+  // Função para limpar carrinho
+  const clearCart = () => {
+      if(window.confirm("Limpar todo o carrinho?")) {
+          setCart([]);
+          setPaymentMethod('');
+      }
+  };
 
   // --- NOVA FUNÇÃO: Alternar preço de UM item específico (Checkbox) ---
   const toggleCartItemMode = (itemId) => {
@@ -843,7 +853,9 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
 
   const handlePaymentInit = (method) => {
     if (cart.length === 0) return showNotification('Carrinho vazio', 'error');
+    
     setPaymentMethod(method);
+    setLossReason(''); // Reseta motivo
     setPaymentModalOpen(true);
     setModalStep('config');
     setShouldPrint(false);
@@ -867,6 +879,32 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
 
   // Funções auxiliares de venda (Review, Confirm, EditSave) mantidas iguais...
   const handleReview = () => {
+
+    if (paymentMethod === 'PERCA') {
+        if (!lossReason) return showNotification('Digite o motivo da perca.', 'error');
+        
+        // Na perca, o total financeiro é 0, mas mantemos o custo para relatórios
+        const sale = {
+            id: Date.now(),
+            date: new Date().toISOString(),
+            items: cart, // Itens saem do estoque normalmente
+            total: 0, // Financeiro Zero
+            cost: totalCost, // Custo mantido
+            fee: 0,
+            net: 0,
+            profit: -totalCost, // Prejuízo total do custo
+            paymentMethod: 'PERCA',
+            installments: 1,
+            clientName: 'PERCA INTERNA',
+            clientId: null,
+            isLoss: true, // Flag importante
+            lossReason: lossReason
+        };
+        setPendingSale(sale);
+        setModalStep('confirm');
+        return;
+    }
+
     let feeAmount = 0;
     let finalClientId = null;
     let finalClientName = 'Consumidor Final';
@@ -1016,8 +1054,18 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
       {/* COLUNA DA DIREITA: CARRINHO */}
       <div className="bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col h-full">
         <div className="p-4 border-b bg-slate-50 font-bold text-slate-700 flex flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <ShoppingCart size={20}/> Carrinho Atual
+          <div className="flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <ShoppingCart size={20}/> Carrinho
+              </div>
+              <div className="flex gap-1">
+                  <button onClick={() => setShowHistory(true)} className="p-2 text-blue-600 hover:bg-blue-100 rounded" title="Histórico Recente">
+                      <Clock size={18}/>
+                  </button>
+                  <button onClick={clearCart} className="p-2 text-red-600 hover:bg-red-100 rounded" title="Limpar Carrinho">
+                      <Trash2 size={18}/>
+                  </button>
+              </div>
           </div>
 
           <div className="flex bg-slate-200 p-1 rounded-lg w-full">
@@ -1106,6 +1154,7 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
             <button onClick={() => handlePaymentInit('Débito')} className="bg-blue-600 text-white py-2 rounded text-sm font-bold hover:bg-blue-700">Débito</button>
             <button onClick={() => handlePaymentInit('Crédito')} className="bg-indigo-600 text-white py-2 rounded text-sm font-bold hover:bg-indigo-700">Crédito</button>
             <button onClick={() => handlePaymentInit('Fiado')} className="col-span-2 bg-amber-600 text-white py-2 rounded text-sm font-bold hover:bg-amber-700 flex justify-center items-center gap-2"><UserPlus size={16}/> Fiado / A Prazo</button>
+            <button onClick={() => handlePaymentInit('PERCA')} className="bg-red-100 text-red-700 border border-red-200 py-2 rounded text-sm font-bold hover:bg-red-200 flex justify-center items-center gap-2"><AlertTriangle size={16}/> Perca</button>
           </div>
         </div>
       </div>
@@ -1120,6 +1169,30 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
             <p className="text-sm text-slate-500">Valor a Pagar</p>
             <p className="text-3xl font-bold text-slate-800">{formatCurrency(totalCart)}</p>
           </div>
+
+            <div className="text-center p-4 bg-slate-50 rounded">
+            <p className="text-sm text-slate-500">
+                {paymentMethod === 'PERCA' ? 'Custo do Prejuízo' : 'Valor a Pagar'}
+            </p>
+            <p className={`text-3xl font-bold ${paymentMethod === 'PERCA' ? 'text-red-600' : 'text-slate-800'}`}>
+                {paymentMethod === 'PERCA' ? formatCurrency(totalCost) : formatCurrency(totalCart)}
+            </p>
+          </div>
+
+          {/* INPUT PARA PERCA */}
+          {paymentMethod === 'PERCA' && (
+              <div className="animate-in fade-in">
+                  <label className="block text-xs font-bold text-red-700 mb-1">Motivo da Perca / Quebra *</label>
+                  <input 
+                      className="w-full border border-red-300 bg-red-50 text-red-900 p-2 rounded text-sm focus:ring-red-500" 
+                      placeholder="Ex: Produto vencido, embalagem danificada..."
+                      value={lossReason} 
+                      onChange={e => setLossReason(e.target.value)} 
+                      autoFocus
+                  />
+              </div>
+          )}
+
           {(paymentMethod !== 'Dinheiro' && paymentMethod !== 'Fiado') && (
             <div>
               <label className="block text-xs font-bold text-slate-500 mb-1">Perfil de Taxa (Máquina)</label>
@@ -1255,6 +1328,38 @@ const PDV = ({products = [], groups = [], onUpdateProduct, clients = [], setClie
             <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded text-sm font-medium hover:bg-indigo-700">Salvar Alterações</button>
           </div>
         </form>
+      </Modal>
+
+      <Modal isOpen={showHistory} onClose={() => setShowHistory(false)} title="Histórico Recente (6h)">
+          <div className="space-y-2">
+              {sales
+                .filter(s => {
+                    // Filtra últimas 6h
+                    const timeDiff = new Date() - new Date(s.date);
+                    const isRecent = timeDiff < 6 * 60 * 60 * 1000;
+                    // Se for caixa, vê só as dele. Se admin, vê tudo.
+                    const isOwner = currentUser?.role === 'admin' || s.userId === currentUser?.id;
+                    return isRecent && isOwner;
+                })
+                .slice(0, 20) // Limita a 20 itens
+                .map(s => (
+                  <div key={s.id} className={`p-3 border rounded text-sm flex justify-between items-center ${s.isLoss ? 'bg-red-50 border-red-200' : 'bg-white'}`}>
+                      <div>
+                          <div className="font-bold flex items-center gap-2">
+                              {s.isLoss ? <span className="text-red-600 flex items-center gap-1"><AlertTriangle size={12}/> PERCA</span> : formatCurrency(s.total)}
+                          </div>
+                          <div className="text-xs text-slate-500">
+                              {new Date(s.date).toLocaleTimeString().slice(0,5)} • {s.items.length} itens
+                              {s.isLoss && <span className="block text-red-500 italic">{s.lossReason}</span>}
+                          </div>
+                      </div>
+                      <div className="text-right">
+                          <span className="text-[10px] bg-slate-100 px-2 py-1 rounded font-bold text-slate-600">{s.paymentMethod}</span>
+                      </div>
+                  </div>
+              ))}
+              {sales.length === 0 && <p className="text-center text-slate-400 py-4">Sem vendas recentes.</p>}
+          </div>
       </Modal>
     </div>
   );
@@ -2354,6 +2459,7 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
   const [isEmitting, setIsEmitting] = useState(false);
   const [currentSaleToEmit, setCurrentSaleToEmit] = useState(null);
   const [pricingMode, setPricingMode] = useState('retail');
+  const [showCashierEmitModal, setShowCashierEmitModal] = useState({ open: false, sale: null });
 
   // --- CORREÇÃO: Estado EXCLUSIVO para clientes do Supabase ---
   // Isso garante que não usamos dados antigos do Firebase/LocalStorage
@@ -2435,34 +2541,71 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
         const appId = String(store.id);
         const batch = writeBatch(firebase.db);
         
-        // 1. Salva a venda (igual ao anterior)
+        // 1. Salva a venda
         const saleRef = doc(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'sales'));
-        batch.set(saleRef, { ...sale, id: saleRef.id, createdAt: serverTimestamp() });
+        // Se for PERCA, garantimos que o total financeiro seja 0, mas mantemos o custo
+        const finalSale = { 
+            ...sale, 
+            id: saleRef.id, 
+            createdAt: serverTimestamp(),
+            // Garante rastreabilidade
+            userId: currentUser?.id || 'anon',
+            userName: currentUser?.username || 'Sistema'
+        };
+        
+        batch.set(saleRef, finalSale);
 
-        // 2. Baixa de Estoque Inteligente (NOVA LÓGICA)
+        // 2. Baixa de Estoque
         sale.items.forEach(item => {
-            // Busca o produto original na memória para saber se é Pack ou Unit
             const originalProd = products.find(p => p.id === (item.originalId || item.id));
-            
             if (originalProd) {
-                // Se for Pack (Caixa), desconta do Pai
-                if (originalProd.itemType === 'pack') {
-                    if (originalProd.parentId && originalProd.conversionFactor) {
-                        const parentRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'products', originalProd.parentId);
-                        // Qtd vendida * Quantidade na caixa (Ex: 2 caixas * 12 = 24 unidades descontadas)
-                        const qtyToDeduct = item.qty * originalProd.conversionFactor;
-                        batch.update(parentRef, { stock: increment(-qtyToDeduct) });
-                    }
+                // Objeto de atualização
+                const updatePayload = { 
+                    stock: increment(-item.qty),
+                    lastSale: serverTimestamp()
+                };
+
+                if (originalProd.itemType === 'pack' && originalProd.parentId && originalProd.conversionFactor) {
+                    const parentRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'products', originalProd.parentId);
+                    const qtyToDeduct = item.qty * originalProd.conversionFactor;
+                    batch.update(parentRef, { 
+                        stock: increment(-qtyToDeduct),
+                        lastSale: serverTimestamp()
+                    });
                 } else {
-                    // Se for Unit (Normal), desconta dele mesmo
                     const productRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'products', originalProd.id);
-                    batch.update(productRef, { stock: increment(-item.qty) });
+                    batch.update(productRef, updatePayload);
                 }
             }
         });
 
+        // 3. Lançamento Financeiro (SOMENTE SE NÃO FOR PERCA)
+        if (!sale.isLoss) {
+             const finRef = doc(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'financial_movements'));
+             batch.set(finRef, {
+                 type: 'INCOME', // Entrada
+                 category: 'Vendas',
+                 description: `Venda #${saleRef.id.slice(-6)} - ${sale.paymentMethod}`,
+                 amount: sale.total,
+                 date: sale.date.split('T')[0],
+                 paymentMethod: sale.paymentMethod,
+                 saleId: saleRef.id,
+                 userId: currentUser?.id || 'anon',
+                 createdAt: serverTimestamp()
+             });
+        }
+
         await batch.commit();
-        showNotification('Venda realizada e estoque atualizado!', 'success');
+        
+        // --- LÓGICA DO CAIXA: PERGUNTAR SE QUER EMITIR NOTA ---
+        const shouldAskToEmit = !sale.isLoss && (currentUser?.role === 'cashier' || currentUser?.role === 'admin');
+
+        if (shouldAskToEmit) {
+            setShowCashierEmitModal({ open: true, sale: finalSale });
+        } else {
+            showNotification(sale.isLoss ? 'Perca registrada com sucesso.' : 'Venda realizada com sucesso!', 'success');
+        }
+
     } catch (error) {
         console.error("Erro na venda:", error);
         showNotification('Erro ao processar venda: ' + error.message, 'error');
@@ -2810,6 +2953,8 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
               <PDV 
                 products={products}
                 groups={store.priceGroups || []}
+                sales={realtimeSales}
+                currentUser={currentUser}
                 
                 // MUDANÇA CRUCIAL: Passamos APENAS a lista do Supabase
                 // Isso elimina os "clientes fantasmas" do cache do Firebase
@@ -2872,6 +3017,38 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
                 showNotification={showNotification} 
               />
             )}
+
+            {/* --- NOVO MODAL: PERGUNTA AO CAIXA SE QUER EMITIR NOTA --- */}
+            <Modal isOpen={showCashierEmitModal.open} onClose={() => setShowCashierEmitModal({open:false, sale:null})} title="Emissão Fiscal">
+                <div className="text-center p-4">
+                    <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4 text-blue-600">
+                        <FileText size={32} />
+                    </div>
+                    <h3 className="text-xl font-bold text-slate-800 mb-2">Venda Finalizada!</h3>
+                    <p className="text-slate-600 mb-6">Deseja emitir a Nota Fiscal (NFC-e) agora?</p>
+                    
+                    <div className="grid grid-cols-2 gap-3">
+                        <button 
+                            onClick={() => {
+                                setShowCashierEmitModal({open:false, sale:null});
+                                showNotification('Venda salva. Nota pendente.', 'success');
+                            }}
+                            className="py-3 border border-slate-300 rounded font-bold text-slate-600 hover:bg-slate-50"
+                        >
+                            Não Emitir
+                        </button>
+                        <button 
+                            onClick={() => {
+                                handleEmitNFe(showCashierEmitModal.sale);
+                                setShowCashierEmitModal({open:false, sale:null});
+                            }}
+                            className="py-3 bg-blue-600 text-white rounded font-bold hover:bg-blue-700 shadow-lg"
+                        >
+                            SIM, EMITIR
+                        </button>
+                    </div>
+                </div>
+            </Modal>
           </div>
         </div>
       </main>
