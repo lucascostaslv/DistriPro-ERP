@@ -10,7 +10,7 @@ import {
   MapPin,
   Boxes,
   Upload,
-  Loader2, Send
+  Loader2, Send, Utensils
 } from 'lucide-react';
 import { collection, query, where, getDocs, setDoc, doc, updateDoc, getDoc, onSnapshot, increment, writeBatch, serverTimestamp, addDoc, deleteDoc} from "firebase/firestore";
 import logo from './img/LOGO-MAQUINA-PNG.png';
@@ -25,6 +25,7 @@ import ClientsManager from './ClientsManager';
 import { calculateItemTaxes } from './utils/TaxCalculator';
 import { buildNFePayload } from './utils/NFeBuilder';
 import { NFeService } from './utils/NFeService';
+import ComandaManager from './ComandaManager';
 
 // --- UTILS ---
 const formatCurrency = (value) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
@@ -680,6 +681,7 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
   const [cart, setCart] = useState([]);
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('');
+  const [showComandas, setShowComandas] = useState(false);
   
   // Estado Global de Preço (Define o padrão ao bipar)
   const [pricingMode, setPricingMode] = useState('retail'); 
@@ -716,6 +718,13 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
     };
     fetchProfiles();
   }, [storeConfig]);
+
+  const handleReceiveFromComanda = (itemsFromTab) => {
+      // Mescla os itens vindos da mesa com o carrinho atual
+      setCart(prev => [...prev, ...itemsFromTab]);
+      setShowComandas(false); // Fecha a tela de comandas
+      showNotification(`${itemsFromTab.length} itens adicionados ao caixa!`, 'success');
+  };
   
   const isWholesaleEnabled = storeConfig?.enableWholesale;
 
@@ -739,6 +748,19 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
           };
       }));
   }, [pricingMode]); // Removemos 'products' da dependência para evitar re-render loops, mas mantemos pricingMode
+
+  if (showComandas) {
+      return (
+          <ComandaManager 
+              storeConfig={storeConfig}
+              products={products}
+              currentUser={currentUser}
+              showNotification={showNotification}
+              onSendToCart={handleReceiveFromComanda}
+              onClose={() => setShowComandas(false)}
+          />
+      );
+  }
 
   // Função para limpar carrinho
   const clearCart = () => {
@@ -1060,6 +1082,13 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
                 <ShoppingCart size={20}/> Carrinho
               </div>
               <div className="flex gap-1">
+                  <button 
+                    onClick={() => setShowComandas(true)} 
+                    className="bg-indigo-600 text-white px-3 py-1.5 rounded text-xs font-bold hover:bg-indigo-700 flex items-center gap-1 shadow-sm mr-1"
+                    title="Gerenciar Mesas e Comandas"
+                  >
+                      <Utensils size={14}/> Comandas
+                  </button>
                   <button onClick={() => setShowHistory(true)} className="p-2 text-blue-600 hover:bg-blue-100 rounded" title="Histórico Recente">
                       <Clock size={18}/>
                   </button>
@@ -2509,6 +2538,7 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
   }, [store]);
 
   // Função de Venda (com baixa de estoque)
+  // Função de Venda (com baixa de estoque e COMANDA)
   const handleNewSale = async (sale) => {
     try {
         const appId = String(store.id);
@@ -2516,72 +2546,91 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
         
         // 1. Salva a venda
         const saleRef = doc(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'sales'));
-        // Se for PERCA, garantimos que o total financeiro seja 0, mas mantemos o custo
         const finalSale = { 
             ...sale, 
             id: saleRef.id, 
             createdAt: serverTimestamp(),
-            // Garante rastreabilidade
             userId: currentUser?.id || 'anon',
             userName: currentUser?.username || 'Sistema'
         };
-        
         batch.set(saleRef, finalSale);
 
-        // 2. Baixa de Estoque
+        // 2. Baixa de Estoque E BAIXA DE COMANDA
+        const comandaUpdates = {}; // Agrupa atualizações por ID da comanda
+
         sale.items.forEach(item => {
+            // A. Estoque
             const originalProd = products.find(p => p.id === (item.originalId || item.id));
             if (originalProd) {
-                // Objeto de atualização
-                const updatePayload = { 
-                    stock: increment(-item.qty),
-                    lastSale: serverTimestamp()
-                };
-
+                const updatePayload = { stock: increment(-item.qty), lastSale: serverTimestamp() };
                 if (originalProd.itemType === 'pack' && originalProd.parentId && originalProd.conversionFactor) {
                     const parentRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'products', originalProd.parentId);
                     const qtyToDeduct = item.qty * originalProd.conversionFactor;
-                    batch.update(parentRef, { 
-                        stock: increment(-qtyToDeduct),
-                        lastSale: serverTimestamp()
-                    });
+                    batch.update(parentRef, { stock: increment(-qtyToDeduct), lastSale: serverTimestamp() });
                 } else {
                     const productRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'products', originalProd.id);
                     batch.update(productRef, updatePayload);
                 }
             }
+
+            // B. Comanda (Se o item veio de uma aba/mesa)
+            if (item.source === 'tab' && item.tabId && item.tabItemId) {
+                if (!comandaUpdates[item.tabId]) comandaUpdates[item.tabId] = [];
+                // Precisamos reconstruir o objeto do item original para o arrayRemove funcionar corretamente no Firestore
+                // Como não temos o objeto exato aqui, uma estratégia melhor é buscar a comanda depois.
+                // Mas para batch, a melhor estratégia é marcar o item como 'PAID' se tivermos estrutura complexa,
+                // OU, se a estrutura for simples array de objetos, o arrayRemove exige correspondência exata.
+                // ALTERNATIVA SEGURA: Vamos fazer a baixa da comanda FORA do batch principal se for complexo,
+                // mas aqui vamos tentar algo inteligente:
+                comandaUpdates[item.tabId].push(item.tabItemId);
+            }
         });
 
-        // 3. Lançamento Financeiro (SOMENTE SE NÃO FOR PERCA)
+        // 3. Financeiro (Se não for Perca)
         if (!sale.isLoss) {
              const finRef = doc(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'financial_movements'));
              batch.set(finRef, {
-                 type: 'INCOME', // Entrada
-                 category: 'Vendas',
-                 description: `Venda #${saleRef.id.slice(-6)} - ${sale.paymentMethod}`,
-                 amount: sale.total,
-                 date: sale.date.split('T')[0],
-                 paymentMethod: sale.paymentMethod,
-                 saleId: saleRef.id,
-                 userId: currentUser?.id || 'anon',
-                 createdAt: serverTimestamp()
+                 type: 'INCOME', category: 'Vendas', description: `Venda #${saleRef.id.slice(-6)}`, amount: sale.total,
+                 date: sale.date.split('T')[0], paymentMethod: sale.paymentMethod, saleId: saleRef.id,
+                 userId: currentUser?.id || 'anon', createdAt: serverTimestamp()
              });
         }
 
         await batch.commit();
-        
-        // --- LÓGICA DO CAIXA: PERGUNTAR SE QUER EMITIR NOTA ---
-        const shouldAskToEmit = !sale.isLoss && (currentUser?.role === 'cashier' || currentUser?.role === 'admin');
 
+        // 4. Processar Baixa nas Comandas (Pós-Venda)
+        // Isso é feito separado para garantir que podemos ler o estado atual da comanda e remover os itens certos pelo ID único
+        for (const [tabId, itemUniqueIds] of Object.entries(comandaUpdates)) {
+            const tabRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'tabs', tabId);
+            const tabSnap = await getDoc(tabRef);
+            if (tabSnap.exists()) {
+                const tabData = tabSnap.data();
+                // Filtra mantendo apenas os itens que NÃO foram pagos agora
+                const newItems = tabData.items.filter(i => !itemUniqueIds.includes(i.uniqueId));
+                
+                if (newItems.length === 0) {
+                    // Se acabou os itens, fecha ou deleta a comanda? 
+                    // O usuário disse: "fechada". Vamos deletar para limpar ou mudar status.
+                    // Vamos DELETAR para simplificar a lista de abertas, conforme pedido "deletar a comanda mesmo sem ter pago" (manual),
+                    // mas se pagou tudo, o ideal é arquivar ou deletar. Vamos deletar.
+                    await deleteDoc(tabRef);
+                } else {
+                    await updateDoc(tabRef, { items: newItems });
+                }
+            }
+        }
+
+        // Modal de Nota
+        const shouldAskToEmit = !sale.isLoss && (currentUser?.role === 'cashier' || currentUser?.role === 'admin');
         if (shouldAskToEmit) {
             setShowCashierEmitModal({ open: true, sale: finalSale });
         } else {
-            showNotification(sale.isLoss ? 'Perca registrada com sucesso.' : 'Venda realizada com sucesso!', 'success');
+            showNotification(sale.isLoss ? 'Perca registrada.' : 'Venda realizada!', 'success');
         }
 
     } catch (error) {
-        console.error("Erro na venda:", error);
-        showNotification('Erro ao processar venda: ' + error.message, 'error');
+        console.error("Erro venda:", error);
+        showNotification('Erro: ' + error.message, 'error');
     }
   };
 
