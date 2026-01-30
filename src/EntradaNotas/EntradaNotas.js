@@ -15,7 +15,8 @@ import {
   Link as LinkIcon,
   Settings,
   RefreshCw,
-  MapPin
+  MapPin,
+  Search
 } from 'lucide-react';
 import { 
   collection, 
@@ -27,7 +28,8 @@ import {
   getDocs,
   limit,
   addDoc,
-  increment 
+  increment,
+  orderBy, startAt, endAt
 } from 'firebase/firestore';
 import { 
   signInAnonymously, 
@@ -83,6 +85,10 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
   const [loading, setLoading] = useState(false);
   const [processingXml, setProcessingXml] = useState(false);
   const [entryMode, setEntryMode] = useState('XML');
+    
+    const [productSearchModalOpen, setProductSearchModalOpen] = useState(false);
+    const [productSearchTerm, setProductSearchTerm] = useState('');
+    const [databaseProducts, setDatabaseProducts] = useState([]);
   
   // Determina o ID da Loja corretamente (Prioridade: Prop > Global)
   const currentAppId = storeConfig?.id ? String(storeConfig.id) : globalAppId;
@@ -98,6 +104,21 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
         });
     }
   }, [appProducts]);
+
+  useEffect(() => {
+    const fetchProductsForSearch = async () => {
+        // Se já tiver products via props, use props.products, senão busca do banco
+        try {
+           const q = query(collection(db, 'artifacts', globalAppId, 'public', 'data', 'products'), limit(1000));
+           const snapshot = await getDocs(q);
+           const prodList = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+           setDatabaseProducts(prodList);
+        } catch (error) {
+           console.error("Erro ao carregar produtos para busca:", error);
+        }
+    };
+    fetchProductsForSearch();
+    }, []);
   
   // Header State
   const [establishment, setEstablishment] = useState('1');
@@ -320,22 +341,84 @@ const handleSaveSupplier = async () => {
     }
 };
 
-  // --- FUNÇÃO: ADICIONAR ITEM MANUAL (ITEM 6) ---
+// --- ESTADOS E LÓGICA DE BUSCA MANUAL ---
+  const [prodSearchModalOpen, setProdSearchModalOpen] = useState(false);
+  const [prodSearchTerm, setProdSearchTerm] = useState('');
+  const [dbSearchResults, setDbSearchResults] = useState([]);
+  const [isSearchingProd, setIsSearchingProd] = useState(false);
+
+  // Função que busca EXCLUSIVAMENTE na collection da loja atual
+  const searchProductsInDb = async (term) => {
+      setProdSearchTerm(term);
+      if (!term || term.length < 2) {
+          setDbSearchResults([]);
+          return;
+      }
+      
+      setIsSearchingProd(true);
+      try {
+          const results = [];
+          // REFERÊNCIA RESTRITA À LOJA ATUAL
+          const productsRef = collection(db, 'artifacts', currentAppId, 'public', 'data', 'products');
+
+          // 1. Tenta buscar por Código Exato (Barras ou Interno)
+          const qCode = query(productsRef, where('cbaCode', '==', term), limit(5));
+          const snapCode = await getDocs(qCode);
+          snapCode.forEach(doc => results.push({ id: doc.id, ...doc.data() }));
+
+          // 2. Se não achou código, busca por Nome (Case Insensitive simulado via startAt/endAt)
+          // Nota: O ideal é salvar um campo 'name_upper' no banco, mas aqui tentamos com o 'name' direto
+          if (results.length === 0) {
+              const termUpper = term.toUpperCase();
+              const qName = query(
+                  productsRef, 
+                  orderBy('name'), 
+                  startAt(termUpper), 
+                  endAt(termUpper + '\uf8ff'),
+                  limit(20)
+              );
+              const snapName = await getDocs(qName);
+              snapName.forEach(doc => results.push({ id: doc.id, ...doc.data() }));
+          }
+
+          // Remove duplicados (caso exista) e define estado
+          const uniqueResults = results.filter((v,i,a)=>a.findIndex(t=>(t.id === v.id))===i);
+          setDbSearchResults(uniqueResults);
+
+      } catch (error) {
+          console.error("Erro na busca estrita:", error);
+      } finally {
+          setIsSearchingProd(false);
+      }
+  };
+
+  // Substitui a função handleAddManualItem antiga
   const handleAddManualItem = () => {
+      setProdSearchModalOpen(true);
+      setProdSearchTerm('');
+      setDbSearchResults([]);
+  };
+
+  const confirmAddProduct = (product = null) => {
+      // Gera ID compatível com o sistema (Firestore) para novos itens ou usa o existente
+      const newIdRef = doc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'products'));
+      
       setItems([...items, {
-          id: Math.random().toString(36).substr(2, 9),
-          productId: '', 
-          systemSku: '',
-          barcode: '', // Item 7 (Criação)
-          productName: '', // Item 8 (Descrição)
-          unit: 'UN', // Item 9
-          quantity: 1, // Item 10
-          unitPrice: 0, // Item 10 (Custo)
-          margin: 30, // Item 2 (Margem Padrão)
-          sellingPrice: 0, // Item 2 (Venda)
-          total: 0,
-          isNew: true // Flag para saber que precisa cadastrar
+          id: Math.random().toString(36).substr(2, 9), // ID visual da linha
+          productId: product ? product.id : newIdRef.id, // ID REAL DO BANCO
+          systemSku: product ? (product.cbaCode || product.barcode) : '',
+          barcode: product ? product.barcode : '',
+          productName: product ? product.name : '',
+          unit: product ? (product.unit || 'UN') : 'UN',
+          quantity: 1,
+          unitPrice: product ? (Number(product.cost) || 0) : 0,
+          margin: product ? (Number(product.profitMargin) || 30) : 30,
+          sellingPrice: product ? (Number(product.price) || 0) : 0,
+          wholesalePrice: product ? (Number(product.wholesalePrice) || 0) : 0,
+          total: product ? (Number(product.cost) || 0) : 0,
+          isNew: !product // Se veio do banco, não é novo. Se for null, é novo.
       }]);
+      setProdSearchModalOpen(false);
   };
 
   // --- FUNÇÃO: CÁLCULO INTELIGENTE NA TABELA (ITENS 8, 9, 10 e 2) ---
@@ -1254,6 +1337,93 @@ const handleSaveSupplier = async () => {
             </div>
           </div>
         )}
+
+        
+      {prodSearchModalOpen && (
+        <div className="fixed inset-0 bg-black/60 z-[9999] flex items-start justify-center pt-20 p-4 backdrop-blur-sm animate-in fade-in">
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[80vh] border border-slate-200">
+                
+                {/* Header da Busca */}
+                <div className="p-4 border-b border-slate-100 bg-white">
+                    <div className="flex justify-between items-center mb-2">
+                        <h3 className="font-bold text-slate-700 text-lg">Adicionar Item Manual</h3>
+                        <button onClick={() => setProdSearchModalOpen(false)} className="text-slate-400 hover:text-red-500 transition-colors">
+                            <XIcon size={24}/>
+                        </button>
+                    </div>
+                    <div className="relative">
+                        <Search className="absolute left-3 top-3.5 text-slate-400" size={20}/>
+                        <input 
+                            className="w-full border-2 border-slate-200 bg-slate-50 p-3 pl-10 rounded-lg text-lg outline-none focus:border-indigo-500 focus:bg-white transition-all uppercase font-bold text-slate-700 placeholder:text-slate-400"
+                            placeholder="DIGITE O NOME, CÓDIGO DE BARRAS OU REF..."
+                            value={prodSearchTerm}
+                            onChange={e => searchProductsInDb(e.target.value)}
+                            autoFocus
+                        />
+                        {isSearchingProd && (
+                            <div className="absolute right-3 top-3.5 w-5 h-5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+                        )}
+                    </div>
+                </div>
+
+                {/* Lista de Resultados */}
+                <div className="flex-1 overflow-y-auto bg-slate-50 p-2 custom-scrollbar">
+                    {dbSearchResults.length > 0 ? (
+                        <div className="space-y-2">
+                            {dbSearchResults.map(p => (
+                                <div 
+                                    key={p.id} 
+                                    onClick={() => confirmAddProduct(p)} 
+                                    className="bg-white p-3 rounded-lg border border-slate-200 hover:border-indigo-400 hover:shadow-md cursor-pointer flex justify-between items-center group transition-all"
+                                >
+                                    <div>
+                                        <span className="font-bold text-slate-800 text-base block group-hover:text-indigo-700">{p.name}</span>
+                                        <div className="flex gap-2 text-xs text-slate-500 mt-1">
+                                            <span className="bg-slate-100 px-1.5 py-0.5 rounded border">Cód: {p.cbaCode || p.barcode || 'S/ REF'}</span>
+                                            <span className={`${(p.stock || 0) <= (p.minStock || 0) ? 'text-red-600 font-bold' : 'text-emerald-600 font-bold'}`}>
+                                                Estoque: {p.stock || 0} {p.unit}
+                                            </span>
+                                        </div>
+                                    </div>
+                                    <div className="text-right">
+                                         <div className="text-xs text-slate-400 mb-0.5">Preço Venda</div>
+                                         <span className="text-sm font-bold text-white bg-slate-800 px-3 py-1 rounded-full shadow-sm group-hover:bg-indigo-600">
+                                            {formatCurrency(p.price || 0)}
+                                         </span>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    ) : (
+                        <div className="h-40 flex flex-col items-center justify-center text-slate-400">
+                            {prodSearchTerm.length > 1 ? (
+                                <>
+                                    <Package size={40} className="mb-2 opacity-20"/>
+                                    <span className="font-medium">Nenhum produto encontrado na loja atual.</span>
+                                    <span className="text-xs">Verifique a ortografia ou crie um novo.</span>
+                                </>
+                            ) : (
+                                <>
+                                    <Search size={40} className="mb-2 opacity-20"/>
+                                    <span className="text-sm">Comece a digitar para buscar no estoque...</span>
+                                </>
+                            )}
+                        </div>
+                    )}
+                </div>
+
+                {/* Footer - Criar Novo */}
+                <div className="p-4 bg-white border-t border-slate-200">
+                    <button 
+                        onClick={() => confirmAddProduct(null)} 
+                        className="w-full bg-white border-2 border-dashed border-slate-300 text-slate-600 py-3 rounded-lg font-bold hover:bg-slate-50 hover:border-slate-400 hover:text-slate-800 flex justify-center items-center gap-2 transition-all"
+                    >
+                        <Plus size={20}/> Não encontrou? Cadastrar Item em Branco
+                    </button>
+                </div>
+            </div>
+        </div>
+      )}
 
       </main>
 

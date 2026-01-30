@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Search, Plus, Trash2, ArrowRight, User, 
   FileText, CheckSquare, Square, X, Lock, 
-  AlertTriangle, Utensils
+  AlertTriangle, Utensils, ChevronLeft
 } from 'lucide-react';
 import { collection, query, where, onSnapshot, addDoc, updateDoc, doc, deleteDoc, serverTimestamp, arrayUnion, arrayRemove } from "firebase/firestore";
 import { db } from './firebase'; 
@@ -192,6 +192,13 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
       <div className={`flex-shrink-0 w-80 bg-white border-r border-slate-200 flex flex-col ${selectedComanda ? 'hidden md:flex' : 'flex w-full'}`}>
           <div className="p-4 border-b bg-slate-50">
               <div className="flex justify-between items-center mb-3">
+                    <button 
+                        onClick={onClose} 
+                        className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 hover:text-indigo-600 transition-colors"
+                        title="Voltar ao Caixa"
+                    >
+                        <ChevronLeft size={24} />
+                    </button>
                   <h3 className="font-bold text-slate-800 flex items-center gap-2"><Utensils size={20}/> Comandas</h3>
                   <button onClick={onClose} className="md:hidden p-2 text-slate-400"><X/></button>
               </div>
