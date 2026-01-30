@@ -7,10 +7,33 @@ import { supabase } from '../supabaseClient';
 import { NFeService } from '../utils/NFeService';
 
 // Função auxiliar para baixar Base64
-const downloadBase64 = (base64, filename, mimeType) => {
+
+const downloadSmart = (base64, filename) => {
     if (!base64) return alert('Conteúdo do arquivo não disponível.');
+    
     try {
         const cleanB64 = base64.includes(',') ? base64.split(',')[1] : base64;
+        
+        let mimeType = 'application/pdf';
+        let extension = '.pdf';
+
+        // 1. Detecta HTML (Cupom NFC-e)
+        if (cleanB64.startsWith('PGh0bW') || cleanB64.startsWith('PCFET0NU')) {
+            mimeType = 'text/html';
+            extension = '.html';
+        } 
+        // 2. Detecta XML (Se o nome do arquivo indicar XML ou o conteúdo começar com <)
+        else if (filename.toLowerCase().endsWith('.xml') || cleanB64.startsWith('PD94bW') || cleanB64.startsWith('PG5mZ')) {
+            mimeType = 'text/xml';
+            extension = '.xml';
+        }
+
+        // Ajusta extensão no nome do arquivo
+        let finalFilename = filename;
+        if (!finalFilename.toLowerCase().endsWith(extension)) {
+             finalFilename = finalFilename.replace(/\.[^/.]+$/, "") + extension;
+        }
+
         const byteCharacters = atob(cleanB64);
         const byteNumbers = new Array(byteCharacters.length);
         for (let i = 0; i < byteCharacters.length; i++) {
@@ -20,15 +43,17 @@ const downloadBase64 = (base64, filename, mimeType) => {
         const blob = new Blob([byteArray], { type: mimeType });
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
-        link.download = filename;
+        link.download = finalFilename;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
+
     } catch (e) {
         console.error(e);
-        alert("Erro ao gerar arquivo para download.");
+        alert("Erro ao processar o arquivo.");
     }
 };
+
 
 const FiscalInvoices = ({ storeConfig, showNotification }) => {
   const [invoices, setInvoices] = useState([]);
@@ -349,10 +374,10 @@ const FiscalInvoices = ({ storeConfig, showNotification }) => {
                                 )}
                                 {/* Downloads */}
                                 <div className="w-px h-6 bg-slate-200 mx-1"></div>
-                                <button onClick={() => downloadBase64(inv.pdf_base64, `NFe-${inv.nfe_number}.pdf`, 'application/pdf')} className="p-2 text-slate-600 hover:bg-slate-100 rounded" title="Baixar DANFE (PDF)">
+                                <button onClick={() => downloadSmart(inv.pdf_base64, `NFe-${inv.nfe_number}`)} className="p-2 text-slate-600 hover:bg-slate-100 rounded" title="Baixar Documento">
                                     <Printer size={16}/>
                                 </button>
-                                <button onClick={() => downloadBase64(inv.xml_content, `NFe-${inv.nfe_number}.xml`, 'application/xml')} className="p-2 text-slate-600 hover:bg-slate-100 rounded" title="Baixar XML">
+                                <button onClick={() => downloadSmart(inv.xml_content, `NFe-${inv.nfe_number}.xml`)} className="p-2 text-slate-600 hover:bg-slate-100 rounded" title="Baixar XML">
                                     <Download size={16}/>
                                 </button>
                             </div>
