@@ -190,6 +190,8 @@ const AccountsPayable = ({ products }) => {
   const totalDueMonth = payableItems.reduce((acc, item) => acc + (item.status === 'PENDENTE' ? item.value : 0), 0);
   const totalPaidMonth = payableItems.reduce((acc, item) => acc + (item.status === 'PAGO' ? item.value : 0), 0);
 
+  const itemsToShow = payableItems.filter(item => item.status !== 'PAGO');
+
   // Lista de Anos para o Dropdown
   const years = Array.from({length: 11}, (_, i) => new Date().getFullYear() - 5 + i);
 
@@ -311,13 +313,13 @@ const AccountsPayable = ({ products }) => {
       {/* 4. Grid de Contas */}
       {loading ? (
         <div className="text-center py-10 text-slate-500">Carregando contas...</div>
-      ) : payableItems.length === 0 ? (
+      ) : itemsToShow.length === 0 ? (
         <div className="text-center py-10 bg-slate-50 rounded border border-dashed border-slate-300 text-slate-400">
            Nenhuma conta encontrada para {monthNames[currentDate.getMonth()]} de {currentDate.getFullYear()} com estes filtros.
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {payableItems.map(item => {
+            {itemsToShow.map(item => {
                 const isLate = item.daysToDue < 0 && item.status === 'PENDENTE';
                 const isNear = item.daysToDue >= 0 && item.daysToDue <= 5 && item.status === 'PENDENTE';
                 
