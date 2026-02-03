@@ -7,6 +7,7 @@ import {
 import { collection, doc, updateDoc, deleteDoc, addDoc, serverTimestamp, increment, query, where, getDocs } from "firebase/firestore";
 import { db } from './firebase'; 
 import { supabase } from './supabaseClient';
+import PurchaseSuggestion from './PurchaseSuggestion';
 
 // --- UTILITÁRIOS ---
 const masks = {
@@ -127,7 +128,7 @@ const StockCard = ({ product, getDisplayStock, getParentName, onUpdateStock, onO
 };
 
 // --- COMPONENTE PRINCIPAL ---
-const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig }) => {
+const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig, sales = [], suppliers: globalSuppliers = [] }) => {
   const [activeTab, setActiveTab] = useState('quick'); 
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -138,16 +139,23 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
   const [lossModalOpen, setLossModalOpen] = useState(false);
   const [lossData, setLossData] = useState({ product: null, qty: 0, reason: '' });
 
+  const [editModalTab, setEditModalTab] = useState('DATA');
+
   // Dados Auxiliares
   const [taxProfiles, setTaxProfiles] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
+
+  const [editTab, setEditTab] = useState('general'); // 'general' ou 'suppliers'
+    const [newSupplierLink, setNewSupplierLink] = useState({
+    name: '', sku: '', cost: '', date: new Date().toISOString().split('T')[0]
+    });
   
   // Estados de Formulário e Seleção
   const initialFormState = {
       name: '', barcode: '', price: '', wholesalePrice: '', costPrice: '', 
       profitMargin: '', stock: 0, minStock: 5, unit: 'UN', category: 'Geral',
       ncm: '', cest: '', taxProfileId: '', itemType: 'unit', parentId: '', packQuantity: 0,
-      supplierId: '' // NOVO CAMPO: Fornecedor
+      supplierId: '', suppliersHistory: []
   };
 
   const [currentProduct, setCurrentProduct] = useState(initialFormState);
@@ -157,6 +165,8 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
   const [packFormData, setPackFormData] = useState({
       barcode: '', quantity: 12, price: '', wholesalePrice: '', costPrice: ''
   });
+
+  const [showSupplierSuggestions, setShowSupplierSuggestions] = useState(false);
 
   // Carregar Dados Auxiliares (Perfis e Fornecedores)
   useEffect(() => {
@@ -211,10 +221,12 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
           barcode: prod.barcode || prod.cbaCode || prod.ean || '',
           costPrice: prod.cost || prod.costPrice || 0,
           packQuantity: prod.conversionFactor || prod.packQuantity || 0,
-          supplierId: prod.supplierId || ''
+          supplierId: prod.supplierId || '',
+          suppliersHistory: prod.suppliersHistory || []
       });
       setCreatePackMode(false); 
       setIsModalOpen(true);
+      setEditModalTab('DATA');
   };
 
   const handleAddNew = () => {
@@ -222,6 +234,81 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
       setCreatePackMode(false);
       setIsModalOpen(true);
   };
+
+  // Dentro de InventoryWMS.js
+
+  const addSupplierLink = async () => {
+      if (!newSupplierLink.name) return showNotification("Nome do fornecedor obrigatório", "error");
+      
+      const supplierNameUpper = newSupplierLink.name.toUpperCase().trim();
+      let matchSupplier = suppliers.find(s => s.name.toUpperCase() === supplierNameUpper);
+      let realSupplierId = '';
+
+      try {
+          if (matchSupplier) {
+              // Cenário 1: Já existe na lista local
+              realSupplierId = matchSupplier.id;
+          } else {
+              // Cenário 2: Não existe -> Criar no Supabase agora!
+              if (!storeConfig?.id) return showNotification("Erro: Loja não identificada.", "error");
+              
+              const newClientPayload = {
+                  firebase_store_id: String(storeConfig.id),
+                  name: supplierNameUpper,
+                  type: 'PJ', 
+                  tags: ['FORNECEDOR'], // Agora vai funcionar com a nova coluna
+                  // Endereço não é enviado, o banco aceita NULL (perfeito para fornecedores)
+                  created_at: new Date().toISOString()
+              };
+
+              const { data, error } = await supabase
+                  .from('fiscal_clients')
+                  .insert([newClientPayload])
+                  .select()
+                  .single();
+
+              if (error) throw error;
+
+              // Atualiza lista local
+              setSuppliers(prev => [...prev, data]);
+              matchSupplier = data;
+              realSupplierId = data.id;
+              showNotification(`Fornecedor "${supplierNameUpper}" cadastrado automaticamente!`, "success");
+          }
+
+          // --- VINCULA AO PRODUTO ---
+          const newLink = {
+              supplierId: realSupplierId, 
+              supplierName: matchSupplier.name,
+              supplierSku: newSupplierLink.sku || '',
+              lastCost: parseFloat(newSupplierLink.cost) || 0,
+              lastPurchaseDate: newSupplierLink.date
+          };
+
+          setCurrentProduct(prev => {
+              const currentHistory = Array.isArray(prev.suppliersHistory) ? prev.suppliersHistory : [];
+              // Remove duplicados se houver (atualiza o existente)
+              const otherSuppliers = currentHistory.filter(s => String(s.supplierId) !== String(realSupplierId));
+              // Adiciona o novo/atualizado no fim
+              return { ...prev, suppliersHistory: [...otherSuppliers, newLink] };
+          });
+
+          // Limpa campos e fecha sugestões
+          setNewSupplierLink({ name: '', sku: '', cost: '', date: new Date().toISOString().split('T')[0] });
+          setShowSupplierSuggestions(false);
+
+      } catch (error) {
+          console.error("Erro ao criar fornecedor:", error);
+          showNotification("Erro ao salvar novo fornecedor: " + error.message, "error");
+      }
+  };
+  
+    const removeSupplierLink = (idx) => {
+        const currentHistory = Array.isArray(currentProduct.suppliersHistory) ? currentProduct.suppliersHistory : [];
+        const updatedHistory = currentHistory.filter((_, i) => i !== idx);
+        // Usa setCurrentProduct aqui
+        setCurrentProduct({ ...currentProduct, suppliersHistory: updatedHistory });
+    };
 
   const handleSave = async () => {
     try {
@@ -242,6 +329,7 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
             conversionFactor: Number(currentProduct.packQuantity) || 1,
             packQuantity: Number(currentProduct.packQuantity) || 1,
             supplierId: currentProduct.supplierId, // Salva o fornecedor
+            suppliersHistory: currentProduct.suppliersHistory || [],
             last_updated: serverTimestamp()
         };
 
@@ -625,63 +713,11 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
 
       {/* --- ABA 4: COTAÇÃO INTELIGENTE --- */}
       {activeTab === 'quotation' && (
-          <div className="flex-1 overflow-y-auto space-y-4">
-              {/* CORREÇÃO: Usar groupedQuotation ao invés de quotationData */}
-              {groupedQuotation.length === 0 ? (
-                  <div className="text-center p-10 text-slate-400 bg-white rounded border border-slate-200">
-                      <CheckCircle size={48} className="mx-auto mb-4 text-emerald-200"/>
-                      <h3 className="text-lg font-bold text-emerald-700">Estoque Abastecido!</h3>
-                      <p>Nenhum item abaixo do estoque mínimo.</p>
-                  </div>
-              ) : (
-                  groupedQuotation.map((group, idx) => (
-                      <div key={idx} className="bg-white rounded border border-slate-200 shadow-sm overflow-hidden">
-                          <div className="p-4 bg-slate-50 border-b flex justify-between items-center">
-                              <h3 className="font-bold text-slate-700 flex items-center gap-2">
-                                  <Truck size={20} className="text-blue-600"/> {group.name}
-                              </h3>
-                              <button 
-                                onClick={() => handleCopyQuote(group.name, group.items)}
-                                className="bg-white border border-slate-300 text-slate-700 px-3 py-1 rounded text-sm font-bold hover:bg-blue-50 flex items-center gap-2"
-                              >
-                                  <Copy size={14}/> Copiar Pedido
-                              </button>
-                          </div>
-                          <table className="w-full text-sm text-left">
-                              <thead className="text-xs uppercase bg-slate-100 text-slate-500">
-                                  <tr>
-                                      <th className="p-3">Produto</th>
-                                      <th className="p-3 text-center">Atual</th>
-                                      <th className="p-3 text-center">Mínimo</th>
-                                      <th className="p-3 text-center bg-blue-50 text-blue-700">Comprar (Qtd)</th>
-                                  </tr>
-                              </thead>
-                              <tbody className="divide-y">
-                                  {group.items.map((item) => (
-                                      <tr key={item.id}>
-                                          <td className="p-3">
-                                              <div className="font-bold text-slate-800">{item.name}</div>
-                                              <div className="text-xs text-slate-400">Estoque: {item.stock}</div>
-                                          </td>
-                                          <td className="p-3 text-center text-red-600 font-bold">{getDisplayStock(item)}</td>
-                                          <td className="p-3 text-center text-slate-500">{item.minStock || 5}</td>
-                                          <td className="p-3 text-center bg-blue-50">
-                                              {/* Input para editar a quantidade a comprar */}
-                                              <input 
-                                                type="number" 
-                                                className="w-20 text-center font-bold text-blue-700 border border-blue-200 rounded p-1 outline-none focus:ring-2 focus:ring-blue-400"
-                                                value={item.buyQty}
-                                                onChange={(e) => handleUpdateQuoteQty(item.id, e.target.value)}
-                                              />
-                                          </td>
-                                      </tr>
-                                  ))}
-                              </tbody>
-                          </table>
-                      </div>
-                  ))
-              )}
-          </div>
+          <PurchaseSuggestion 
+              products={products}
+              sales={sales}
+              suppliers={globalSuppliers}
+          />
       )}
 
       {/* --- MODAL DE CADASTRO/EDIÇÃO --- */}
@@ -695,190 +731,409 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                     <button onClick={() => setIsModalOpen(false)}><X/></button>
                 </div>
 
-                <div className="p-6 overflow-y-auto custom-scrollbar space-y-6">
-                    <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
-                        <div className="md:col-span-3">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase">Código de Barras</label>
-                            <input 
-                                className="w-full border p-2 rounded text-sm" 
-                                value={currentProduct.barcode} 
-                                onChange={e => setCurrentProduct({...currentProduct, barcode: masks.ean(e.target.value)})}
-                                placeholder="Sem GTIN"
-                            />
-                        </div>
-                        <div className="md:col-span-6">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase">Descrição</label>
-                            <input 
-                                className="w-full border p-2 rounded text-sm uppercase" 
-                                value={currentProduct.name} 
-                                onChange={e => setCurrentProduct({...currentProduct, name: e.target.value.toUpperCase()})}
-                                placeholder="Ex: COCA COLA 2L"
-                            />
-                        </div>
-                        <div className="md:col-span-3">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase">Categoria</label>
-                            <input 
-                                className="w-full border p-2 rounded text-sm" 
-                                value={currentProduct.category} 
-                                onChange={e => setCurrentProduct({...currentProduct, category: e.target.value})}
-                                list="categories"
-                            />
-                            <datalist id="categories">
-                                <option value="Bebidas"/><option value="Mercearia"/><option value="Limpeza"/>
-                            </datalist>
-                        </div>
-                    </div>
+                <div className="flex bg-slate-100 border-b shrink-0">
+                    <button 
+                    onClick={() => setEditTab('general')}
+                    className={`px-6 py-3 text-sm font-bold flex items-center gap-2 border-b-2 transition-colors ${editTab === 'general' ? 'border-indigo-600 text-indigo-600 bg-white' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+                    >
+                    <Package size={18}/> Dados Gerais
+                    </button>
+                    <button 
+                    onClick={() => setEditTab('suppliers')}
+                    className={`px-6 py-3 text-sm font-bold flex items-center gap-2 border-b-2 transition-colors ${editTab === 'suppliers' ? 'border-indigo-600 text-indigo-600 bg-white' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+                    >
+                    <Truck size={18}/> Fornecedores & Custos
+                    </button>
+                </div>
 
-                    <div className="bg-slate-50 p-4 rounded border border-slate-200 relative">
-                        <div className="absolute -top-3 left-4 bg-slate-50 px-2 text-xs font-bold text-slate-500 flex items-center gap-1">
-                            <DollarSign size={12}/> Formação de Preço
-                        </div>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-2">
-                            <div>
-                                <label className="text-[10px] font-bold text-slate-500 uppercase">Custo (R$)</label>
-                                <input 
-                                    type="number" step="0.01"
-                                    className="w-full border p-2 rounded text-sm" 
-                                    value={currentProduct.costPrice} 
-                                    onChange={e => handleCostCalculation('costPrice', e.target.value)}
-                                    placeholder="0.00"
-                                />
-                            </div>
-                            <div>
-                                <label className="text-[10px] font-bold text-slate-500 uppercase">Margem (%)</label>
-                                <input 
-                                    type="number" step="0.1"
-                                    className="w-full border p-2 rounded text-sm" 
-                                    value={currentProduct.profitMargin} 
-                                    onChange={e => handleCostCalculation('profitMargin', e.target.value)}
-                                    placeholder="%"
-                                />
-                            </div>
-                            <div>
-                                <label className="text-[10px] font-bold text-blue-700 uppercase">Preço Varejo</label>
-                                <input 
-                                    type="number" step="0.01"
-                                    className="w-full border border-blue-300 bg-blue-50 p-2 rounded text-sm font-bold text-blue-900" 
-                                    value={currentProduct.price} 
-                                    onChange={e => handleCostCalculation('price', e.target.value)}
-                                    placeholder="0.00"
-                                />
-                            </div>
-                            <div>
-                                <label className="text-[10px] font-bold text-emerald-700 uppercase">Preço Atacado</label>
-                                <input 
-                                    type="number" step="0.01"
-                                    className="w-full border border-emerald-300 bg-emerald-50 p-2 rounded text-sm font-bold text-emerald-900" 
-                                    value={currentProduct.wholesalePrice} 
-                                    onChange={e => setCurrentProduct({...currentProduct, wholesalePrice: e.target.value})}
-                                    placeholder="0.00"
-                                />
-                            </div>
-                        </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
-                         <div className="md:col-span-2">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase">Unidade</label>
-                            <select className="w-full border p-2 rounded text-sm bg-white" value={currentProduct.unit} onChange={e => setCurrentProduct({...currentProduct, unit: e.target.value})}>
-                                <option>UN</option><option>KG</option><option>CX</option><option>FD</option>
-                            </select>
-                        </div>
-                        <div className="md:col-span-2">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase">Estoque</label>
-                            <input type="number" className="w-full border p-2 rounded text-sm" value={currentProduct.stock} onChange={e => setCurrentProduct({...currentProduct, stock: e.target.value})}/>
-                        </div>
-                        <div className="md:col-span-2">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase">Mínimo</label>
-                            <input type="number" className="w-full border p-2 rounded text-sm bg-amber-50" value={currentProduct.minStock} onChange={e => setCurrentProduct({...currentProduct, minStock: e.target.value})}/>
-                        </div>
-                        <div className="md:col-span-4">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase">Fornecedor Padrão (Cotação)</label>
-                            <select 
-                                className="w-full border p-2 rounded text-sm bg-white" 
-                                value={currentProduct.supplierId || ''} 
-                                onChange={e => setCurrentProduct({...currentProduct, supplierId: e.target.value})}
-                            >
-                                <option value="">-- Selecione --</option>
-                                {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                            </select>
-                        </div>
-                        <div className="md:col-span-4">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase">Perfil Tributário</label>
-                            <select className="w-full border p-2 rounded text-sm bg-white" value={currentProduct.taxProfileId} onChange={e => setCurrentProduct({...currentProduct, taxProfileId: e.target.value})}>
-                                <option value="">-- Selecione --</option>
-                                {taxProfiles.map(tp => <option key={tp.id} value={tp.id}>{tp.name}</option>)}
-                            </select>
-                        </div>
-                        <div className="md:col-span-2">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase">NCM</label>
-                            <input className="w-full border p-2 rounded text-sm" value={currentProduct.ncm} onChange={e => setCurrentProduct({...currentProduct, ncm: masks.ncm(e.target.value)})}/>
-                        </div>
-                    </div>
-
-                    {!currentProduct.id && currentProduct.itemType !== 'pack' && (
-                        <div className={`p-4 rounded border transition-all ${createPackMode ? 'bg-purple-50 border-purple-200 shadow-inner' : 'bg-slate-50 border-slate-200'}`}>
-                            <div className="flex items-center gap-2 mb-4">
-                                <input 
-                                    type="checkbox" 
-                                    id="createPack" 
-                                    className="w-4 h-4 text-purple-600 rounded"
-                                    checked={createPackMode}
-                                    onChange={e => setCreatePackMode(e.target.checked)}
-                                />
-                                <label htmlFor="createPack" className="font-bold text-slate-700 cursor-pointer select-none flex items-center gap-2 text-sm">
-                                    <Layers size={18} className="text-purple-600"/>
-                                    Deseja cadastrar também a Caixa/Fardo deste item?
-                                </label>
+               {/* BODY DO MODAL - CORRIGIDO E UNIFICADO */}
+                <div className="flex-1 overflow-y-auto p-6 bg-white custom-scrollbar">
+                    
+                    {/* --- CONTEÚDO DA ABA 1: DADOS GERAIS --- */}
+                    {editTab === 'general' && (
+                        <div className="space-y-6 animate-in fade-in">
+                             <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+                                <div className="md:col-span-3">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase">Código de Barras</label>
+                                    <input 
+                                        className="w-full border p-2 rounded text-sm" 
+                                        value={currentProduct.barcode} 
+                                        onChange={e => setCurrentProduct({...currentProduct, barcode: masks.ean(e.target.value)})}
+                                        placeholder="Sem GTIN"
+                                    />
+                                </div>
+                                <div className="md:col-span-6">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase">Descrição</label>
+                                    <input 
+                                        className="w-full border p-2 rounded text-sm uppercase" 
+                                        value={currentProduct.name} 
+                                        onChange={e => setCurrentProduct({...currentProduct, name: e.target.value.toUpperCase()})}
+                                        placeholder="Ex: COCA COLA 2L"
+                                    />
+                                </div>
+                                <div className="md:col-span-3">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase">Categoria</label>
+                                    <input 
+                                        className="w-full border p-2 rounded text-sm" 
+                                        value={currentProduct.category} 
+                                        onChange={e => setCurrentProduct({...currentProduct, category: e.target.value})}
+                                        list="categories"
+                                    />
+                                    <datalist id="categories">
+                                        <option value="Bebidas"/><option value="Mercearia"/><option value="Limpeza"/>
+                                    </datalist>
+                                </div>
                             </div>
 
-                            {createPackMode && (
-                                <div className="grid grid-cols-1 md:grid-cols-12 gap-4 animate-in slide-in-from-top-2">
-                                    <div className="md:col-span-3">
-                                        <label className="text-[10px] font-bold text-purple-800 uppercase">Cód. Barras da Caixa</label>
+                            <div className="bg-slate-50 p-4 rounded border border-slate-200 relative">
+                                <div className="absolute -top-3 left-4 bg-slate-50 px-2 text-xs font-bold text-slate-500 flex items-center gap-1">
+                                    <DollarSign size={12}/> Formação de Preço
+                                </div>
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-2">
+                                    <div>
+                                        <label className="text-[10px] font-bold text-slate-500 uppercase">Custo (R$)</label>
                                         <input 
-                                            className="w-full border border-purple-200 p-2 rounded text-sm focus:border-purple-500" 
-                                            placeholder="EAN da Caixa"
-                                            value={packFormData.barcode}
-                                            onChange={e => setPackFormData({...packFormData, barcode: masks.ean(e.target.value)})}
+                                            type="number" step="0.01"
+                                            className="w-full border p-2 rounded text-sm" 
+                                            value={currentProduct.costPrice} 
+                                            onChange={e => handleCostCalculation('costPrice', e.target.value)}
+                                            placeholder="0.00"
                                         />
                                     </div>
-                                    <div className="md:col-span-2">
-                                        <label className="text-[10px] font-bold text-purple-800 uppercase">Qtd na Caixa</label>
+                                    <div>
+                                        <label className="text-[10px] font-bold text-slate-500 uppercase">Margem (%)</label>
                                         <input 
-                                            type="number"
-                                            className="w-full border border-purple-200 p-2 rounded text-sm focus:border-purple-500 font-bold" 
-                                            value={packFormData.quantity}
-                                            onChange={e => {
-                                                const qtd = e.target.value;
-                                                setPackFormData({
-                                                    ...packFormData, 
-                                                    quantity: qtd,
-                                                    costPrice: (Number(currentProduct.costPrice || 0) * Number(qtd)).toFixed(2)
-                                                });
-                                            }}
+                                            type="number" step="0.1"
+                                            className="w-full border p-2 rounded text-sm" 
+                                            value={currentProduct.profitMargin} 
+                                            onChange={e => handleCostCalculation('profitMargin', e.target.value)}
+                                            placeholder="%"
                                         />
                                     </div>
-                                    <div className="md:col-span-2">
-                                        <label className="text-[10px] font-bold text-purple-800 uppercase">Custo Caixa</label>
+                                    <div>
+                                        <label className="text-[10px] font-bold text-blue-700 uppercase">Preço Varejo</label>
                                         <input 
-                                            className="w-full border border-purple-200 p-2 rounded text-sm bg-purple-100 text-purple-700" 
-                                            value={packFormData.costPrice}
-                                            readOnly
+                                            type="number" step="0.01"
+                                            className="w-full border border-blue-300 bg-blue-50 p-2 rounded text-sm font-bold text-blue-900" 
+                                            value={currentProduct.price} 
+                                            onChange={e => handleCostCalculation('price', e.target.value)}
+                                            placeholder="0.00"
                                         />
                                     </div>
-                                    <div className="md:col-span-2">
-                                        <label className="text-[10px] font-bold text-purple-800 uppercase">Venda Caixa</label>
+                                    <div>
+                                        <label className="text-[10px] font-bold text-emerald-700 uppercase">Preço Atacado</label>
                                         <input 
-                                            type="number"
-                                            className="w-full border border-purple-200 p-2 rounded text-sm focus:border-purple-500" 
-                                            value={packFormData.price}
-                                            onChange={e => setPackFormData({...packFormData, price: e.target.value})}
-                                            placeholder="R$"
+                                            type="number" step="0.01"
+                                            className="w-full border border-emerald-300 bg-emerald-50 p-2 rounded text-sm font-bold text-emerald-900" 
+                                            value={currentProduct.wholesalePrice} 
+                                            onChange={e => setCurrentProduct({...currentProduct, wholesalePrice: e.target.value})}
+                                            placeholder="0.00"
                                         />
                                     </div>
                                 </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+                                <div className="md:col-span-2">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase">Unidade</label>
+                                    <select className="w-full border p-2 rounded text-sm bg-white" value={currentProduct.unit} onChange={e => setCurrentProduct({...currentProduct, unit: e.target.value})}>
+                                        <option>UN</option><option>KG</option><option>CX</option><option>FD</option>
+                                    </select>
+                                </div>
+                                <div className="md:col-span-2">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase">Estoque</label>
+                                    <input type="number" className="w-full border p-2 rounded text-sm" value={currentProduct.stock} onChange={e => setCurrentProduct({...currentProduct, stock: e.target.value})}/>
+                                </div>
+                                <div className="md:col-span-2">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase">Mínimo</label>
+                                    <input type="number" className="w-full border p-2 rounded text-sm bg-amber-50" value={currentProduct.minStock} onChange={e => setCurrentProduct({...currentProduct, minStock: e.target.value})}/>
+                                </div>
+                                <div className="md:col-span-4">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase">Fornecedor Padrão (Cotação)</label>
+                                    <select 
+                                        className="w-full border p-2 rounded text-sm bg-white" 
+                                        value={currentProduct.supplierId || ''} 
+                                        onChange={e => setCurrentProduct({...currentProduct, supplierId: e.target.value})}
+                                    >
+                                        <option value="">-- Selecione --</option>
+                                        {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                    </select>
+                                </div>
+                                <div className="md:col-span-4">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase">Perfil Tributário</label>
+                                    <select className="w-full border p-2 rounded text-sm bg-white" value={currentProduct.taxProfileId} onChange={e => setCurrentProduct({...currentProduct, taxProfileId: e.target.value})}>
+                                        <option value="">-- Selecione --</option>
+                                        {taxProfiles.map(tp => <option key={tp.id} value={tp.id}>{tp.name}</option>)}
+                                    </select>
+                                </div>
+                                <div className="md:col-span-2">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase">NCM</label>
+                                    <input className="w-full border p-2 rounded text-sm" value={currentProduct.ncm} onChange={e => setCurrentProduct({...currentProduct, ncm: masks.ncm(e.target.value)})}/>
+                                </div>
+                            </div>
+
+                            {!currentProduct.id && currentProduct.itemType !== 'pack' && (
+                                <div className={`p-4 rounded border transition-all ${createPackMode ? 'bg-purple-50 border-purple-200 shadow-inner' : 'bg-slate-50 border-slate-200'}`}>
+                                    <div className="flex items-center gap-2 mb-4">
+                                        <input 
+                                            type="checkbox" 
+                                            id="createPack" 
+                                            className="w-4 h-4 text-purple-600 rounded"
+                                            checked={createPackMode}
+                                            onChange={e => setCreatePackMode(e.target.checked)}
+                                        />
+                                        <label htmlFor="createPack" className="font-bold text-slate-700 cursor-pointer select-none flex items-center gap-2 text-sm">
+                                            <Layers size={18} className="text-purple-600"/>
+                                            Deseja cadastrar também a Caixa/Fardo deste item?
+                                        </label>
+                                    </div>
+
+                                    {createPackMode && (
+                                        <div className="grid grid-cols-1 md:grid-cols-12 gap-4 animate-in slide-in-from-top-2">
+                                            <div className="md:col-span-3">
+                                                <label className="text-[10px] font-bold text-purple-800 uppercase">Cód. Barras da Caixa</label>
+                                                <input 
+                                                    className="w-full border border-purple-200 p-2 rounded text-sm focus:border-purple-500" 
+                                                    placeholder="EAN da Caixa"
+                                                    value={packFormData.barcode}
+                                                    onChange={e => setPackFormData({...packFormData, barcode: masks.ean(e.target.value)})}
+                                                />
+                                            </div>
+                                            <div className="md:col-span-2">
+                                                <label className="text-[10px] font-bold text-purple-800 uppercase">Qtd na Caixa</label>
+                                                <input 
+                                                    type="number"
+                                                    className="w-full border border-purple-200 p-2 rounded text-sm focus:border-purple-500 font-bold" 
+                                                    value={packFormData.quantity}
+                                                    onChange={e => {
+                                                        const qtd = e.target.value;
+                                                        setPackFormData({
+                                                            ...packFormData, 
+                                                            quantity: qtd,
+                                                            costPrice: (Number(currentProduct.costPrice || 0) * Number(qtd)).toFixed(2)
+                                                        });
+                                                    }}
+                                                />
+                                            </div>
+                                            <div className="md:col-span-2">
+                                                <label className="text-[10px] font-bold text-purple-800 uppercase">Custo Caixa</label>
+                                                <input 
+                                                    className="w-full border border-purple-200 p-2 rounded text-sm bg-purple-100 text-purple-700" 
+                                                    value={packFormData.costPrice}
+                                                    readOnly
+                                                />
+                                            </div>
+                                            <div className="md:col-span-2">
+                                                <label className="text-[10px] font-bold text-purple-800 uppercase">Venda Caixa</label>
+                                                <input 
+                                                    type="number"
+                                                    className="w-full border border-purple-200 p-2 rounded text-sm focus:border-purple-500" 
+                                                    value={packFormData.price}
+                                                    onChange={e => setPackFormData({...packFormData, price: e.target.value})}
+                                                    placeholder="R$"
+                                                />
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
                             )}
+                        </div>
+                    )}
+
+                    {/* --- CONTEÚDO DA ABA 2: FORNECEDORES --- */}
+                    {editTab === 'suppliers' && (
+                        <div className="space-y-6 animate-in fade-in">
+                            {/* 1. Formulário de Adição Rápida (NOVO DESIGN) */}
+                            <div className="bg-white p-4 rounded-xl border border-indigo-100 shadow-sm relative">
+                                <div className="absolute top-0 left-0 bg-indigo-50 text-indigo-700 text-[10px] font-bold px-2 py-1 rounded-br-lg border-r border-b border-indigo-100">
+                                    NOVO VÍNCULO
+                                </div>
+                                
+                                <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end mt-2">
+                                    
+                                    {/* Campo de Busca Inteligente */}
+                                    <div className="md:col-span-5 relative">
+                                        <label className="text-[10px] font-bold text-slate-500 uppercase">Fornecedor</label>
+                                        <div className="relative">
+                                            <input 
+                                                className="w-full border p-2 pl-8 rounded text-sm uppercase focus:ring-2 focus:ring-indigo-500 outline-none" 
+                                                placeholder="BUSCAR OU DIGITAR..." 
+                                                value={newSupplierLink.name} 
+                                                onChange={e => {
+                                                    setNewSupplierLink({...newSupplierLink, name: e.target.value});
+                                                    setShowSupplierSuggestions(true);
+                                                }}
+                                                onFocus={() => setShowSupplierSuggestions(true)}
+                                                // Atrasa o blur para permitir o clique na lista
+                                                onBlur={() => setTimeout(() => setShowSupplierSuggestions(false), 200)}
+                                            />
+                                            <Search size={14} className="absolute left-2.5 top-3 text-slate-400"/>
+                                        </div>
+
+                                        {/* LISTA FLUTUANTE DE SUGESTÕES */}
+                                        {showSupplierSuggestions && (
+                                            <div className="absolute top-full left-0 right-0 bg-white border border-slate-200 rounded-lg shadow-xl z-20 mt-1 max-h-48 overflow-y-auto">
+                                                {suppliers
+                                                    .filter(s => s.name.toLowerCase().includes(newSupplierLink.name.toLowerCase()))
+                                                    .map(s => (
+                                                        <div 
+                                                            key={s.id}
+                                                            className="p-2 hover:bg-indigo-50 cursor-pointer text-sm text-slate-700 border-b border-slate-50 last:border-0"
+                                                            onMouseDown={() => {
+                                                                setNewSupplierLink({...newSupplierLink, name: s.name});
+                                                                setShowSupplierSuggestions(false);
+                                                            }}
+                                                        >
+                                                            {s.name}
+                                                        </div>
+                                                    ))
+                                                }
+                                                {suppliers.filter(s => s.name.toLowerCase().includes(newSupplierLink.name.toLowerCase())).length === 0 && newSupplierLink.name && (
+                                                    <div className="p-2 text-xs text-slate-400 italic bg-slate-50">
+                                                        Nenhum fornecedor cadastrado com esse nome. Será criado um vínculo manual.
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div className="md:col-span-3">
+                                        <label className="text-[10px] font-bold text-slate-500 uppercase">Custo Unit. (R$)</label>
+                                        <input 
+                                            type="number" 
+                                            className="w-full border p-2 rounded text-sm font-bold text-slate-700" 
+                                            placeholder="0.00" 
+                                            value={newSupplierLink.cost} 
+                                            onChange={e => setNewSupplierLink({...newSupplierLink, cost: e.target.value})} 
+                                        />
+                                    </div>
+
+                                    <div className="md:col-span-2">
+                                        <label className="text-[10px] font-bold text-slate-500 uppercase">Data Ref.</label>
+                                        <input 
+                                            type="date" 
+                                            className="w-full border p-2 rounded text-sm" 
+                                            value={newSupplierLink.date} 
+                                            onChange={e => setNewSupplierLink({...newSupplierLink, date: e.target.value})} 
+                                        />
+                                    </div>
+
+                                    <div className="md:col-span-2">
+                                        <button 
+                                            type="button" 
+                                            onClick={addSupplierLink} 
+                                            className="w-full bg-indigo-600 text-white py-2 rounded text-sm font-bold hover:bg-indigo-700 shadow-sm flex items-center justify-center gap-2"
+                                        >
+                                            <Plus size={16}/> Vincular
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* 2. Tabela de Histórico */}
+                            <div>
+                                <h4 className="font-bold text-slate-700 mb-2 flex items-center gap-2"><Truck size={18}/> Fornecedores Vinculados</h4>
+                                <div className="border rounded-lg overflow-hidden">
+                                    <table className="w-full text-sm text-left">
+                                        <thead className="bg-slate-100 text-slate-600 font-bold uppercase text-xs">
+                                        <tr>
+                                            <th className="p-3">Fornecedor</th>
+                                            <th className="p-3">Cód. SKU</th>
+                                            <th className="p-3 text-right">Último Custo</th>
+                                            <th className="p-3 text-center">Data</th>
+                                            <th className="p-3 w-10"></th>
+                                        </tr>   
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            {currentProduct.suppliersHistory?.length > 0 ? (
+                                                // Ordenação por data
+                                                [...currentProduct.suppliersHistory]
+                                                .sort((a, b) => new Date(b.lastPurchaseDate || 0) - new Date(a.lastPurchaseDate || 0))
+                                                .map((sup, idx, arr) => {
+                                                    
+                                                    // --- CÁLCULO BLINDADO ---
+                                                    // Função segura para converter qualquer coisa em número
+                                                    const safeNum = (val) => {
+                                                        if (!val) return 0;
+                                                        const n = parseFloat(String(val).replace(',', '.')); // Troca vírgula por ponto por segurança
+                                                        return isNaN(n) ? 0 : n;
+                                                    };
+
+                                                    const currentPrice = safeNum(sup.lastCost);
+                                                    
+                                                    // Pega o item anterior na lista (que é o próximo no array invertido)
+                                                    const prevItem = arr[idx + 1];
+                                                    // Se não tiver anterior, usa o preço atual como base (variação 0)
+                                                    const prevPrice = prevItem ? safeNum(prevItem.lastCost) : currentPrice;
+
+                                                    const diff = currentPrice - prevPrice;
+                                                    // Evita divisão por zero
+                                                    const pct = prevPrice > 0 ? (diff / prevPrice) * 100 : 0;
+                                                    
+                                                    // Para Debug no Console (F12) se precisar
+                                                    console.log(`Linha ${idx}: Atual=${currentPrice} | Anterior=${prevPrice} | Diff=${diff}`);
+
+                                                    return (
+                                                        <tr key={idx} className="hover:bg-slate-50 transition-colors">
+                                                            <td className="p-3">
+                                                                <div className="font-bold text-slate-700 text-xs">{sup.supplierName || 'Sem Nome'}</div>
+                                                                <div className="text-[10px] text-slate-400 flex items-center gap-1">
+                                                                    <Calendar size={10}/> {sup.lastPurchaseDate ? new Date(sup.lastPurchaseDate).toLocaleDateString('pt-BR') : '-'}
+                                                                </div>
+                                                            </td>
+                                                            <td className="p-3 text-slate-500 font-mono text-xs">{sup.supplierSku || '-'}</td>
+                                                            <td className="p-3 text-right">
+                                                                <div className="font-bold text-slate-800">{masks.currency(currentPrice)}</div>
+                                                            </td>
+                                                            
+                                                            {/* COLUNA DA SETA (BI) */}
+                                                            <td className="p-3 text-center">
+                                                                {/* 1. Preço Subiu (Vermelho) */}
+                                                                {diff > 0.001 && (
+                                                                    <span className="bg-red-100 text-red-700 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center justify-center gap-1 w-fit mx-auto">
+                                                                        <ArrowUpCircle size={10}/> +{Math.abs(pct).toFixed(1)}%
+                                                                    </span>
+                                                                )}
+                                                                
+                                                                {/* 2. Preço Caiu (Verde) */}
+                                                                {diff < -0.001 && (
+                                                                    <span className="bg-emerald-100 text-emerald-700 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center justify-center gap-1 w-fit mx-auto">
+                                                                        <ArrowDownCircle size={10}/> {Math.abs(pct).toFixed(1)}%
+                                                                    </span>
+                                                                )}
+                                                                
+                                                                {/* 3. Preço Igual (Traço) */}
+                                                                {Math.abs(diff) <= 0.001 && (
+                                                                    <span className="text-slate-300 text-[10px] font-bold">-</span>
+                                                                )}
+                                                            </td>
+
+                                                            <td className="p-3 text-right">
+                                                                <button 
+                                                                    onClick={() => removeSupplierLink(idx)}
+                                                                    className="text-slate-300 hover:text-red-500 transition-colors"
+                                                                    title="Remover vínculo"
+                                                                >
+                                                                    <Trash2 size={16}/>
+                                                                </button>
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })
+                                            ) : (
+                                                <tr>
+                                                    <td colSpan={5} className="p-8 text-center text-slate-400">
+                                                        <div className="flex flex-col items-center gap-2">
+                                                            <Search size={24} className="opacity-20"/>
+                                                            <span className="text-xs">Nenhum histórico de compra registrado.</span>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
                         </div>
                     )}
                 </div>

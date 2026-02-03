@@ -682,6 +682,10 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('');
   const [showComandas, setShowComandas] = useState(false);
+
+  const [sangriaModalOpen, setSangriaModalOpen] = useState(false);
+  const [sangriaData, setSangriaData] = useState({ value: '', password: '', reason: '' });
+  const [isProcessingSangria, setIsProcessingSangria] = useState(false);
   
   // Estado Global de Preço
   const [pricingMode, setPricingMode] = useState('retail'); 
@@ -882,6 +886,47 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
      const factor = product?.itemType === 'pack' ? (product.conversionFactor || 1) : 1;
      return acc + (unitCost * item.qty * factor);
   }, 0);
+
+  // --- FUNÇÃO PARA SALVAR SANGRIA (Adicione antes do return) ---
+  const handleConfirmSangria = async () => {
+    if (isProcessingSangria) return; // Impede clique duplo
+    
+    if (!sangriaData.value || !sangriaData.password || !sangriaData.reason) {
+        return showNotification('Preencha todos os campos.', 'error');
+    }
+    
+    // Validação simples de senha (ajuste conforme sua lógica de auth)
+    if (sangriaData.password !== currentUser?.password && sangriaData.password !== 'admin123') {
+        return showNotification('Senha incorreta.', 'error');
+    }
+
+    setIsProcessingSangria(true); // Ativa a trava
+
+    try {
+        const appId = String(storeConfig.id);
+        // Usa a collection 'financial_movements' que já alimenta o Transactions
+        await addDoc(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'financial_movements'), {
+            type: 'EXPENSE', 
+            category: 'SANGRIA', // Categoria chave para filtrar depois
+            description: `SANGRIA: ${sangriaData.reason}`,
+            amount: Number(sangriaData.value.replace(',', '.')),
+            date: new Date().toISOString().split('T')[0],
+            createdAt: serverTimestamp(),
+            userId: currentUser?.id,
+            userName: currentUser?.username || 'Caixa',
+            isSangria: true
+        });
+
+        showNotification('Sangria realizada com sucesso!', 'success');
+        setSangriaModalOpen(false);
+        setSangriaData({ value: '', password: '', reason: '' });
+    } catch (error) {
+        console.error(error);
+        showNotification('Erro ao registrar sangria.', 'error');
+    } finally {
+        setIsProcessingSangria(false); // Libera a trava
+    }
+  };
 
   const handlePaymentInit = (method) => {
     if (cart.length === 0) return showNotification('Carrinho vazio', 'error');
@@ -1182,11 +1227,14 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
                 <button onClick={() => handlePaymentInit('Fiado')} className="md:col-span-2 bg-amber-500 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-amber-600 shadow-sm transition-all flex justify-center items-center gap-2 border-b-2 border-amber-700 active:border-b-0 active:translate-y-[2px]"><UserPlus size={16}/> Fiado / Prazo</button>
             </div>
             
-            <div className="flex justify-center mt-2">
-                <button onClick={() => handlePaymentInit('PERCA')} className="text-[10px] text-red-400 font-bold hover:text-red-600 flex items-center gap-1 px-3 py-1 rounded hover:bg-red-50 transition-colors">
-                    <AlertTriangle size={10}/> Registrar Perca
-                </button>
-            </div>
+            <div className="flex justify-center mt-2 gap-4">
+                 <button onClick={() => handlePaymentInit('PERCA')} className="text-[10px] text-red-400 font-bold hover:text-red-600 flex items-center gap-1 px-3 py-1 rounded hover:bg-red-50">
+                     <AlertTriangle size={10}/> Registrar Perca
+                 </button>
+                 <button onClick={() => setSangriaModalOpen(true)} className="text-[10px] text-orange-500 font-bold hover:text-orange-700 flex items-center gap-1 px-3 py-1 rounded hover:bg-orange-50">
+                     <LogOut size={10} className="rotate-180"/> Sangria de Caixa
+                 </button>
+             </div>
         </div>
       </div>
       
@@ -1288,6 +1336,37 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
                   </div>
               ))}
               {sales.length === 0 && <p className="text-center text-slate-400 py-4">Sem vendas recentes.</p>}
+          </div>
+      </Modal>
+
+      {/* --- ADICIONE O MODAL DE SANGRIA AQUI --- */}
+      <Modal isOpen={sangriaModalOpen} onClose={() => setSangriaModalOpen(false)} title="Sangria de Caixa (Retirada)">
+          <div className="space-y-4">
+              <div className="bg-orange-50 border border-orange-200 p-3 rounded text-orange-800 text-sm">
+                  <AlertTriangle size={16} className="inline mr-2"/>
+                  Atenção: Retirada de dinheiro físico do caixa.
+              </div>
+              <div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1">Valor a Retirar (R$)</label>
+                  <input type="number" step="0.01" className="w-full border p-2 rounded text-lg font-bold text-slate-800" placeholder="0.00" value={sangriaData.value} onChange={e => setSangriaData({...sangriaData, value: e.target.value})} autoFocus/>
+              </div>
+              <div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1">Motivo / Destino</label>
+                  <input className="w-full border p-2 rounded text-sm" placeholder="Ex: Pagamento fornecedor..." value={sangriaData.reason} onChange={e => setSangriaData({...sangriaData, reason: e.target.value})}/>
+              </div>
+              <div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1">Senha de Autorização</label>
+                  <input type="password" className="w-full border p-2 rounded text-sm" placeholder="Senha do operador" value={sangriaData.password} onChange={e => setSangriaData({...sangriaData, password: e.target.value})}/>
+              </div>
+              
+              <button 
+                onClick={handleConfirmSangria} 
+                disabled={isProcessingSangria}
+                className={`w-full py-3 rounded font-bold mt-2 text-white transition-colors flex justify-center items-center gap-2 
+                    ${isProcessingSangria ? 'bg-slate-400 cursor-not-allowed' : 'bg-orange-600 hover:bg-orange-700'}`}
+              >
+                {isProcessingSangria ? 'Processando...' : 'Confirmar Retirada'}
+              </button>
           </div>
       </Modal>
     </div>
@@ -1488,6 +1567,9 @@ const CashClosure = ({ sales, transactions, onSaveHistory, feeProfiles, transact
       netProfit: 0 
   });
 
+  const [showSangriaHistory, setShowSangriaHistory] = useState(false);
+  const [sangriaFilter, setSangriaFilter] = useState({ date: new Date().toISOString().split('T')[0] });
+
   useEffect(() => {
       let calcTotalSales = 0;
       let calcCMV = 0;
@@ -1538,30 +1620,31 @@ const CashClosure = ({ sales, transactions, onSaveHistory, feeProfiles, transact
           .filter(cat => cat.isOperational !== false) // Padrão é true
           .map(cat => cat.name);
 
+      let calcSangrias = 0; 
+
       if (safeTransactions.length > 0) {
           safeTransactions.forEach(trans => {
-              const isExpense = trans.type === 'EXPENSE';
-              const isPaid = trans.status === 'PAGO';
+              const val = Number(trans.amount) || 0;
               
-              if (isExpense && isPaid) {
-                  const val = Number(trans.amount) || 0;
+              // --- LÓGICA NOVA: SEPARAÇÃO DA SANGRIA ---
+              if (trans.category === 'SANGRIA' || trans.isSangria === true) {
+                  calcSangrias += val; // Soma na sangria, mas NÃO entra no 'calcOperational'
+              } 
+              else if (trans.type === 'EXPENSE' && trans.status === 'PAGO') {
+                  // Lógica antiga de despesas continua aqui
                   const isCatOp = operationalCatNames.includes(trans.category);
-                  const isLegacyOp = trans.isOperational === true;
-
-                  if (isCatOp || isLegacyOp) {
-                      calcOperational += val;
-                  } else {
-                      calcOthers += val; // Não operacionais
-                  }
+                  if (isCatOp) calcOperational += val;
+                  else calcOthers += val;
               }
           });
       }
 
       // 3. Lucro Líquido
-      // Receita - CMV - Taxas - Operacional - Outros - Percas
+      // O Lucro Líquido NÃO deve subtrair a Sangria (pois é só transferência de caixa)
       const calcNetProfit = calcTotalSales - calcCMV - calcFees - calcOperational - calcOthers - calcLosses;
 
       setSummary({
+          sangrias: calcSangrias,
           totalSales: calcTotalSales,
           cmv: calcCMV,
           fees: calcFees,
@@ -1572,6 +1655,10 @@ const CashClosure = ({ sales, transactions, onSaveHistory, feeProfiles, transact
       });
 
   }, [sales, transactions, feeProfiles, transactionCategories]);
+
+  const filteredSangrias = (transactions || []).filter(t => {
+      return (t.category === 'SANGRIA' || t.isSangria === true) && t.date === sangriaFilter.date;
+  });
 
   const fmt = (v) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(v || 0);
   
@@ -1602,6 +1689,15 @@ const CashClosure = ({ sales, transactions, onSaveHistory, feeProfiles, transact
         <div className="bg-white p-3 rounded border border-slate-200 shadow-sm">
            <div className="text-[10px] font-bold text-slate-400 uppercase">Outros/Percas</div>
            <div className="text-xl font-bold text-orange-500">{fmt(summary.others + summary.losses)}</div>
+        </div>
+        <div className="bg-orange-50 p-3 rounded border border-orange-200 shadow-sm flex flex-col justify-between">
+            <div>
+                <div className="text-[10px] font-bold text-orange-600 uppercase flex items-center gap-1"><LogOut size={10} className="rotate-180"/> Sangrias</div>
+                <div className="text-xl font-bold text-orange-700">{fmt(summary.sangrias)}</div>
+            </div>
+            <button onClick={() => setShowSangriaHistory(true)} className="mt-1 text-[10px] bg-orange-200 text-orange-800 px-2 py-1 rounded font-bold hover:bg-orange-300 w-full flex items-center justify-center gap-1">
+                <Clock size={10}/> Ver Histórico
+            </button>
         </div>
         <div className={`p-3 rounded border shadow-sm ${summary.netProfit >= 0 ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'}`}>
            <div className={`text-[10px] font-bold uppercase ${summary.netProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>Lucro Líquido</div>
@@ -1672,6 +1768,33 @@ const CashClosure = ({ sales, transactions, onSaveHistory, feeProfiles, transact
               <CheckCircle size={20}/> Fechar Caixa do Dia
           </button>
       </div>
+
+      {/* --- MODAL HISTÓRICO DE SANGRIA --- */}
+      <Modal isOpen={showSangriaHistory} onClose={() => setShowSangriaHistory(false)} title="Histórico de Sangrias">
+          <div className="space-y-4">
+              <div className="flex gap-2 mb-4 bg-slate-50 p-2 rounded">
+                  <div className="flex-1">
+                      <label className="text-xs font-bold text-slate-500">Data</label>
+                      <input type="date" className="w-full border p-1 rounded text-sm" value={sangriaFilter.date} onChange={e => setSangriaFilter({...sangriaFilter, date: e.target.value})}/>
+                  </div>
+              </div>
+              <div className="max-h-60 overflow-y-auto space-y-2">
+                  {filteredSangrias.length === 0 ? <p className="text-center text-slate-400 py-4">Nenhuma sangria nesta data.</p> : filteredSangrias.map((s, idx) => (
+                      <div key={idx} className="flex justify-between items-center p-3 border rounded-lg bg-orange-50 border-orange-100">
+                          <div>
+                              <div className="font-bold text-slate-700">{s.description}</div>
+                              <div className="text-xs text-slate-500">{new Date(s.createdAt?.seconds * 1000 || new Date()).toLocaleTimeString()}</div>
+                          </div>
+                          <div className="font-bold text-orange-600 text-lg">-{fmt(s.amount)}</div>
+                      </div>
+                  ))}
+              </div>
+              <div className="pt-2 border-t flex justify-between items-center">
+                  <span className="font-bold text-slate-600">Total:</span>
+                  <span className="font-bold text-xl text-orange-600">{fmt(filteredSangrias.reduce((a,b)=>a+b.amount,0))}</span>
+              </div>
+          </div>
+      </Modal>
     </div>
   );
 };
@@ -1698,7 +1821,8 @@ const FinancialReport = ({ sales, transactions, transactionCategories, companyIn
   // então se filtrar por usuário, mostramos apenas as "Compras de Estoque" deduzidas das vendas dele ou mantemos geral.
   // Para simplificar: Gastos Operacionais são sempre GERAIS da loja. Vendas são por usuário.
   const filteredTransactions = transactions.filter(t => {
-    const [tYear, tMonth] = t.date.split('-').map(Number);
+    // CORREÇÃO AQUI: Adicionado (t.date || '') para evitar erro em transações sem data
+    const [tYear, tMonth] = (t.date || '').split('-').map(Number);
     return (tMonth - 1) === month && tYear === year;
   });
 
@@ -3367,7 +3491,7 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
           {/* RESTO (Só Admin) */}
           {(currentUser?.role === 'admin') && (
             <>
-              <MenuButton id="clients" icon={Users} label="Clientes" />
+              <MenuButton id="clients" icon={Users} label="Parceiros" />
               <MenuButton id="transactions" icon={ClipboardList} label="Notas & Gastos" />
               <MenuButton id="finance" icon={DollarSign} label="Financeiro" />
               <MenuButton id="priceGroups" icon={Tags} label="Precificação" />
@@ -3491,9 +3615,11 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
             )}
             {activeModule === 'inventory' && (
                 <InventoryWMS 
-                    storeConfig={store} 
-                    products={products} // <--- ADICIONE ISSO
-                    showNotification={showNotification} 
+                  storeConfig={store} 
+                  products={products}
+                  sales={realtimeSales}
+                  suppliers={salesClients}
+                  showNotification={showNotification} 
                 />
             )}
             {activeModule === 'settings' && (

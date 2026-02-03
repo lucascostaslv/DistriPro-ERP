@@ -1,383 +1,493 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { 
-  Users, Plus, Edit, Trash2, Search, Save, X, 
-  MapPin, User, Building, AlertTriangle 
+import {  
+  FileText, Briefcase, Filter, Truck, DollarSign, Search, Plus, Edit, Trash2, User, Phone, MapPin, 
+  Package, Calendar, X, CheckCircle, 
+  Building2, Mail
 } from 'lucide-react';
 import { supabase } from './supabaseClient';
+import { db } from './firebase'; 
+import { collection, query, where, getDocs, orderBy, limit, doc, getDoc } from "firebase/firestore";
 
 // --- MÁSCARAS ---
 const masks = {
-  cpf: (v) => v.replace(/\D/g, '').replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4').substring(0, 14),
-  cnpj: (v) => v.replace(/\D/g, '').replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/, '$1.$2.$3/$4-$5').substring(0, 18),
-  cep: (v) => v.replace(/\D/g, '').replace(/^(\d{5})(\d)/, '$1-$2').substring(0, 9),
-  phone: (v) => {
-    let r = v.replace(/\D/g, "");
-    if (r.length > 10) r = r.replace(/^(\d\d)(\d{5})(\d{4}).*/, "($1) $2-$3");
-    else if (r.length > 5) r = r.replace(/^(\d\d)(\d{4})(\d{0,4}).*/, "($1) $2-$3");
-    return r.substring(0, 15);
-  },
-  numbers: (v) => v.replace(/\D/g, '')
+  cpf: (v) => v ? v.replace(/\D/g, '').replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4').substring(0, 14) : '',
+  cnpj: (v) => v ? v.replace(/\D/g, '').replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/, '$1.$2.$3/$4-$5').substring(0, 18) : '',
+  phone: (v) => v ? v.replace(/\D/g, '').replace(/(\d{2})(\d{5})(\d{4})/, '($1) $2-$3').substring(0, 15) : '',
+  cep: (v) => v ? v.replace(/\D/g, '').replace(/(\d{5})(\d{3})/, '$1-$2').substring(0, 9) : '',
+  currency: (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0)
 };
 
-const ClientsManager = ({ storeConfig, showNotification }) => {
+const ClientsManager = ({ storeConfig }) => {
   const [clients, setClients] = useState([]);
-  const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
   
-  // Estado do Modal
+  const [activeFilter, setActiveFilter] = useState('all'); 
+  const [modalTab, setModalTab] = useState('registration'); 
+  const [supplierStats, setSupplierStats] = useState({ invoices: [], products: [] });
+  const [statsLoading, setStatsLoading] = useState(false);
+
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [formData, setFormData] = useState(getInitialForm());
+  const [editingClient, setEditingClient] = useState(null);
+  const [formData, setFormData] = useState({
+    name: '', type: 'PF', tax_id: '', ie: '', email: '', phone: '',
+    zip_code: '', street: '', number: '', neighborhood: '', city: '', state: '',
+    isSupplier: false 
+  });
 
-  function getInitialForm() {
-    return {
-      id: null,
-      type: 'PF', // PF ou PJ
-      name: '',
-      tax_id: '', // CPF/CNPJ
-      ie_indicator: '9', // 9=Não Contribuinte (Padrão para PF)
-      ie: '',
-      email: '',
-      phone: '',
-      address: { zip: '', street: '', number: '', neighborhood: '', city: '', state: '', ibge_code: '' }
-    };
-  }
-
-  // --- 1. CARREGAR CLIENTES (Supabase) ---
   useEffect(() => {
-    if (!storeConfig?.id) return;
     fetchClients();
   }, [storeConfig]);
 
   const fetchClients = async () => {
+    if (!storeConfig?.id) return;
     setLoading(true);
-    const storeIdStr = String(storeConfig.id);
-    const { data, error } = await supabase
-      .from('fiscal_clients')
-      .select('*')
-      .eq('firebase_store_id', storeIdStr)
-      .order('name');
-    
-    if (error) console.error("Erro ao buscar clientes:", error);
-    else setClients(data || []);
-    setLoading(false);
-  };
-
-  // --- 2. MANIPULAÇÃO DO FORMULÁRIO ---
-  const handleTypeChange = (type) => {
-    setFormData(prev => ({
-      ...prev, 
-      type, 
-      tax_id: '', 
-      ie_indicator: type === 'PF' ? '9' : '1', // Se PJ, sugere Contribuinte
-      ie: '' 
-    }));
-  };
-
-  const handleInputChange = (field, value) => {
-    let finalValue = value;
-    if (field === 'tax_id') finalValue = formData.type === 'PF' ? masks.cpf(value) : masks.cnpj(value);
-    if (field === 'phone') finalValue = masks.phone(value);
-    
-    setFormData(prev => ({ ...prev, [field]: finalValue }));
-  };
-
-  const handleAddressChange = (field, value) => {
-    let finalValue = value;
-    if (field === 'zip') finalValue = masks.cep(value);
-    setFormData(prev => ({ ...prev, address: { ...prev.address, [field]: finalValue } }));
-  };
-
-  const handleCepBlur = async () => {
-    const cep = formData.address.zip.replace(/\D/g, '');
-    if (cep.length !== 8) return;
-
     try {
-      const resp = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
-      const data = await resp.json();
-      if (!data.erro) {
-        setFormData(prev => ({
-          ...prev,
-          address: {
-            ...prev.address,
-            street: data.logradouro,
-            neighborhood: data.bairro,
-            city: data.localidade,
-            state: data.uf,
-            ibge_code: data.ibge // ESSENCIAL PARA NFE
-          }
-        }));
-        showNotification('Endereço encontrado!', 'success');
-      }
-    } catch (e) { console.error(e); }
-  };
-
-  // --- 3. SALVAR (CREATE/UPDATE) ---
-  const handleSave = async () => {
-    if (!formData.name) return showNotification('Nome é obrigatório', 'error');
-    if (!formData.tax_id) return showNotification('CPF/CNPJ é obrigatório', 'error');
-    if (!formData.address.ibge_code) return showNotification('Endereço incompleto (Falta IBGE)', 'warning');
-
-    const storeIdStr = String(storeConfig.id);
-    const cleanTaxId = formData.tax_id.replace(/\D/g, '');
-    
-    const payload = {
-      firebase_store_id: storeIdStr,
-      name: formData.name.toUpperCase(),
-      type: formData.type,
-      tax_id: cleanTaxId,
-      ie_indicator: formData.ie_indicator,
-      ie: formData.ie.replace(/\D/g, ''),
-      email: formData.email,
-      phone: formData.phone,
-      zip_code: formData.address.zip.replace(/\D/g, ''),
-      street: formData.address.street,
-      number: formData.address.number,
-      neighborhood: formData.address.neighborhood,
-      city: formData.address.city,
-      state: formData.address.state,
-      ibge_code: formData.address.ibge_code
-    };
-
-    try {
-      let error;
-      if (formData.id) {
-        // Update
-        const { error: err } = await supabase
-          .from('fiscal_clients')
-          .update(payload)
-          .eq('id', formData.id);
-        error = err;
-      } else {
-        // Insert
-        const { error: err } = await supabase
-          .from('fiscal_clients')
-          .insert(payload);
-        error = err;
-      }
-
-      if (error) throw error;
+      const { data, error } = await supabase
+        .from('fiscal_clients')
+        .select('*')
+        .eq('firebase_store_id', String(storeConfig.id))
+        .order('name');
       
-      showNotification('Cliente salvo com sucesso!', 'success');
-      setIsModalOpen(false);
-      fetchClients(); // Recarrega lista
-    } catch (err) {
-      showNotification('Erro ao salvar: ' + err.message, 'error');
+      if (error) throw error;
+      setClients(data || []);
+    } catch (error) {
+      console.error("Erro ao buscar parceiros:", error);
+    } finally {
+      setLoading(false);
     }
   };
 
+  // --- FUNÇÃO DE BUSCA INTELIGENTE (CORREÇÃO DE NOMES) ---
+  const fetchSupplierInsights = async (supplierId, supplierName) => {
+    if (!storeConfig?.id || !supplierId) return;
+    setStatsLoading(true);
+    setSupplierStats({ invoices: [], products: [] });
+    
+    try {
+        const storeId = String(storeConfig.id);
+        const invoicesRef = collection(db, 'artifacts', storeId, 'public', 'data', 'invoices');
+        const productsRef = collection(db, 'artifacts', storeId, 'public', 'data', 'products');
+
+        // 1. Buscar Notas Fiscais
+        let snapId = await getDocs(query(invoicesRef, where('entityId', '==', String(supplierId)), limit(50)));
+        let snapName = await getDocs(query(invoicesRef, where('entityName', '==', supplierName), limit(50)));
+        
+        const invoiceMap = new Map();
+        snapId.docs.forEach(d => invoiceMap.set(d.id, { id: d.id, ...d.data() }));
+        snapName.docs.forEach(d => invoiceMap.set(d.id, { id: d.id, ...d.data() }));
+        
+        const invoices = Array.from(invoiceMap.values()).sort((a,b) => (b.created_at?.seconds || 0) - (a.created_at?.seconds || 0));
+
+        // 2. Buscar Produtos e CORRIGIR NOMES
+        const productsMap = new Map();
+
+        // Helper: busca o nome real do produto no banco de produtos
+        const getRealProductName = async (prodId) => {
+            try {
+                if(!prodId) return null;
+                const docRef = doc(productsRef, prodId);
+                const docSnap = await getDoc(docRef);
+                return docSnap.exists() ? docSnap.data().name : null;
+            } catch { return null; }
+        };
+
+        // Processar itens das notas
+        for (const inv of invoices) {
+            if (inv.items && Array.isArray(inv.items)) {
+                for (const item of inv.items) {
+                    if (item.productId && !productsMap.has(item.productId)) {
+                        // AQUI ESTÁ O TRUQUE: Busca o nome oficial
+                        let realName = await getRealProductName(item.productId);
+                        
+                        productsMap.set(item.productId, {
+                            id: item.productId,
+                            name: realName || item.description || item.name || 'Produto sem Nome', 
+                            barcode: item.cEAN || item.barcode,
+                            cost: item.unitPrice, 
+                            source: 'invoice'
+                        });
+                    }
+                }
+            }
+        }
+
+        const products = Array.from(productsMap.values());
+        setSupplierStats({ invoices, products });
+
+    } catch (error) {
+        console.error("Erro ao buscar insights:", error);
+    } finally {
+        setStatsLoading(false);
+    }
+  };
+
+  // --- MANIPULADORES ---
   const handleEdit = (client) => {
+    setEditingClient(client);
+    setModalTab('registration'); 
+    
+    const isSup = client.tags && client.tags.includes('FORNECEDOR');
+
     setFormData({
-      id: client.id,
-      type: client.type,
       name: client.name,
-      tax_id: client.type === 'PF' ? masks.cpf(client.tax_id) : masks.cnpj(client.tax_id),
-      ie_indicator: client.ie_indicator,
+      type: client.type || 'PF',
+      tax_id: client.tax_id || '',
       ie: client.ie || '',
       email: client.email || '',
-      phone: client.phone ? masks.phone(client.phone) : '',
-      address: {
-        zip: client.zip_code ? masks.cep(client.zip_code) : '',
-        street: client.street,
-        number: client.number,
-        neighborhood: client.neighborhood,
-        city: client.city,
-        state: client.state,
-        ibge_code: client.ibge_code
-      }
+      phone: client.phone || '',
+      zip_code: client.zip_code || '',
+      street: client.street || '',
+      number: client.number || '',
+      neighborhood: client.neighborhood || '',
+      city: client.city || '',
+      state: client.state || '',
+      isSupplier: isSup
+    });
+
+    setIsModalOpen(true);
+
+    if (isSup) {
+        fetchSupplierInsights(client.id, client.name);
+    }
+  };
+
+  const handleCreate = () => {
+    setEditingClient(null);
+    setModalTab('registration');
+    setFormData({
+      name: '', type: 'PF', tax_id: '', ie: '', email: '', phone: '',
+      zip_code: '', street: '', number: '', neighborhood: '', city: '', state: '',
+      isSupplier: false 
     });
     setIsModalOpen(true);
   };
 
-  const handleDelete = async (id) => {
-    if (!window.confirm("Remover este cliente?")) return;
-    const { error } = await supabase.from('fiscal_clients').delete().eq('id', id);
-    if (!error) {
-      setClients(prev => prev.filter(c => c.id !== id));
-      showNotification('Cliente removido', 'success');
+  const handleSave = async () => {
+    if (!formData.name) return alert('Nome é obrigatório');
+    
+    try {
+      let tags = [];
+      if (formData.isSupplier) tags.push('FORNECEDOR');
+      if (!formData.isSupplier) tags.push('CLIENTE'); 
+
+      const payload = {
+        firebase_store_id: String(storeConfig.id),
+        name: formData.name.toUpperCase(),
+        type: formData.type,
+        tax_id: formData.tax_id.replace(/\D/g, ''),
+        ie: formData.ie,
+        email: formData.email,
+        phone: formData.phone.replace(/\D/g, ''),
+        zip_code: formData.zip_code.replace(/\D/g, ''),
+        street: formData.street,
+        number: formData.number,
+        neighborhood: formData.neighborhood,
+        city: formData.city,
+        state: formData.state,
+        tags: tags 
+      };
+
+      if (editingClient) {
+        const { error } = await supabase
+          .from('fiscal_clients')
+          .update(payload)
+          .eq('id', editingClient.id);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase
+          .from('fiscal_clients')
+          .insert([payload]);
+        if (error) throw error;
+      }
+
+      setIsModalOpen(false);
+      fetchClients();
+    } catch (error) {
+      alert('Erro ao salvar: ' + error.message);
     }
   };
 
-  // --- RENDER ---
-  const filteredClients = useMemo(() => {
-    return clients.filter(c => c.name.toLowerCase().includes(searchTerm.toLowerCase()) || c.tax_id.includes(searchTerm));
-  }, [clients, searchTerm]);
+  const handleDelete = async (id) => {
+    if (!window.confirm('Tem certeza?')) return;
+    const { error } = await supabase.from('fiscal_clients').delete().eq('id', id);
+    if (!error) fetchClients();
+  };
+
+  const filteredList = useMemo(() => {
+    let list = clients;
+    if (activeFilter === 'suppliers') list = list.filter(c => c.tags?.includes('FORNECEDOR'));
+    else if (activeFilter === 'clients') list = list.filter(c => !c.tags?.includes('FORNECEDOR'));
+    
+    if (searchTerm) {
+        const term = searchTerm.toLowerCase();
+        list = list.filter(c => c.name.toLowerCase().includes(term) || c.tax_id?.includes(term));
+    }
+    return list;
+  }, [clients, searchTerm, activeFilter]);
 
   return (
-    <div className="space-y-4">
-      <div className="flex justify-between items-center bg-white p-4 rounded border border-slate-200 shadow-sm">
-        <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-            <Users className="text-indigo-600"/> Carteira de Clientes
-        </h2>
-        <button onClick={() => { setFormData(getInitialForm()); setIsModalOpen(true); }} className="bg-slate-800 text-white px-4 py-2 rounded font-bold hover:bg-slate-700 flex gap-2">
-            <Plus size={20}/> Novo Cliente
-        </button>
+    <div className="h-full flex flex-col bg-slate-50 animate-in fade-in">
+      
+      {/* 1. HEADER MODERNO */}
+      <div className="bg-white border-b shadow-sm px-6 py-5 flex flex-col md:flex-row justify-between items-center gap-4">
+          <div>
+              <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
+                  <Briefcase className="text-indigo-600"/> Clientes & Fornecedores
+              </h2>
+              <p className="text-sm text-slate-500 mt-1">Gerencie clientes e fornecedores em um só lugar.</p>
+          </div>
+          <div className="flex gap-3 w-full md:w-auto">
+              <div className="relative flex-1 md:w-64">
+                  <Search className="absolute left-3 top-2.5 text-slate-400" size={18}/>
+                  <input 
+                      className="w-full pl-10 pr-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-sm transition-all hover:border-indigo-300"
+                      placeholder="Buscar parceiro..."
+                      value={searchTerm}
+                      onChange={e => setSearchTerm(e.target.value)}
+                  />
+              </div>
+              <button onClick={handleCreate} className="bg-slate-900 text-white px-4 py-2 rounded-lg font-bold hover:bg-slate-800 flex items-center gap-2 shadow-lg shadow-slate-200 transition-transform active:scale-95 text-sm">
+                  <Plus size={18}/> Novo
+              </button>
+          </div>
       </div>
 
-      <div className="relative">
-          <Search className="absolute left-3 top-2.5 text-slate-400" size={18}/>
-          <input 
-            className="w-full pl-10 pr-4 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-indigo-500"
-            placeholder="Buscar por nome ou documento..."
-            value={searchTerm}
-            onChange={e => setSearchTerm(e.target.value)}
-          />
+      {/* 2. FILTROS DE ABA (Todos / Clientes / Fornecedores) */}
+      <div className="bg-white px-6 border-b flex gap-6">
+          <button onClick={() => setActiveFilter('all')} className={`py-3 text-sm font-bold border-b-2 transition-colors ${activeFilter === 'all' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>Todos</button>
+          <button onClick={() => setActiveFilter('clients')} className={`py-3 text-sm font-bold border-b-2 transition-colors flex items-center gap-2 ${activeFilter === 'clients' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}><User size={16}/> Clientes</button>
+          <button onClick={() => setActiveFilter('suppliers')} className={`py-3 text-sm font-bold border-b-2 transition-colors flex items-center gap-2 ${activeFilter === 'suppliers' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}><Truck size={16}/> Fornecedores</button>
       </div>
 
-      {loading ? <div className="text-center p-8 text-slate-500">Carregando...</div> : (
-        <div className="bg-white rounded border border-slate-200 shadow-sm overflow-hidden">
-            <table className="w-full text-left text-sm">
-                <thead className="bg-slate-50 text-slate-600 uppercase text-xs font-bold">
-                    <tr>
-                        <th className="p-4">Cliente / Razão Social</th>
-                        <th className="p-4">Documento</th>
-                        <th className="p-4">Cidade/UF</th>
-                        <th className="p-4 text-center">Tipo</th>
-                        <th className="p-4 text-right">Ações</th>
-                    </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                    {filteredClients.map(client => (
-                        <tr key={client.id} className="hover:bg-slate-50">
-                            <td className="p-4 font-bold text-slate-700">{client.name}</td>
-                            <td className="p-4 text-slate-600 font-mono">
-                                {client.type === 'PF' ? masks.cpf(client.tax_id) : masks.cnpj(client.tax_id)}
-                            </td>
-                            <td className="p-4 text-slate-600">{client.city} - {client.state}</td>
-                            <td className="p-4 text-center">
-                                <span className={`px-2 py-1 rounded text-xs font-bold ${client.type === 'PJ' ? 'bg-indigo-100 text-indigo-700' : 'bg-emerald-100 text-emerald-700'}`}>
-                                    {client.type}
+      {/* 3. LISTAGEM EM GRID (Cards) */}
+      <div className="flex-1 overflow-y-auto p-6 bg-slate-50/50">
+        {loading ? (
+           <div className="flex flex-col items-center justify-center h-64 text-slate-400 gap-2">
+               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+               <p className="text-sm">Carregando...</p>
+           </div>
+        ) : filteredList.length === 0 ? (
+           <div className="text-center p-12 text-slate-400 border-2 border-dashed border-slate-200 rounded-xl bg-white">
+               <User size={48} className="mx-auto mb-3 opacity-20"/>
+               <p>Nenhum parceiro encontrado.</p>
+           </div>
+        ) : (
+           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
+              {filteredList.map(client => {
+                  const isSupplier = client.tags && client.tags.includes('FORNECEDOR');
+                  return (
+                    <div key={client.id} onClick={() => handleEdit(client)} className="bg-white rounded-xl border border-slate-200 p-0 hover:shadow-lg transition-all group cursor-pointer relative overflow-hidden">
+                        <div className={`absolute left-0 top-0 bottom-0 w-1.5 ${isSupplier ? 'bg-orange-500' : 'bg-blue-500'}`}></div>
+                        <div className="p-4 pl-5">
+                            <div className="flex justify-between items-start mb-3">
+                                <span className={`text-[10px] font-bold px-2.5 py-1 rounded-full uppercase tracking-wide ${isSupplier ? 'bg-orange-50 text-orange-700 border border-orange-100' : 'bg-blue-50 text-blue-700 border border-blue-100'}`}>
+                                    {isSupplier ? 'Fornecedor' : 'Cliente'}
                                 </span>
-                            </td>
-                            <td className="p-4 text-right flex justify-end gap-2">
-                                <button onClick={() => handleEdit(client)} className="text-indigo-600 p-2 hover:bg-indigo-50 rounded"><Edit size={18}/></button>
-                                <button onClick={() => handleDelete(client.id)} className="text-red-500 p-2 hover:bg-red-50 rounded"><Trash2 size={18}/></button>
-                            </td>
-                        </tr>
-                    ))}
-                    {filteredClients.length === 0 && <tr><td colSpan={5} className="p-8 text-center text-slate-400">Nenhum cliente encontrado.</td></tr>}
-                </tbody>
-            </table>
-        </div>
-      )}
-
-      {/* MODAL DE CADASTRO */}
-      {isModalOpen && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-            <div className="bg-white w-full max-w-2xl rounded-lg shadow-xl overflow-hidden animate-in fade-in zoom-in">
-                <div className="bg-slate-800 text-white p-4 flex justify-between items-center">
-                    <h3 className="font-bold flex items-center gap-2">
-                        {formData.id ? <Edit size={18}/> : <Plus size={18}/>} 
-                        {formData.id ? 'Editar Cliente' : 'Novo Cliente'}
-                    </h3>
-                    <button onClick={() => setIsModalOpen(false)}><X size={20}/></button>
-                </div>
-                
-                <div className="p-6 max-h-[80vh] overflow-y-auto">
-                    {/* TIPO DE PESSOA */}
-                    <div className="flex gap-4 mb-6 justify-center">
-                        <button 
-                            onClick={() => handleTypeChange('PF')}
-                            className={`flex-1 py-3 rounded border font-bold flex items-center justify-center gap-2 ${formData.type === 'PF' ? 'bg-emerald-50 border-emerald-500 text-emerald-700 ring-1 ring-emerald-500' : 'bg-white border-slate-200 text-slate-500'}`}
-                        >
-                            <User size={20}/> Pessoa Física
-                        </button>
-                        <button 
-                            onClick={() => handleTypeChange('PJ')}
-                            className={`flex-1 py-3 rounded border font-bold flex items-center justify-center gap-2 ${formData.type === 'PJ' ? 'bg-indigo-50 border-indigo-500 text-indigo-700 ring-1 ring-indigo-500' : 'bg-white border-slate-200 text-slate-500'}`}
-                        >
-                            <Building size={20}/> Pessoa Jurídica
-                        </button>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
-                        {/* DADOS BÁSICOS */}
-                        <div className="md:col-span-8">
-                            <label className="block text-xs font-bold text-slate-500 mb-1">Nome Completo / Razão Social</label>
-                            <input className="w-full border p-2 rounded text-sm uppercase" value={formData.name} onChange={e => handleInputChange('name', e.target.value)} />
-                        </div>
-                        <div className="md:col-span-4">
-                            <label className="block text-xs font-bold text-slate-500 mb-1">{formData.type === 'PF' ? 'CPF' : 'CNPJ'}</label>
-                            <input className="w-full border p-2 rounded text-sm font-mono" value={formData.tax_id} onChange={e => handleInputChange('tax_id', e.target.value)} placeholder={formData.type === 'PF' ? '000.000.000-00' : '00.000.000/0000-00'} />
-                        </div>
-
-                        {/* INDICADOR DE IE (CRUCIAL PARA NFE) */}
-                        <div className="md:col-span-6">
-                            <label className="block text-xs font-bold text-indigo-600 mb-1">Indicador de IE (Obrigatório NF-e)</label>
-                            <select className="w-full border p-2 rounded text-sm bg-indigo-50" value={formData.ie_indicator} onChange={e => handleInputChange('ie_indicator', e.target.value)}>
-                                <option value="1">1 - Contribuinte ICMS</option>
-                                <option value="2">2 - Contribuinte Isento</option>
-                                <option value="9">9 - Não Contribuinte</option>
-                            </select>
-                        </div>
-                        <div className="md:col-span-6">
-                            <label className="block text-xs font-bold text-slate-500 mb-1">Inscrição Estadual</label>
-                            <input 
-                                className="w-full border p-2 rounded text-sm" 
-                                value={formData.ie} 
-                                onChange={e => handleInputChange('ie', masks.numbers(e.target.value))} 
-                                disabled={formData.ie_indicator === '9'}
-                                placeholder={formData.ie_indicator === '9' ? 'Não aplicável' : 'Somente números'}
-                            />
-                        </div>
-
-                        <div className="md:col-span-6">
-                            <label className="block text-xs font-bold text-slate-500 mb-1">Telefone / Celular</label>
-                            <input className="w-full border p-2 rounded text-sm" value={formData.phone} onChange={e => handleInputChange('phone', e.target.value)} placeholder="(00) 00000-0000" />
-                        </div>
-                        <div className="md:col-span-6">
-                            <label className="block text-xs font-bold text-slate-500 mb-1">E-mail (Para enviar XML)</label>
-                            <input className="w-full border p-2 rounded text-sm" value={formData.email} onChange={e => handleInputChange('email', e.target.value)} />
-                        </div>
-
-                        {/* ENDEREÇO */}
-                        <div className="md:col-span-12 border-t pt-4 mt-2">
-                            <p className="text-xs font-bold text-slate-400 mb-2 uppercase flex items-center gap-1"><MapPin size={12}/> Endereço Fiscal</p>
-                        </div>
-
-                        <div className="md:col-span-3">
-                            <label className="block text-xs font-bold text-slate-500 mb-1">CEP</label>
-                            <input className="w-full border p-2 rounded text-sm font-bold text-slate-700" value={formData.address.zip} onChange={e => handleAddressChange('zip', e.target.value)} onBlur={handleCepBlur} placeholder="00000-000" />
-                        </div>
-                        <div className="md:col-span-7">
-                            <label className="block text-xs font-bold text-slate-500 mb-1">Rua</label>
-                            <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.street} onChange={e => handleAddressChange('street', e.target.value)} />
-                        </div>
-                        <div className="md:col-span-2">
-                            <label className="block text-xs font-bold text-slate-500 mb-1">Número</label>
-                            <input className="w-full border p-2 rounded text-sm" value={formData.address.number} onChange={e => handleAddressChange('number', e.target.value)} />
-                        </div>
-
-                        <div className="md:col-span-4">
-                            <label className="block text-xs font-bold text-slate-500 mb-1">Bairro</label>
-                            <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.neighborhood} onChange={e => handleAddressChange('neighborhood', e.target.value)} />
-                        </div>
-                        <div className="md:col-span-6">
-                            <label className="block text-xs font-bold text-slate-500 mb-1">Cidade</label>
-                            <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.city} readOnly />
-                        </div>
-                        <div className="md:col-span-2">
-                            <label className="block text-xs font-bold text-slate-500 mb-1">UF</label>
-                            <input className="w-full border p-2 rounded text-sm bg-slate-50" value={formData.address.state} readOnly />
-                        </div>
-                        
-                        {/* Campo Oculto mas Importante: IBGE */}
-                        {!formData.address.ibge_code && (
-                            <div className="md:col-span-12 text-red-500 text-xs font-bold flex items-center gap-1">
-                                <AlertTriangle size={12}/> Atenção: Busque o CEP para preencher o código IBGE.
+                                {client.type === 'PJ' ? <Building2 size={16} className="text-slate-300"/> : <User size={16} className="text-slate-300"/>}
                             </div>
-                        )}
+                            <h3 className="font-bold text-slate-800 text-lg truncate mb-1 group-hover:text-indigo-600 transition-colors">{client.name}</h3>
+                            <div className="space-y-1.5 mt-3">
+                                <p className="text-xs text-slate-500 flex items-center gap-2">
+                                    <FileText size={14} className="text-slate-400"/> 
+                                    {client.tax_id ? (client.type === 'PJ' ? masks.cnpj(client.tax_id) : masks.cpf(client.tax_id)) : 'Sem Doc'}
+                                </p>
+                                {client.city && (
+                                    <p className="text-xs text-slate-500 flex items-center gap-2">
+                                        <MapPin size={14} className="text-slate-400"/> {client.city}/{client.state}
+                                    </p>
+                                )}
+                            </div>
+                        </div>
                     </div>
-                </div>
+                  );
+              })}
+           </div>
+        )}
+      </div>
 
-                <div className="p-4 bg-slate-50 flex justify-end gap-2 border-t">
-                    <button onClick={() => setIsModalOpen(false)} className="px-4 py-2 text-slate-600 font-bold hover:bg-slate-200 rounded text-sm">Cancelar</button>
-                    <button onClick={handleSave} className="px-6 py-2 bg-slate-800 text-white font-bold rounded hover:bg-slate-900 text-sm flex items-center gap-2">
-                        <Save size={16}/> Salvar Cliente
-                    </button>
-                </div>
+      {/* 4. MODAL COM ABAS */}
+      {isModalOpen && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+          {/* AQUI: h-[85vh] garante que todas as abas tenham o mesmo tamanho fixo */}
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl flex flex-col overflow-hidden h-[85vh] animate-in zoom-in-95 duration-200">
+            
+            {/* Header Modal */}
+            <div className="bg-slate-900 text-white px-6 py-4 flex justify-between items-center shrink-0">
+              <h2 className="text-lg font-bold flex items-center gap-2">
+                 {editingClient ? <Edit size={20} className="text-indigo-400"/> : <Plus size={20} className="text-emerald-400"/>}
+                 {editingClient ? `Editar: ${editingClient.name}` : 'Novo Parceiro'}
+              </h2>
+              <button onClick={() => setIsModalOpen(false)} className="hover:bg-white/10 p-1 rounded-full transition-colors"><X size={24}/></button>
             </div>
+
+            {/* Abas Internas (Só aparecem se for Fornecedor) */}
+            {editingClient && formData.isSupplier && (
+                <div className="flex bg-slate-100 border-b shrink-0 px-6 gap-1">
+                    <button onClick={() => setModalTab('registration')} className={`px-4 py-3 text-sm font-bold flex items-center gap-2 border-b-2 transition-all ${modalTab === 'registration' ? 'border-indigo-600 text-indigo-600 bg-white rounded-t-lg' : 'border-transparent text-slate-500 hover:text-slate-700'}`}><User size={16}/> Cadastro</button>
+                    <button onClick={() => setModalTab('history')} className={`px-4 py-3 text-sm font-bold flex items-center gap-2 border-b-2 transition-all ${modalTab === 'history' ? 'border-indigo-600 text-indigo-600 bg-white rounded-t-lg' : 'border-transparent text-slate-500 hover:text-slate-700'}`}><Calendar size={16}/> Histórico</button>
+                    <button onClick={() => setModalTab('products')} className={`px-4 py-3 text-sm font-bold flex items-center gap-2 border-b-2 transition-all ${modalTab === 'products' ? 'border-indigo-600 text-indigo-600 bg-white rounded-t-lg' : 'border-transparent text-slate-500 hover:text-slate-700'}`}><Package size={16}/> Produtos</button>
+                </div>
+            )}
+
+            {/* CONTEÚDO SCROLLAVEL (Preenche o espaço restante) */}
+            <div className="flex-1 overflow-y-auto p-6 bg-white custom-scrollbar">
+                
+                {/* ABA 1: CADASTRO COMPLETO (Agora com todos os inputs) */}
+                {modalTab === 'registration' && (
+                    <div className="space-y-5 animate-in fade-in">
+                        
+                        {/* Toggle Fornecedor */}
+                        <div className="bg-indigo-50 p-4 rounded-xl border border-indigo-100 flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <div className={`w-10 h-10 rounded-full flex items-center justify-center ${formData.isSupplier ? 'bg-orange-100 text-orange-600' : 'bg-blue-100 text-blue-600'}`}>
+                                    {formData.isSupplier ? <Truck size={20}/> : <User size={20}/>}
+                                </div>
+                                <div>
+                                    <h4 className="font-bold text-slate-800 text-sm">Tipo de Relacionamento</h4>
+                                    <p className="text-xs text-slate-500">Defina se este parceiro fornece produtos para a loja.</p>
+                                </div>
+                            </div>
+                            <label className="flex items-center gap-2 cursor-pointer bg-white px-3 py-1.5 rounded-lg border shadow-sm hover:border-indigo-300 transition-colors">
+                                <input type="checkbox" className="w-4 h-4 text-indigo-600 rounded" checked={formData.isSupplier} onChange={e => setFormData({...formData, isSupplier: e.target.checked})} />
+                                <span className="font-bold text-slate-700 text-sm">É Fornecedor</span>
+                            </label>
+                        </div>
+
+                        {/* Formulário de Dados Pessoais */}
+                        <div className="grid grid-cols-12 gap-4">
+                            <div className="col-span-12 md:col-span-3">
+                                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Tipo Pessoa</label>
+                                <select className="w-full border p-2.5 rounded-lg text-sm bg-slate-50 focus:bg-white transition-colors" value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})}>
+                                    <option value="PF">Física (CPF)</option>
+                                    <option value="PJ">Jurídica (CNPJ)</option>
+                                </select>
+                            </div>
+                            <div className="col-span-12 md:col-span-5">
+                                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Documento (CPF/CNPJ)</label>
+                                <input className="w-full border p-2.5 rounded-lg text-sm" value={formData.type === 'PJ' ? masks.cnpj(formData.tax_id) : masks.cpf(formData.tax_id)} onChange={e => setFormData({...formData, tax_id: e.target.value})} placeholder="Apenas números"/>
+                            </div>
+                            <div className="col-span-12 md:col-span-4">
+                                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Inscr. Estadual (Opcional)</label>
+                                <input className="w-full border p-2.5 rounded-lg text-sm" value={formData.ie} onChange={e => setFormData({...formData, ie: e.target.value})} placeholder="Isento se vazio"/>
+                            </div>
+                            
+                            <div className="col-span-12 md:col-span-8">
+                                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Nome Completo / Razão Social</label>
+                                <input className="w-full border p-2.5 rounded-lg text-sm uppercase font-bold text-slate-700" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} placeholder="Nome do parceiro"/>
+                            </div>
+                            <div className="col-span-12 md:col-span-4">
+                                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Telefone / WhatsApp</label>
+                                <input className="w-full border p-2.5 rounded-lg text-sm" value={masks.phone(formData.phone)} onChange={e => setFormData({...formData, phone: e.target.value})} placeholder="(00) 00000-0000"/>
+                            </div>
+                            <div className="col-span-12">
+                                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Email de Contato</label>
+                                <div className="relative">
+                                    <Mail className="absolute left-3 top-2.5 text-slate-400" size={16}/>
+                                    <input className="w-full border p-2.5 pl-10 rounded-lg text-sm" value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} placeholder="exemplo@email.com"/>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Formulário de Endereço */}
+                        <div className="pt-4 border-t">
+                             <h4 className="font-bold text-slate-800 text-sm mb-3 flex items-center gap-2"><MapPin size={16} className="text-indigo-500"/> Endereço</h4>
+                             <div className="grid grid-cols-12 gap-4">
+                                <div className="col-span-4 md:col-span-3"><label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">CEP</label><input className="w-full border p-2.5 rounded-lg text-sm" value={masks.cep(formData.zip_code)} onChange={e => setFormData({...formData, zip_code: e.target.value})} placeholder="00000-000"/></div>
+                                <div className="col-span-8 md:col-span-7"><label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Rua / Logradouro</label><input className="w-full border p-2.5 rounded-lg text-sm" value={formData.street} onChange={e => setFormData({...formData, street: e.target.value})} /></div>
+                                <div className="col-span-4 md:col-span-2"><label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Número</label><input className="w-full border p-2.5 rounded-lg text-sm" value={formData.number} onChange={e => setFormData({...formData, number: e.target.value})} /></div>
+                                <div className="col-span-8 md:col-span-5"><label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Bairro</label><input className="w-full border p-2.5 rounded-lg text-sm" value={formData.neighborhood} onChange={e => setFormData({...formData, neighborhood: e.target.value})} /></div>
+                                <div className="col-span-8 md:col-span-5"><label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Cidade</label><input className="w-full border p-2.5 rounded-lg text-sm" value={formData.city} onChange={e => setFormData({...formData, city: e.target.value})} /></div>
+                                <div className="col-span-4 md:col-span-2"><label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">UF</label><input className="w-full border p-2.5 rounded-lg text-sm uppercase" maxLength={2} value={formData.state} onChange={e => setFormData({...formData, state: e.target.value})} /></div>
+                             </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* ABA 2: HISTÓRICO DE NOTAS */}
+                {modalTab === 'history' && (
+                    <div className="animate-in fade-in h-full">
+                         {statsLoading ? (
+                             <div className="flex justify-center p-10"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div></div>
+                         ) : supplierStats.invoices.length === 0 ? (
+                             <div className="text-center p-12 bg-slate-50 rounded-xl border border-dashed border-slate-300">
+                                 <FileText size={48} className="mx-auto text-slate-300 mb-3"/>
+                                 <p className="text-slate-500 font-bold">Nenhuma nota fiscal encontrada.</p>
+                             </div>
+                         ) : (
+                             <table className="w-full text-sm text-left border rounded-lg overflow-hidden">
+                                 <thead className="bg-slate-100 text-slate-600 font-bold uppercase text-xs">
+                                     <tr><th className="p-3">Data</th><th className="p-3">Nota Nº</th><th className="p-3">Valor</th><th className="p-3 text-center">Itens</th></tr>
+                                 </thead>
+                                 <tbody className="divide-y divide-slate-100">
+                                     {supplierStats.invoices.map(inv => (
+                                         <tr key={inv.id} className="hover:bg-slate-50">
+                                             <td className="p-3">{inv.created_at?.seconds ? new Date(inv.created_at.seconds * 1000).toLocaleDateString() : '-'}</td>
+                                             <td className="p-3 font-mono text-slate-700">{inv.number}</td>
+                                             <td className="p-3 font-bold text-slate-800">{masks.currency(inv.totalValue)}</td>
+                                             <td className="p-3 text-center"><span className="bg-slate-200 px-2 py-0.5 rounded text-xs">{inv.items?.length || 0}</span></td>
+                                         </tr>
+                                     ))}
+                                 </tbody>
+                             </table>
+                         )}
+                    </div>
+                )}
+
+                {/* ABA 3: PRODUTOS (COM NOME CORRIGIDO) */}
+                {modalTab === 'products' && (
+                    <div className="animate-in fade-in h-full">
+                        {statsLoading ? (
+                             <div className="flex justify-center p-10"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div></div>
+                         ) : supplierStats.products.length === 0 ? (
+                             <div className="text-center p-12 bg-slate-50 rounded-xl border border-dashed border-slate-300">
+                                 <Package size={48} className="mx-auto text-slate-300 mb-3"/>
+                                 <p className="text-slate-500 font-bold">Nenhum produto vinculado.</p>
+                             </div>
+                         ) : (
+                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                 {supplierStats.products.map(prod => (
+                                     <div key={prod.id} className="bg-white border rounded-lg p-3 hover:shadow-md transition-all flex justify-between items-center group">
+                                         <div className="flex-1 min-w-0 pr-4">
+                                             <div className="flex items-center gap-2 mb-1">
+                                                 <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wide ${prod.source === 'invoice' ? 'bg-emerald-100 text-emerald-700' : 'bg-indigo-100 text-indigo-700'}`}>
+                                                     {prod.source === 'invoice' ? 'Nota Fiscal' : 'Cadastro'}
+                                                 </span>
+                                             </div>
+                                             {/* NOME EM DESTAQUE */}
+                                             <h4 className="font-bold text-slate-800 text-sm truncate" title={prod.name}>
+                                                 {prod.name || 'Nome Indisponível'}
+                                             </h4>
+                                             <p className="text-xs text-slate-400 font-mono mt-0.5">{prod.barcode || 'S/ GTIN'}</p>
+                                         </div>
+                                         <div className="text-right bg-slate-50 p-2 rounded-lg group-hover:bg-slate-100 transition-colors">
+                                             <p className="text-[10px] font-bold text-slate-400 uppercase">Custo</p>
+                                             <p className="font-bold text-slate-700">{masks.currency(prod.cost || prod.costPrice)}</p>
+                                         </div>
+                                     </div>
+                                 ))}
+                             </div>
+                         )}
+                    </div>
+                )}
+
+            </div>
+
+            {/* Footer Modal */}
+            <div className="p-4 bg-slate-50 border-t flex justify-between items-center shrink-0">
+               {editingClient && <span className="text-xs text-slate-400 font-mono">ID: {String(editingClient.id || '').slice(0,8)}...</span>}
+               <div className="flex gap-3 ml-auto">
+                 <button onClick={() => setIsModalOpen(false)} className="px-5 py-2.5 rounded-lg text-slate-600 font-bold hover:bg-white border border-transparent hover:border-slate-200 text-sm transition-colors">Cancelar</button>
+                 <button onClick={handleSave} className="px-6 py-2.5 bg-slate-900 text-white rounded-lg font-bold hover:bg-slate-800 flex items-center gap-2 text-sm shadow-lg shadow-slate-200 transition-transform active:scale-95">
+                    <CheckCircle size={18}/> Salvar
+                 </button>
+               </div>
+            </div>
+
+          </div>
         </div>
       )}
+
     </div>
   );
 };

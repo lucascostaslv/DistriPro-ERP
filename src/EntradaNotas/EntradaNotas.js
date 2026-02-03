@@ -16,7 +16,8 @@ import {
   Settings,
   RefreshCw,
   MapPin,
-  Search
+  Search,
+  Calculator
 } from 'lucide-react';
 import { 
   collection, 
@@ -29,12 +30,13 @@ import {
   limit,
   addDoc,
   increment,
-  orderBy, startAt, endAt
+  orderBy, startAt, endAt,
+  getDoc
 } from 'firebase/firestore';
 import { 
   signInAnonymously, 
   onAuthStateChanged,
-  signInWithCustomToken 
+  signInWithCustomToken
 } from 'firebase/auth';
 import { supabase } from '../supabaseClient';
 
@@ -79,7 +81,7 @@ const DenseSelect = (props) => (
 );
 
 // --- APP PRINCIPAL ---
-export default function EntradaNotas({ products: appProducts, priceGroups, onSaveEntry, storeConfig }) {
+export default function EntradaNotas({ storeConfig, onClose, products: globalProducts }) {
   const [user, setUser] = useState(null);
   const [currentStep, setCurrentStep] = useState(1); 
   const [loading, setLoading] = useState(false);
@@ -89,21 +91,49 @@ export default function EntradaNotas({ products: appProducts, priceGroups, onSav
     const [productSearchModalOpen, setProductSearchModalOpen] = useState(false);
     const [productSearchTerm, setProductSearchTerm] = useState('');
     const [databaseProducts, setDatabaseProducts] = useState([]);
+
+    const [financialConfig, setFinancialConfig] = useState({
+        installmentsCount: 1, // Padrão: À vista
+        firstDueDate: new Date().toISOString().split('T')[0],
+        paymentMethod: 'BOLETO'
+    });
+    const [launchPaid, setLaunchPaid] = useState(false);
+
+    const [suppliers, setSuppliers] = useState([]);
+    
   
   // Determina o ID da Loja corretamente (Prioridade: Prop > Global)
   const currentAppId = storeConfig?.id ? String(storeConfig.id) : globalAppId;
   
-  // Estado de Produtos Local
-  const [products, setProducts] = useState(appProducts || INITIAL_PRODUCTS);
+  // Estado de Produtos Localconst [products, setProducts] = useState(appProducts || INITIAL_PRODUCTS);
+  const [products, setProducts] = useState(globalProducts || []);
 
+  // Procure o useEffect que carrega dados (aprox. linha 55)
   useEffect(() => {
-    if (appProducts) {
-        setProducts(prev => {
-            const localNew = prev.filter(p => !appProducts.some(ap => String(ap.id) === String(p.id)));
-            return [...appProducts, ...localNew];
-        });
-    }
-  }, [appProducts]);
+    const fetchData = async () => {
+        if (!storeConfig?.id) return;
+        const storeId = String(storeConfig.id);
+        
+        // --- CORREÇÃO AQUI ---
+        // Se a lista global veio, use ela (é a mesma do Estoque). Se não, busque do banco.
+        if (globalProducts && globalProducts.length > 0) {
+            setProducts(globalProducts);
+        } else {
+            const prodRef = collection(db, 'artifacts', storeId, 'public', 'data', 'products');
+            const prodSnap = await getDocs(query(prodRef, limit(1000)));
+            setProducts(prodSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+        }
+
+        // Carregar Fornecedores (Mantém igual)
+        const { data: supData } = await supabase
+            .from('fiscal_clients')
+            .select('*')
+            .eq('firebase_store_id', storeId)
+            .contains('tags', ['FORNECEDOR']);
+        setSuppliers(supData || []);
+    };
+    fetchData();
+  }, [storeConfig, globalProducts]); // <--- Adicione globalProducts aqui no array final
 
   useEffect(() => {
     const fetchProductsForSearch = async () => {
@@ -530,14 +560,23 @@ const handleSaveSupplier = async () => {
     setCurrentStep(prev => prev - 1);
   };
 
+  // --- FUNÇÃO AUXILIAR DE SEGURANÇA ---
+  const safeFloat = (val) => {
+      if (typeof val === 'number') return val;
+      if (!val) return 0;
+      // Remove tudo que não é número, vírgula ou traço. Troca vírgula por ponto.
+      const clean = String(val).replace(/[^\d,-]/g, '').replace(',', '.');
+      return parseFloat(clean) || 0;
+  };
+
+  // --- CÁLCULOS DE TOTAIS (CORRIGIDO) ---
   const totals = useMemo(() => {
-    const totalProducts = items.reduce((acc, i) => acc + (i.quantity * i.unitPrice), 0);
-    const totalDiscount = items.reduce((acc, i) => acc + i.discount, 0);
-    const totalSurcharge = items.reduce((acc, i) => acc + i.surcharge, 0);
-    const totalIpi = items.reduce((acc, i) => acc + i.ipiValue, 0);
-    const totalIcms = items.reduce((acc, i) => acc + i.icmsValue, 0);
-    const totalNote = totalProducts - totalDiscount + totalSurcharge + totalIpi;
-    return { totalProducts, totalDiscount, totalSurcharge, totalIpi, totalIcms, totalNote };
+      const itemsTotal = items.reduce((acc, item) => {
+          const qtd = safeFloat(item.quantity);
+          const price = safeFloat(item.unitPrice);
+          return acc + (qtd * price);
+      }, 0);
+      return { totalNote: itemsTotal };
   }, [items]);
 
   // Importação XML
@@ -789,176 +828,187 @@ const handleSaveSupplier = async () => {
 
   const handleRemoveInstallment = (id) => { setInstallments(installments.filter(i => i.id !== id)); };
 
-  // --- FUNÇÃO DE SALVAR ATUALIZADA (CADASTRO AUTOMÁTICO) ---
-  // --- FUNÇÃO DE SALVAR CORRIGIDA (LÓGICA PAI/FILHO WMS) ---
-  const handleSave = async () => {
-    setLoading(true);
-    try {
-      const batch = writeBatch(db);
+  // --- NOVO: Função para Gerar Parcelas Automaticamente ---
+  const generateInstallments = () => {
+      const count = Number(financialConfig.installmentsCount) || 1; // Garante mínimo 1
+      const total = totals.totalNote;
       
-      const finalItems = [];
-      let createdCount = 0;
-      let updatedCount = 0;
+      if (total <= 0) return; // Não gera se não tiver valor
 
-      for (const item of items) {
-          let newItem = { ...item };
-          let prodRef;
-          let productDataForStock = {}; // Dados para decidir onde jogar o estoque
+      const rawValue = total / count;
+      const baseValue = parseFloat(rawValue.toFixed(2));
+      const totalBase = baseValue * count;
+      const remainder = total - totalBase;
 
-          // ============================================================
-          // A. PRODUTO NOVO (Criação)
-          // ============================================================
-          if (item.isNew || !item.productId) {
-               prodRef = doc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'products'));
-               
-               const codeToUse = item.barcode || item.xmlProductCode || 'GEN-' + Date.now() + Math.random().toString().slice(2,5);
-               const safeCost = parseFloat(item.unitPrice) || 0;
-               const safePrice = parseFloat(item.sellingPrice) || (safeCost * 1.3);
+      const newInst = [];
+      const startDate = new Date(financialConfig.firstDueDate);
 
-               // Verifica se é PACOTE baseado na UI
-               const isPackItem = ['CX', 'FD', 'FARDO', 'PCT'].includes(item.unit) && item.childId;
-               const conversionFactor = parseFloat(item.conversionFactor) || 1;
+      for (let i = 0; i < count; i++) {
+          const dueDate = new Date(startDate);
+          dueDate.setMonth(startDate.getMonth() + i);
 
-               const newProductData = {
-                   id: prodRef.id,
-                   name: (item.productName || item.xmlProductName || 'NOVO ITEM').toUpperCase(),
-                   cbaCode: codeToUse,
-                   barcode: codeToUse,
-                   unit: item.unit || 'UN',
-                   
-                   cost: safeCost,
-                   costPrice: safeCost,
-                   price: safePrice,
-                   wholesalePrice: parseFloat(item.wholesalePrice) || 0,
-                   profitMargin: parseFloat(item.margin) || 30,
-                   
-                   stock: 0, // Estoque físico começa zerado (será ajustado na mov. abaixo)
-                   minStock: 5,
-                   
-                   // --- CORREÇÃO CRÍTICA DO VÍNCULO ---
-                   itemType: isPackItem ? 'pack' : 'unit',
-                   
-                   // Se for PACK, o parentId aponta para o Filho (Unidade), igual ao WMS
-                   parentId: isPackItem ? item.childId : null, 
-                   
-                   conversionFactor: conversionFactor, 
-                   packQuantity: conversionFactor, // Redundância para garantir compatibilidade
+          let val = baseValue;
+          if (i === count - 1) val = baseValue + remainder;
 
-                   createdAt: serverTimestamp(),
-                   last_updated: serverTimestamp()
-               };
-               
-               batch.set(prodRef, newProductData);
-               newItem.productId = prodRef.id;
-               
-               // Guarda dados para usar na movimentação de estoque
-               productDataForStock = {
-                   isPack: isPackItem,
-                   targetId: isPackItem ? item.childId : prodRef.id, // Se for pack, joga estoque no filho!
-                   factor: isPackItem ? conversionFactor : 1
-               };
-               
-               createdCount++;
-          }
-          // ============================================================
-          // B. PRODUTO EXISTENTE (Atualização)
-          // ============================================================
-          else {
-               prodRef = doc(db, 'artifacts', currentAppId, 'public', 'data', 'products', item.productId);
-               
-               // Busca dados do produto original na memória para saber se é Pack
-               const originalProd = products.find(p => p.id === item.productId);
-               const isPackExisting = originalProd?.itemType === 'pack';
-               const parentIdExisting = originalProd?.parentId;
-               const factorExisting = originalProd?.conversionFactor || originalProd?.packQuantity || 1;
+          newInst.push({
+              number: i + 1,
+              value: Number(val.toFixed(2)),
+              dueDate: dueDate.toISOString().split('T')[0],
+              status: launchPaid ? 'PAGO' : 'PENDENTE' // <--- USA O CHECKBOX AQUI
+          });
+      }
+      setInstallments(newInst);
+  };
 
-               const updateData = { last_updated: serverTimestamp() };
-               
-               if (selectedType && selectedType.direction === 'ENTRADA') {
-                   updateData.cost = parseFloat(item.unitPrice);
-                   updateData.costPrice = parseFloat(item.unitPrice);
-                   if (item.sellingPrice > 0) {
-                       updateData.price = parseFloat(item.sellingPrice);
-                       updateData.wholesalePrice = parseFloat(item.wholesalePrice) || 0;
-                       updateData.profitMargin = parseFloat(item.margin);
-                   }
-               }
-               batch.update(prodRef, updateData);
-               
-               // Guarda dados para movimentação
-               productDataForStock = {
-                   isPack: isPackExisting,
-                   // Se for Pack existente, o alvo é o parentId (Unidade). Se não, é ele mesmo.
-                   targetId: (isPackExisting && parentIdExisting) ? parentIdExisting : item.productId,
-                   factor: isPackExisting ? factorExisting : 1
-               };
-               
-               updatedCount++;
+  // --- NOVO: EFEITO MÁGICO (Recalcula sempre que mudar algo) ---
+  useEffect(() => {
+      if (currentStep === 3) {
+          generateInstallments();
+      }
+  }, [financialConfig, launchPaid, totals, currentStep]);
+
+  // --- FUNÇÃO REAL DE SALVAMENTO COM INTELIGÊNCIA DE FORNECEDOR ---
+  const handleSave = async () => {
+      // 1. Validações Básicas
+      if (!headerData.entityId && !headerData.entityName) return alert("Informe o Fornecedor no cabeçalho.");
+      if (items.length === 0) return alert("A nota não tem itens.");
+      
+      setLoading(true);
+
+      try {
+          const batch = writeBatch(db);
+          const storeId = currentAppId; // Garante que pegou o ID da loja
+          
+          // Data para registros
+          const entryDate = headerData.entryDate || new Date().toISOString().split('T')[0];
+
+          // 2. Salvar a Capa da Nota (Invoices)
+          const invoiceRef = doc(collection(db, 'artifacts', storeId, 'public', 'data', 'invoices'));
+          const invoicePayload = {
+              ...headerData,
+              items: items, // Salva cópia dos itens na nota para auditoria
+              totalValue: totals.totalNote,
+              status: 'CONCLUIDA',
+              type: 'ENTRADA', // Importante para diferenciar de vendas
+              created_at: serverTimestamp()
+          };
+          batch.set(invoiceRef, invoicePayload);
+
+          // 3. Gerar Parcelas no Financeiro (Accounts Payable)
+          if (installments.length > 0 && selectedType?.financialAction === 'EXPENSE') {
+              installments.forEach(inst => {
+                  const billRef = doc(collection(db, 'artifacts', storeId, 'public', 'data', 'financial_movements'));
+                  batch.set(billRef, {
+                      type: 'EXPENSE', 
+                      description: `Nota ${headerData.number} - ${headerData.entityName} (${inst.number}/${installments.length})`,
+                      value: Number(inst.value),
+                      dueDate: inst.dueDate,
+                      status: 'PENDENTE',
+                      category: 'COMPRA_MERCADORIA',
+                      paymentMethod: financialConfig.paymentMethod,
+                      supplierId: headerData.entityId, 
+                      supplierName: headerData.entityName,
+                      invoiceId: invoiceRef.id, 
+                      created_at: serverTimestamp()
+                  });
+              });
           }
 
-          // ============================================================
-          // C. MOVIMENTAÇÃO DE ESTOQUE (A CORREÇÃO MÁGICA)
-          // ============================================================
-          if (selectedType && selectedType.stockAction !== 'NEUTRO') {
-              const directionFactor = selectedType.stockAction === 'SOMAR' ? 1 : -1;
+          // 2. ATUALIZAR ESTOQUE (Com Rede de Segurança)
+          console.log("--- INICIANDO ATUALIZAÇÃO DE ESTOQUE ---");
+          
+          for (const item of items) {
+              let targetId = item.productId;
+
+              // --- REDE DE SEGURANÇA ---
+              // Se o item não tem ID vinculado (comum ao adicionar manual ou XML novo),
+              // tenta encontrar um produto existente pelo NOME ou CÓDIGO DE BARRAS.
+              if (!targetId) {
+                  // 'products' deve ser a lista de produtos que você carregou no useEffect
+                  const match = products.find(p => 
+                      p.name.toUpperCase() === item.description.toUpperCase() || 
+                      (item.code && (p.barcode === item.code || p.sku === item.code))
+                  );
+                  
+                  if (match) {
+                      targetId = match.id;
+                      console.log(`Recuperado: Item "${item.description}" vinculado automaticamente ao ID ${targetId}`);
+                  } else {
+                      console.warn(`PULADO: Item "${item.description}" não tem vínculo e não foi encontrado no cadastro.`);
+                      continue; // Pula este item para não quebrar o batch
+                  }
+              }
+
+              const productRef = doc(db, 'artifacts', storeId, 'public', 'data', 'products', targetId);
               
-              // Qtd da Nota * Fator do Pack (Ex: 10 Caixas * 12 Latas = 120 Latas)
-              const qtyToMove = (parseFloat(item.quantity) || 0) * productDataForStock.factor * directionFactor;
+              // Leitura para atualizar histórico (Fase 2)
+              const productSnap = await getDoc(productRef);
               
-              // Onde vamos mexer? No targetId (que é a Unidade/Filho se for caixa)
-              if (productDataForStock.targetId) {
-                  const stockRef = doc(db, 'artifacts', currentAppId, 'public', 'data', 'products', productDataForStock.targetId);
-                  batch.update(stockRef, { stock: increment(qtyToMove) });
+              if (productSnap.exists()) {
+                  const productData = productSnap.data();
+                  const currentHistory = Array.isArray(productData.suppliersHistory) ? productData.suppliersHistory : [];
+
+                  // Atualiza histórico do fornecedor
+                  const supplierNameUpper = headerData.entityName ? headerData.entityName.toUpperCase().trim() : 'FORNECEDOR DESCONHECIDO';
+                  const supplierIndex = currentHistory.findIndex(s => s.supplierName.toUpperCase() === supplierNameUpper);
+                  
+                  const newHistoryEntry = {
+                      supplierId: headerData.entityId || 'xml_import',
+                      supplierName: headerData.entityName, 
+                      supplierSku: item.code || '', 
+                      lastCost: Number(item.unitPrice),
+                      lastPurchaseDate: entryDate
+                  };
+
+                  let updatedHistory = [...currentHistory];
+                  if (supplierIndex >= 0) {
+                      updatedHistory[supplierIndex] = { ...updatedHistory[supplierIndex], ...newHistoryEntry };
+                  } else {
+                      updatedHistory.push(newHistoryEntry);
+                  }
+
+                  // O Update Real
+                  batch.update(productRef, {
+                      stock: increment(Number(item.quantity)), // SOMA ao estoque atual
+                      cost: Number(item.unitPrice), // ATUALIZA o custo
+                      last_purchase: entryDate,
+                      suppliersHistory: updatedHistory 
+                  });
+
+                    if (productData.itemType === 'pack' && productData.parentId && productData.conversionFactor) {
+    
+                        // Calcula quantas unidades isso representa (Ex: 40 caixas * 6 = 240 unidades)
+                        const qtyToAdd = Number(item.quantity) * Number(productData.conversionFactor);
+                        
+                        // Referência ao produto PAI (Unidade)
+                        const unitRef = doc(db, 'artifacts', storeId, 'public', 'data', 'products', productData.parentId);
+                        
+                        // Soma ao estoque do pai
+                        batch.update(unitRef, {
+                            stock: increment(qtyToAdd)
+                        });
+                        
+                        console.log(`[CASCATA] Estoque Unitário Atualizado: +${qtyToAdd} un (Origem: ${item.quantity} cx * ${productData.conversionFactor})`);
+                    }
               }
           }
 
-          finalItems.push(newItem);
+          // 5. Executa tudo atomicamente
+          await batch.commit();
+
+          alert("Nota lançada com sucesso! Estoque e Custos Atualizados.");
+          
+          // Limpa tela
+          setItems([]);
+          setInstallments([]);
+          setCurrentStep(1);
+          setLoading(false);
+
+      } catch (error) {
+          console.error("Erro ao salvar nota:", error);
+          alert("Erro ao processar nota: " + error.message);
+          setLoading(false);
       }
-
-      // D. GRAVAR A NOTA (Mantido igual)
-      const invoiceRef = doc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'invoices'));
-      batch.set(invoiceRef, {
-          header: headerData, 
-          type: selectedType, 
-          items: finalItems, 
-          financials: installments, 
-          totals,
-          status: 'CONFIRMADA', 
-          createdAt: serverTimestamp(), 
-          userId: auth.currentUser?.uid || 'anon'
-      });
-
-      // E. GRAVAR CONTAS A PAGAR (Mantido igual)
-      if (installments.length > 0 && selectedType.financialAction === 'PAGAR') {
-          installments.forEach(inst => {
-              const billRef = doc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'financial_movements'));
-              batch.set(billRef, {
-                  type: 'EXPENSE',
-                  category: 'Fornecedores',
-                  description: `NF ${headerData.number} - Parc ${inst.number}`,
-                  amount: parseFloat(inst.value),
-                  date: inst.dueDate,
-                  status: 'PENDENTE',
-                  createdAt: serverTimestamp()
-              });
-          });
-      }
-
-      await batch.commit();
-
-      alert(`SUCESSO!\nNota Salva e Estoque Vinculado Corretamente.\nProdutos Criados: ${createdCount}\nAtualizados: ${updatedCount}`);
-      
-      if (onSaveEntry) onSaveEntry([], null);
-      setItems([]);
-      setInstallments([]);
-      setCurrentStep(1);
-      
-    } catch (e) { 
-        console.error(e);
-        alert("Erro fatal ao gravar: " + e.message); 
-    } finally { 
-        setLoading(false); 
-    }
   };
 
     const togglePriceSuggestion = (itemId) => {
@@ -1274,69 +1324,135 @@ const handleSaveSupplier = async () => {
         )}
         {/* === PASSO 3: FINANCEIRO & FECHAMENTO === */}
         {currentStep === 3 && (
-          <div className="bg-white border border-gray-300 rounded shadow-sm h-full flex flex-col">
-            <div className="p-4 border-b bg-gray-50 flex justify-between items-center">
-                <h2 className="font-bold text-gray-700 flex items-center gap-2"><DollarSign size={18}/> Financeiro & Confirmação</h2>
-            </div>
-
-            <div className="p-6 flex-1 flex flex-col gap-6">
-                <div className="grid grid-cols-2 gap-4 p-4 bg-gray-50 rounded border border-gray-200">
-                     <div><Label>Condição Pagamento</Label><DenseInput value={headerData.paymentCondition} onChange={(e) => setHeaderData({...headerData, paymentCondition: e.target.value})} placeholder="Ex: 30/60/90"/></div>
-                     <div><Label>Forma Pagamento</Label><DenseInput value={headerData.paymentMethod} onChange={(e) => setHeaderData({...headerData, paymentMethod: e.target.value})} placeholder="Ex: BOLETO"/></div>
-                </div>
-
-                <div className="flex justify-end">
-                    <button onClick={handleAddInstallment} className="text-xs flex items-center gap-1 bg-blue-50 text-blue-700 border border-blue-200 px-3 py-1 rounded hover:bg-blue-100 font-bold transition-colors">
-                        <Plus size={14} /> Adicionar Parcela Manual
-                    </button>
-                </div>
-
-                <div className="flex-1 border rounded overflow-hidden">
-                    <table className="w-full text-sm text-left">
-                        <thead className="bg-gray-100 font-bold text-gray-600">
-                            <tr>
-                                <th className="p-3 border-b text-center w-16">Parc.</th>
-                                <th className="p-3 border-b">Vencimento (Data Fatura)</th>
-                                <th className="p-3 border-b text-right">Valor</th>
-                                <th className="p-3 border-b text-center">Status</th>
-                                <th className="p-3 border-b w-8"></th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {installments.map((inst, idx) => (
-                                <tr key={inst.id} className="border-b">
-                                    <td className="p-3 text-center">{idx + 1}</td>
-                                    <td className="p-3"><input type="date" value={inst.dueDate} onChange={(e)=>{const n = [...installments]; n[idx].dueDate=e.target.value; setInstallments(n);}} className="border rounded p-1 w-full"/></td>
-                                    <td className="p-3 text-right"><input type="number" value={inst.value} onChange={(e)=>{const n = [...installments]; n[idx].value=Number(e.target.value); setInstallments(n);}} className="border rounded p-1 text-right font-bold w-32"/></td>
-                                    <td className="p-3 text-center"><span className="bg-yellow-100 text-yellow-800 text-xs px-2 py-1 rounded">PENDENTE</span></td>
-                                    <td className="p-3 text-center">
-                                        <button onClick={() => handleRemoveInstallment(inst.id)} className="text-gray-400 hover:text-red-500">
-                                            <XIcon size={14} />
-                                        </button>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-
-                <div className="bg-gray-800 text-white p-4 rounded flex justify-between items-center shadow-lg mt-auto">
-                    <div>
-                        <p className="text-gray-400 text-xs uppercase font-bold">Total da Nota</p>
-                        <p className="text-2xl font-bold">{formatCurrency(totals.totalNote)}</p>
-                    </div>
-                    {selectedType?.financialAction !== 'NENHUM' && (
+                <div className="max-w-4xl mx-auto space-y-6 animate-in fade-in">
+                    
+                    {/* CABEÇALHO DA ETAPA */}
+                    <div className="flex justify-between items-end border-b pb-4">
+                        <div>
+                            <h3 className="text-lg font-bold text-slate-800">Definição de Pagamento</h3>
+                            <p className="text-sm text-slate-500">O financeiro será gerado automaticamente conforme abaixo.</p>
+                        </div>
                         <div className="text-right">
-                             <p className="text-gray-400 text-xs uppercase font-bold">Total Financeiro</p>
-                             <p className={`text-xl font-bold ${Math.abs(totals.totalNote - installments.reduce((a, b)=>a+b.value,0)) > 0.05 ? 'text-red-400' : 'text-green-400'}`}>
-                                 {formatCurrency(installments.reduce((a, b)=>a+b.value,0))}
-                             </p>
+                            <span className="text-xs font-bold text-slate-400 uppercase block">Total a Pagar</span>
+                            <span className="text-2xl font-bold text-emerald-600 font-mono">
+                                {formatCurrency(totals.totalNote)}
+                            </span>
+                        </div>
+                    </div>
+
+                    {/* BARRA DE CONFIGURAÇÃO */}
+                    <div className="bg-slate-50 p-5 rounded-lg border border-slate-200 shadow-sm">
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                            
+                            {/* Input Parcelas */}
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Parcelas</label>
+                                <div className="relative">
+                                    <input 
+                                        type="number"
+                                        min="1"
+                                        className="w-full border border-slate-300 p-2 pr-8 rounded text-sm font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+                                        value={financialConfig.installmentsCount}
+                                        onChange={e => {
+                                            const val = e.target.value;
+                                            // Lógica UX: Se apagar tudo, deixa vazio (''). Se digitar, converte pra número.
+                                            setFinancialConfig({
+                                                ...financialConfig, 
+                                                installmentsCount: val === '' ? '' : parseInt(val)
+                                            });
+                                        }}
+                                        placeholder="1"
+                                    />
+                                    <span className="absolute right-3 top-2 text-sm text-slate-400 font-bold">x</span>
+                                </div>
+                            </div>
+                            
+                            {/* Input Data */}
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">1º Vencimento</label>
+                                <input 
+                                    type="date" 
+                                    className="w-full border border-slate-300 p-2 rounded text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+                                    value={financialConfig.firstDueDate}
+                                    onChange={e => setFinancialConfig({...financialConfig, firstDueDate: e.target.value})}
+                                />
+                            </div>
+
+                            {/* Input Meio Pagto */}
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Forma Pagto</label>
+                                <select 
+                                    className="w-full border border-slate-300 p-2 rounded text-sm bg-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                                    value={financialConfig.paymentMethod}
+                                    onChange={e => setFinancialConfig({...financialConfig, paymentMethod: e.target.value})}
+                                >
+                                    <option value="BOLETO">Boleto</option>
+                                    <option value="PIX">Pix</option>
+                                    <option value="DINHEIRO">Dinheiro</option>
+                                    <option value="CARTAO_CREDITO">Cartão Crédito</option>
+                                    <option value="TRANSFERENCIA">Transferência</option>
+                                </select>
+                            </div>
+
+                            {/* CHECKBOX PAGO */}
+                            <div className="flex items-center pb-2">
+                                <label className="flex items-center gap-2 cursor-pointer select-none">
+                                    <div className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${launchPaid ? 'bg-emerald-500 border-emerald-500' : 'bg-white border-slate-300'}`}>
+                                        {launchPaid && <CheckCircle2 size={14} className="text-white" />}
+                                    </div>
+                                    <input 
+                                        type="checkbox" 
+                                        className="hidden"
+                                        checked={launchPaid}
+                                        onChange={e => setLaunchPaid(e.target.checked)}
+                                    />
+                                    <span className={`text-sm font-bold ${launchPaid ? 'text-emerald-600' : 'text-slate-500'}`}>
+                                        Lançar como Pago
+                                    </span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* TABELA RESULTADO (AUTO-UPDATE) */}
+                    {installments.length > 0 ? (
+                        <div className="border rounded-lg overflow-hidden bg-white shadow-sm ring-1 ring-slate-100">
+                            <table className="w-full text-sm text-left">
+                                <thead className="bg-slate-100 text-slate-600 uppercase text-xs font-bold">
+                                    <tr>
+                                        <th className="p-3 border-b">Parcela</th>
+                                        <th className="p-3 border-b">Vencimento</th>
+                                        <th className="p-3 border-b text-right">Valor</th>
+                                        <th className="p-3 border-b text-center">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {installments.map((inst, idx) => (
+                                        <tr key={idx} className="hover:bg-slate-50 transition-colors">
+                                            <td className="p-3 font-mono font-bold text-slate-500">{inst.number}ª</td>
+                                            <td className="p-3 text-slate-700">
+                                                {new Date(inst.dueDate).toLocaleDateString('pt-BR')}
+                                            </td>
+                                            <td className="p-3 text-right font-bold text-slate-800">
+                                                {formatCurrency(inst.value)}
+                                            </td>
+                                            <td className="p-3 text-center">
+                                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${inst.status === 'PAGO' ? 'bg-emerald-100 text-emerald-700' : 'bg-orange-100 text-orange-700'}`}>
+                                                    {inst.status}
+                                                </span>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    ) : (
+                        <div className="text-center py-8 text-slate-400 text-sm">
+                            Configure as parcelas acima para visualizar.
                         </div>
                     )}
                 </div>
-            </div>
-          </div>
-        )}
+            )}
 
         
       {prodSearchModalOpen && (
