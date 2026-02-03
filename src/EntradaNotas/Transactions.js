@@ -121,7 +121,7 @@ const Transactions = (props) => {
 
       <div className="flex-1 bg-slate-50 overflow-hidden relative">
           {activeTab === 'entry' && <EntradaNotas storeConfig={props.storeConfig} showNotification={props.showNotification} products={props.products}/>}
-          {activeTab === 'payable' && <AccountsPayable products={[]} />}
+          {activeTab === 'payable' && <AccountsPayable products={props.products} storeConfig={props.storeConfig} />}
           {activeTab === 'invoices' && <FiscalInvoices storeConfig={props.storeConfig} />}
       </div>
 

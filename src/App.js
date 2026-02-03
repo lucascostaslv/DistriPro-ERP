@@ -752,15 +752,23 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
   }, [pricingMode]);
 
   // --- FILTRO INTELIGENTE PARA O DROPDOWN ---
+  // --- FILTRO INTELIGENTE PARA O DROPDOWN (PDV) ---
   const filteredSearchProducts = useMemo(() => {
       if (!searchTerm || searchTerm.length < 2) return [];
       const term = searchTerm.toLowerCase();
-      // Retorna no máximo 8 resultados para não poluir
-      return products.filter(p => 
-        p.name.toLowerCase().includes(term) ||
-        (p.cbaCode && p.cbaCode.includes(term)) ||
-        (p.barcode && p.barcode.includes(term))
-      ).slice(0, 8);
+      
+      return products.filter(p => {
+        // Lógica de Suprimentos:
+        // Se for suprimento, SÓ mostra se tiver a flag isCheckoutEnabled marcada.
+        // Se for revenda (padrão), mostra sempre.
+        const isVisibleType = p.itemType === 'supply' ? p.isCheckoutEnabled === true : true;
+        
+        const matchesTerm = p.name.toLowerCase().includes(term) ||
+          (p.cbaCode && p.cbaCode.includes(term)) ||
+          (p.barcode && p.barcode.includes(term));
+
+        return isVisibleType && matchesTerm;
+      }).slice(0, 8);
   }, [products, searchTerm]);
 
   // Ao pressionar ENTER na busca
@@ -2637,6 +2645,11 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
   // Estado auxiliar para edição (adicione isso no início do componente SettingsManager se não tiver)
 
   const handleAddUser = async () => {
+
+    if (newUser.username.includes(' ')) {
+        return showNotification('O nome de usuário não pode conter espaços.', 'error');
+    }
+    
     if (!newUser.username || !newUser.password) return showNotification('Preencha login e senha', 'error');
     
     try {

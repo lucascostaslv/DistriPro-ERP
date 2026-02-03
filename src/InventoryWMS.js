@@ -157,6 +157,7 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
       ncm: '', cest: '', taxProfileId: '', itemType: 'unit', parentId: '', packQuantity: 0,
       supplierId: '', suppliersHistory: []
   };
+  
 
   const [currentProduct, setCurrentProduct] = useState(initialFormState);
   const [selectedHistoryProduct, setSelectedHistoryProduct] = useState(null);
@@ -313,7 +314,16 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
   const handleSave = async () => {
     try {
         const storeId = String(storeConfig.id);
-        if (!currentProduct.name || !currentProduct.price) return showNotification('Nome e Preço são obrigatórios.', 'error');
+        const isSupply = currentProduct.itemType === 'supply';
+        
+        if (!currentProduct.name) {
+            return showNotification('O nome do produto é obrigatório.', 'error');
+        }
+        
+        // Só exige preço se NÃO for suprimento
+        if (!isSupply && !currentProduct.price) {
+            return showNotification('O preço de venda é obrigatório para itens de revenda.', 'error');
+        }
 
         const productData = {
             ...currentProduct,
@@ -330,6 +340,8 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
             packQuantity: Number(currentProduct.packQuantity) || 1,
             supplierId: currentProduct.supplierId, // Salva o fornecedor
             suppliersHistory: currentProduct.suppliersHistory || [],
+            itemType: currentProduct.itemType || 'unit',
+            isCheckoutEnabled: currentProduct.itemType === 'supply' ? (currentProduct.isCheckoutEnabled || false) : false,
             last_updated: serverTimestamp()
         };
 
@@ -752,6 +764,53 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                     {/* --- CONTEÚDO DA ABA 1: DADOS GERAIS --- */}
                     {editTab === 'general' && (
                         <div className="space-y-6 animate-in fade-in">
+                            {/* --- SELEÇÃO DE TIPO DE ITEM (Use currentProduct) --- */}
+                            <div className="bg-slate-50 p-3 rounded border border-slate-200 mb-4">
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Tipo de Item</label>
+                                <div className="flex gap-4">
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                        <input 
+                                            type="radio" 
+                                            name="itemType"
+                                            checked={currentProduct?.itemType !== 'supply'}
+                                            onChange={() => setCurrentProduct(prev => ({...prev, itemType: 'unit'}))}
+                                            className="text-indigo-600 focus:ring-indigo-500"
+                                        />
+                                        <span className="text-sm font-bold text-slate-700">Revenda (Padrão)</span>
+                                    </label>
+                                    
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                        <input 
+                                            type="radio" 
+                                            name="itemType"
+                                            checked={currentProduct?.itemType === 'supply'}
+                                            onChange={() => setCurrentProduct(prev => ({...prev, itemType: 'supply'}))}
+                                            className="text-orange-600 focus:ring-orange-500"
+                                        />
+                                        <span className="text-sm font-bold text-orange-700">Suprimento / Uso Interno</span>
+                                    </label>
+                                </div>
+
+                                {/* CHECKBOX ESPECÍFICO PARA SACOLAS NO CAIXA */}
+                                {currentProduct?.itemType === 'supply' && (
+                                    <div className="mt-3 pt-3 border-t border-slate-200 animate-in fade-in">
+                                        <label className="flex items-center gap-2 cursor-pointer bg-orange-100 p-2 rounded border border-orange-200">
+                                            <input 
+                                                type="checkbox"
+                                                checked={currentProduct?.isCheckoutEnabled || false}
+                                                onChange={e => setCurrentProduct(prev => ({...prev, isCheckoutEnabled: e.target.checked}))}
+                                                className="w-4 h-4 text-orange-600 rounded"
+                                            />
+                                            <div>
+                                                <span className="block text-sm font-bold text-orange-800">Disponível no Caixa?</span>
+                                                <span className="block text-[10px] text-orange-600 leading-tight">
+                                                    Marque para itens como <strong>Sacolas</strong> que devem aparecer no PDV.
+                                                </span>
+                                            </div>
+                                        </label>
+                                    </div>
+                                )}
+                            </div>
                              <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
                                 <div className="md:col-span-3">
                                     <label className="text-[10px] font-bold text-slate-500 uppercase">Código de Barras</label>

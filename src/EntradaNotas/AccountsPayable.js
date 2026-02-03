@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Calendar, Search, CheckCircle, Eye, X, Package, 
-  ChevronLeft, ChevronRight, CalendarDays
+  ChevronLeft, ChevronRight, CalendarDays, RefreshCw
 } from 'lucide-react';
-import { collection, getDocs, query, orderBy, where } from 'firebase/firestore';
+import { collection, query, orderBy, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../firebase'; 
 
-// Utilitários de formatação (Blindados contra NaN)
+// Utilitários de formatação
 const formatCurrency = (val) => {
     const numberVal = Number(val);
     if (isNaN(numberVal)) return 'R$ 0,00';
@@ -15,12 +15,18 @@ const formatCurrency = (val) => {
 
 const formatDate = (dateStr) => {
   if (!dateStr) return '-';
-  const [y, m, d] = dateStr.split('-');
-  return `${d}/${m}/${y}`;
+  // Tenta tratar ISO date ou YYYY-MM-DD
+  try {
+      if(dateStr.includes('T')) dateStr = dateStr.split('T')[0];
+      const [y, m, d] = dateStr.split('-');
+      return `${d}/${m}/${y}`;
+  } catch (e) { return dateStr; }
 };
 
-const AccountsPayable = ({ products }) => {
-  const [invoices, setInvoices] = useState([]);
+const AccountsPayable = ({ products, storeConfig }) => { // Aceita storeConfig para garantir o ID
+  // Estados de Dados (Separados para evitar conflitos)
+  const [rawInvoices, setRawInvoices] = useState([]);
+  const [rawExpenses, setRawExpenses] = useState([]);
   const [loading, setLoading] = useState(true);
   
   // --- ESTADO DE DATA ---
@@ -34,7 +40,6 @@ const AccountsPayable = ({ products }) => {
   // Modal Detalhes
   const [detailsModal, setDetailsModal] = useState(null);
 
-  // Lista de Meses
   const monthNames = [
     "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
     "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
@@ -48,14 +53,9 @@ const AccountsPayable = ({ products }) => {
   }, [currentDate]);
 
   // Controles de Navegação de Data
-  const handlePrevMonth = () => {
-    setCurrentDate(prev => new Date(prev.getFullYear(), prev.getMonth() - 1, 1));
-  };
-
-  const handleNextMonth = () => {
-    setCurrentDate(prev => new Date(prev.getFullYear(), prev.getMonth() + 1, 1));
-  };
-
+  const handlePrevMonth = () => setCurrentDate(prev => new Date(prev.getFullYear(), prev.getMonth() - 1, 1));
+  const handleNextMonth = () => setCurrentDate(prev => new Date(prev.getFullYear(), prev.getMonth() + 1, 1));
+  
   const handleYearChange = (e) => {
     const newYear = parseInt(e.target.value, 10);
     setCurrentDate(prev => new Date(newYear, prev.getMonth(), 1));
@@ -66,105 +66,125 @@ const AccountsPayable = ({ products }) => {
     setShowMonthPicker(false);
   };
 
-  // Categorias extraídas
+  // Extração de Categorias
   const categories = useMemo(() => {
-    const cats = new Set(products.map(p => p.category).filter(Boolean));
+    const cats = new Set((products || []).map(p => p.category).filter(Boolean));
     return ['ALL', ...Array.from(cats)];
   }, [products]);
 
-  // Carregar Dados (Notas + Despesas)
+  // --- BUSCA DE DADOS EM TEMPO REAL (BLINDADA) ---
   useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
-      try {
-        const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
-        
-        // 1. Busca Invoices (Notas Fiscais)
-        const qInvoices = query(collection(db, 'artifacts', appId, 'public', 'data', 'invoices'), orderBy('createdAt', 'desc'));
-        const snapInvoices = await getDocs(qInvoices);
-        const invoicesData = snapInvoices.docs.map(d => ({ id: d.id, source: 'invoice', ...d.data() }));
+    // CORREÇÃO CRÍTICA: Forçamos String() no ID da loja.
+    // Se o ID for numérico (ex: 10), o Firebase trava sem essa conversão.
+    const rawId = storeConfig?.id || (typeof window !== 'undefined' ? window.__app_id : null);
+    const appId = rawId ? String(rawId) : null;
+    
+    if (!appId) {
+        console.warn("AccountsPayable: Loja não identificada. Aguardando...");
+        return;
+    }
 
-        // 2. Busca Despesas (Transactions)
-        const qExpenses = query(
-            collection(db, 'artifacts', appId, 'public', 'data', 'financial_movements'), 
-            where('type', '==', 'EXPENSE')
-        );
-        const snapExpenses = await getDocs(qExpenses);
-        
-        const expensesData = snapExpenses.docs.map(d => {
-            const data = d.data();
+    setLoading(true);
+
+    // 1. Listener de Notas Fiscais (Invoices)
+    const qInvoices = query(
+        collection(db, 'artifacts', appId, 'public', 'data', 'invoices'), 
+        orderBy('createdAt', 'desc')
+    );
+    
+    const unsubInvoices = onSnapshot(qInvoices, (snap) => {
+        const data = snap.docs.map(d => ({ id: d.id, source: 'invoice', ...d.data() }));
+        setRawInvoices(data);
+        setLoading(false);
+    }, (error) => {
+        console.error("Erro ao sincronizar Invoices:", error);
+        setLoading(false);
+    });
+
+    // 2. Listener de Movimentos Financeiros (Expenses)
+    const qExpenses = query(
+        collection(db, 'artifacts', appId, 'public', 'data', 'financial_movements'), 
+        where('type', '==', 'EXPENSE')
+    );
+
+    const unsubExpenses = onSnapshot(qExpenses, (snap) => {
+        const data = snap.docs.map(d => {
+            const item = d.data();
             
-            // Define status
-            let currentStatus = data.status || 'PENDENTE';
-            // Se não tiver status definido, calcula pela data
-            if (!data.status) {
-                const today = new Date().toISOString().split('T')[0];
-                currentStatus = data.date <= today ? 'ATRASADO' : 'PENDENTE';
+            // Status Automático
+            let computedStatus = item.status || 'PENDENTE';
+            if (!item.status) {
+                 const today = new Date().toISOString().split('T')[0];
+                 if (item.date < today) computedStatus = 'ATRASADO';
             }
 
             return {
                 id: d.id,
                 source: 'expense',
-                // Header para pesquisa e título
                 header: {
-                    number: 'DESP', 
-                    entityName: (data.category || 'Geral') + ' - ' + (data.description || 'Despesa'), 
-                    issueDate: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : data.date,
-                    total: Number(data.amount) || 0
+                    number: 'DESP',
+                    entityName: (item.category || 'Geral') + ' - ' + (item.description || 'Sem Descrição'),
+                    issueDate: item.createdAt?.toDate ? item.createdAt.toDate().toISOString() : item.date,
+                    total: Number(item.amount) || 0
                 },
                 items: [],
-                // FINANCIALS É O SEGREDO: O componente filtra usando inst.dueDate
                 financials: [{
                     number: '1',
-                    dueDate: data.date, // Ex: "2026-03-19"
-                    value: Number(data.amount) || 0,
-                    status: currentStatus
+                    dueDate: item.date,
+                    value: Number(item.amount) || 0,
+                    status: computedStatus
                 }],
-                // Campos originais para referência
-                ...data
+                category: item.category
             };
         });
+        setRawExpenses(data);
+    }, (error) => {
+        console.error("Erro ao sincronizar Expenses:", error);
+    });
 
-        // 3. Combina e Atualiza
-        setInvoices([...invoicesData, ...expensesData]);
-
-      } catch (error) {
-          console.error("Erro ao buscar contas:", error);
-      } finally {
-          setLoading(false);
-      }
+    return () => {
+        unsubInvoices();
+        unsubExpenses();
     };
-    fetchData();
-  }, [products]);
+  }, [storeConfig]);
 
-  // Processamento dos dados (Filtragem e Correção NaN)
+  // --- PROCESSAMENTO E UNIFICAÇÃO ---
   const payableItems = useMemo(() => {
+    // Combina as duas fontes
+    const allRecords = [...rawInvoices, ...rawExpenses];
     let items = [];
     
-    invoices.forEach(inv => {
+    allRecords.forEach(inv => {
+      // Filtro de Categoria (Apenas para notas com produtos categorizados ou despesas categorizadas)
       if (selectedCategory !== 'ALL') {
-        const hasCategory = inv.items.some(i => {
-            const prod = products.find(p => p.id === i.productId);
-            return prod && prod.category === selectedCategory;
-        });
-        if (!hasCategory) return;
+          if (inv.source === 'invoice') {
+             const hasCategory = inv.items.some(i => {
+                const prod = (products || []).find(p => p.id === i.productId);
+                return prod && prod.category === selectedCategory;
+             });
+             if (!hasCategory) return;
+          } else {
+             // Para despesa manual, verifica a categoria direta
+             if (inv.category !== selectedCategory) return;
+          }
       }
 
       if (!inv.financials || inv.financials.length === 0) return;
 
       inv.financials.forEach(inst => {
-        // Filtrar pelo Mês Selecionado
+        if (!inst.dueDate) return;
+
+        // Filtro de Mês (Essencial)
         if (!inst.dueDate.startsWith(selectedMonthStr)) return;
         
+        // Filtro de Texto
         const searchLower = searchTerm.toLowerCase();
         if (searchTerm && 
             !inv.header.entityName.toLowerCase().includes(searchLower) && 
-            !inv.header.number.includes(searchLower)) {
+            !String(inv.header.number).toLowerCase().includes(searchLower)) {
             return;
         }
 
-        // --- CORREÇÃO DO NaN AQUI ---
-        // Forçamos a conversão para número. Se falhar, assume 0.
         const safeValue = Number(inst.value) || 0;
 
         items.push({
@@ -176,26 +196,30 @@ const AccountsPayable = ({ products }) => {
           fullInvoice: inv,
           installmentNum: inst.number,
           dueDate: inst.dueDate,
-          value: safeValue, // Usa o valor seguro
-          status: inst.status,
+          value: safeValue,
+          status: inst.status || 'PENDENTE',
+          source: inv.source,
           daysToDue: Math.ceil((new Date(inst.dueDate) - new Date()) / (1000 * 60 * 60 * 24))
         });
       });
     });
 
+    // Ordenação Final em Memória
     return items.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
-  }, [invoices, selectedMonthStr, selectedCategory, searchTerm, products]);
+  }, [rawInvoices, rawExpenses, selectedMonthStr, selectedCategory, searchTerm, products]);
 
-  // Totais (agora somando safeValue, não haverá NaN)
-  const totalDueMonth = payableItems.reduce((acc, item) => acc + (item.status === 'PENDENTE' ? item.value : 0), 0);
+  // Totais
+  const totalDueMonth = payableItems.reduce((acc, item) => acc + (item.status === 'PENDENTE' || item.status === 'ATRASADO' ? item.value : 0), 0);
   const totalPaidMonth = payableItems.reduce((acc, item) => acc + (item.status === 'PAGO' ? item.value : 0), 0);
 
-  const itemsToShow = payableItems.filter(item => item.status !== 'PAGO');
+  // Exibir apenas Pendentes/Atrasados na lista (Opcional: Pode querer ver pagos também)
+  // Vou mostrar TUDO para garantir que nada suma, mas você pode descomentar o filtro abaixo
+  const itemsToShow = payableItems; //.filter(item => item.status !== 'PAGO');
 
-  // Lista de Anos para o Dropdown
-  const years = Array.from({length: 11}, (_, i) => new Date().getFullYear() - 5 + i);
+  // Dropdown Anos
+  const years = Array.from({length: 6}, (_, i) => new Date().getFullYear() - 2 + i);
 
-  // Fechar o picker se clicar fora
+  // Click Outside
   const pickerRef = useRef(null);
   useEffect(() => {
     const handleClickOutside = (event) => {
@@ -208,7 +232,7 @@ const AccountsPayable = ({ products }) => {
   }, []);
 
   return (
-    <div className="space-y-6 animate-fade-in pb-10">
+    <div className="space-y-6 animate-in fade-in pb-10">
       
       {/* 1. SELETOR DE DATA */}
       <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm flex flex-col md:flex-row justify-between items-center gap-4">
@@ -218,7 +242,7 @@ const AccountsPayable = ({ products }) => {
               </div>
               <div>
                   <h3 className="text-sm font-bold text-slate-700">Período Financeiro</h3>
-                  <p className="text-xs text-slate-500">Selecione o mês de referência</p>
+                  <p className="text-xs text-slate-500">Mês de Referência</p>
               </div>
           </div>
 
@@ -251,7 +275,6 @@ const AccountsPayable = ({ products }) => {
                                     </button>
                                 ))}
                             </div>
-                            <div className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white border-t border-l border-slate-200 transform rotate-45"></div>
                         </div>
                       )}
                   </div>
@@ -274,11 +297,11 @@ const AccountsPayable = ({ products }) => {
       {/* 2. KPI Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-white p-4 rounded border border-slate-200 shadow-sm flex flex-col justify-between">
-          <p className="text-xs text-slate-500 uppercase font-bold">A Pagar em {monthNames[currentDate.getMonth()]}</p>
+          <p className="text-xs text-slate-500 uppercase font-bold">A Pagar (Pendente)</p>
           <p className="text-2xl font-bold text-slate-800 mt-1">{formatCurrency(totalDueMonth)}</p>
         </div>
         <div className="bg-emerald-50 p-4 rounded border border-emerald-100 shadow-sm flex flex-col justify-between">
-          <p className="text-xs text-emerald-600 uppercase font-bold">Pago em {monthNames[currentDate.getMonth()]}</p>
+          <p className="text-xs text-emerald-600 uppercase font-bold">Já Pago</p>
           <p className="text-2xl font-bold text-emerald-700 mt-1">{formatCurrency(totalPaidMonth)}</p>
         </div>
       </div>
@@ -286,25 +309,25 @@ const AccountsPayable = ({ products }) => {
       {/* 3. Filtros Secundários */}
       <div className="bg-white p-4 rounded border border-slate-200 shadow-sm flex flex-col md:flex-row gap-4">
          <div className="w-full md:w-auto flex-1">
-            <label className="text-xs font-bold text-slate-500 block mb-1">Buscar Fornecedor/Nota</label>
+            <label className="text-xs font-bold text-slate-500 block mb-1">Buscar</label>
             <div className="relative">
                 <Search className="absolute left-2 top-2.5 text-slate-400" size={16}/>
                 <input 
                   className="border p-2 pl-8 rounded text-sm w-full outline-none focus:ring-1 focus:ring-indigo-500" 
-                  placeholder="Nome ou número..."
+                  placeholder="Nome, número ou descrição..."
                   value={searchTerm}
                   onChange={e => setSearchTerm(e.target.value)}
                 />
             </div>
          </div>
          <div className="w-full md:w-auto">
-            <label className="text-xs font-bold text-slate-500 block mb-1">Categoria de Produto</label>
+            <label className="text-xs font-bold text-slate-500 block mb-1">Categoria</label>
             <select 
               className="border p-2 rounded text-sm w-full md:w-48 outline-none focus:ring-1 focus:ring-indigo-500"
               value={selectedCategory}
               onChange={e => setSelectedCategory(e.target.value)}
             >
-                <option value="ALL">Todas Categorias</option>
+                <option value="ALL">Todas</option>
                 {categories.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
          </div>
@@ -312,29 +335,38 @@ const AccountsPayable = ({ products }) => {
 
       {/* 4. Grid de Contas */}
       {loading ? (
-        <div className="text-center py-10 text-slate-500">Carregando contas...</div>
+        <div className="text-center py-10 text-slate-500 flex flex-col items-center gap-2">
+            <RefreshCw className="animate-spin text-indigo-500" size={24}/>
+            <p>Sincronizando contas...</p>
+        </div>
       ) : itemsToShow.length === 0 ? (
-        <div className="text-center py-10 bg-slate-50 rounded border border-dashed border-slate-300 text-slate-400">
-           Nenhuma conta encontrada para {monthNames[currentDate.getMonth()]} de {currentDate.getFullYear()} com estes filtros.
+        <div className="text-center py-12 bg-slate-50 rounded border border-dashed border-slate-300 text-slate-400">
+           Nenhuma conta encontrada para <strong>{monthNames[currentDate.getMonth()]}</strong>.
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {itemsToShow.map(item => {
-                const isLate = item.daysToDue < 0 && item.status === 'PENDENTE';
-                const isNear = item.daysToDue >= 0 && item.daysToDue <= 5 && item.status === 'PENDENTE';
+                const isLate = item.daysToDue < 0 && item.status !== 'PAGO';
+                const isNear = item.daysToDue >= 0 && item.daysToDue <= 5 && item.status !== 'PAGO';
+                const isPaid = item.status === 'PAGO';
                 
                 return (
                     <div 
                       key={item.uniqueId} 
                       onClick={() => setDetailsModal(item.fullInvoice)}
-                      className={`bg-white rounded-lg border shadow-sm p-4 cursor-pointer hover:shadow-md transition-all relative overflow-hidden group ${isLate ? 'border-red-200 bg-red-50' : isNear ? 'border-amber-200 bg-amber-50' : 'border-slate-200'}`}
+                      className={`bg-white rounded-lg border shadow-sm p-4 cursor-pointer hover:shadow-md transition-all relative overflow-hidden group 
+                        ${isPaid ? 'border-emerald-200 bg-emerald-50/30' : isLate ? 'border-red-200 bg-red-50' : isNear ? 'border-amber-200 bg-amber-50' : 'border-slate-200'}
+                      `}
                     >
                         <div className="flex justify-between items-start mb-2">
                             <div>
                                 <h4 className="font-bold text-slate-800 text-sm truncate w-48" title={item.supplier}>{item.supplier}</h4>
-                                <p className="text-xs text-slate-500">Nota: {item.invoiceNumber}</p>
+                                <div className="flex items-center gap-1 text-[10px] text-slate-500">
+                                    {item.source === 'expense' ? <span className="bg-slate-200 px-1 rounded">DESPESA</span> : <span className="bg-indigo-100 text-indigo-700 px-1 rounded">NOTA</span>}
+                                    <span>#{item.invoiceNumber}</span>
+                                </div>
                             </div>
-                            <span className={`text-[10px] font-bold px-2 py-1 rounded border ${item.status === 'PAGO' ? 'bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
+                            <span className={`text-[10px] font-bold px-2 py-1 rounded border ${isPaid ? 'bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
                                 {item.status}
                             </span>
                         </div>
@@ -345,22 +377,16 @@ const AccountsPayable = ({ products }) => {
                                 <div className="flex items-center gap-1 font-medium text-sm text-slate-700">
                                     <Calendar size={14}/> {formatDate(item.dueDate)}
                                 </div>
-                                {item.status === 'PENDENTE' && (
+                                {!isPaid && (
                                     <p className={`text-[10px] mt-1 font-bold ${isLate ? 'text-red-600' : isNear ? 'text-amber-600' : 'text-slate-400'}`}>
-                                        {item.daysToDue < 0 ? `Vencido há ${Math.abs(item.daysToDue)} dias` : item.daysToDue === 0 ? 'Vence Hoje!' : `Vence em ${item.daysToDue} dias`}
+                                        {item.daysToDue < 0 ? `Atrasado ${Math.abs(item.daysToDue)} dias` : item.daysToDue === 0 ? 'Vence Hoje!' : `Faltam ${item.daysToDue} dias`}
                                     </p>
                                 )}
                             </div>
                             <div className="text-right">
-                                <p className="text-[10px] text-slate-500 uppercase font-bold">Parcela {item.installmentNum}</p>
+                                <p className="text-[10px] text-slate-500 uppercase font-bold">Valor</p>
                                 <p className="text-xl font-bold text-slate-800">{formatCurrency(item.value)}</p>
                             </div>
-                        </div>
-                        
-                        <div className="absolute inset-0 bg-indigo-900/5 backdrop-blur-[1px] opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                            <span className="bg-white px-3 py-1 rounded-full text-xs font-bold shadow text-indigo-700 flex items-center gap-1">
-                                <Eye size={14}/> Ver Detalhes
-                            </span>
                         </div>
                     </div>
                 );
@@ -375,7 +401,7 @@ const AccountsPayable = ({ products }) => {
                 <div className="p-4 border-b flex justify-between items-center bg-slate-50">
                     <h3 className="font-bold text-slate-800 flex items-center gap-2">
                         <Package size={18} className="text-indigo-600"/> 
-                        Detalhes da Nota {detailsModal.header.number}
+                        Detalhes: {detailsModal.header.entityName}
                     </h3>
                     <button onClick={() => setDetailsModal(null)} className="text-slate-400 hover:text-red-500"><X size={20}/></button>
                 </div>
@@ -383,44 +409,38 @@ const AccountsPayable = ({ products }) => {
                 <div className="p-6 overflow-y-auto space-y-6">
                     <div className="grid grid-cols-2 gap-4 text-sm">
                         <div className="bg-slate-50 p-3 rounded border">
-                            <p className="text-xs text-slate-500 font-bold uppercase">Fornecedor</p>
-                            <p className="font-medium text-slate-800">{detailsModal.header.entityName}</p>
-                            <p className="text-xs text-slate-500 mt-1">CNPJ: {detailsModal.header.entityDoc}</p>
+                            <p className="text-xs text-slate-500 font-bold uppercase">Origem</p>
+                            <p className="font-medium text-slate-800">{detailsModal.source === 'expense' ? 'Movimento Manual' : 'Nota Fiscal'}</p>
+                            <p className="text-xs text-slate-500 mt-1">Data: {formatDate(detailsModal.header.issueDate)}</p>
                         </div>
                         <div className="bg-slate-50 p-3 rounded border">
-                            <p className="text-xs text-slate-500 font-bold uppercase">Dados da Nota</p>
-                            <p className="font-medium text-slate-800">Emissão: {formatDate(detailsModal.header.issueDate)}</p>
-                            <p className="font-medium text-slate-800">Chave: <span className="text-xs text-slate-500 font-mono">{detailsModal.header.accessKey || 'N/A'}</span></p>
+                            <p className="text-xs text-slate-500 font-bold uppercase">Valor Total</p>
+                            <p className="font-bold text-lg text-emerald-700">{formatCurrency(detailsModal.header.total)}</p>
                         </div>
                     </div>
 
-                    <div>
-                        <h4 className="font-bold text-sm text-slate-700 mb-2 border-b pb-1">Produtos Comprados</h4>
-                        <table className="w-full text-sm text-left">
-                            <thead className="bg-slate-100 text-xs text-slate-500 uppercase">
-                                <tr>
-                                    <th className="p-2">Produto</th>
-                                    <th className="p-2 text-right">Qtd</th>
-                                    <th className="p-2 text-right">Total</th>
-                                </tr>
-                            </thead>
-                            <tbody className="divide-y">
-                                {detailsModal.items.map((item, idx) => (
-                                    <tr key={idx}>
-                                        <td className="p-2">
-                                            <div className="font-medium">{item.productName}</div>
-                                            <div className="text-[10px] text-slate-400">{item.xmlProductCode}</div>
-                                        </td>
-                                        <td className="p-2 text-right">{item.quantity}</td>
-                                        <td className="p-2 text-right">{formatCurrency(item.total)}</td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
+                    {detailsModal.items && detailsModal.items.length > 0 && (
+                        <div>
+                            <h4 className="font-bold text-sm text-slate-700 mb-2 border-b pb-1">Itens</h4>
+                            <table className="w-full text-sm text-left">
+                                <thead className="bg-slate-100 text-xs text-slate-500 uppercase">
+                                    <tr><th className="p-2">Produto</th><th className="p-2 text-right">Qtd</th><th className="p-2 text-right">Total</th></tr>
+                                </thead>
+                                <tbody className="divide-y">
+                                    {detailsModal.items.map((item, idx) => (
+                                        <tr key={idx}>
+                                            <td className="p-2">{item.productName}</td>
+                                            <td className="p-2 text-right">{item.quantity}</td>
+                                            <td className="p-2 text-right">{formatCurrency(item.total)}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
 
                     <div>
-                        <h4 className="font-bold text-sm text-slate-700 mb-2 border-b pb-1">Parcelas Financeiras</h4>
+                        <h4 className="font-bold text-sm text-slate-700 mb-2 border-b pb-1">Financeiro</h4>
                          <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
                              {detailsModal.financials.map((inst, idx) => (
                                  <div key={idx} className={`p-2 rounded border text-sm ${inst.status === 'PAGO' ? 'bg-emerald-50 border-emerald-200' : 'bg-white border-slate-200'}`}>

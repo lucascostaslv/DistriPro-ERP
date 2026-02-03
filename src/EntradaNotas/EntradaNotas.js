@@ -87,6 +87,8 @@ export default function EntradaNotas({ storeConfig, onClose, products: globalPro
   const [loading, setLoading] = useState(false);
   const [processingXml, setProcessingXml] = useState(false);
   const [entryMode, setEntryMode] = useState('XML');
+
+  const [autoUpdatePrice, setAutoUpdatePrice] = useState(true);
     
     const [productSearchModalOpen, setProductSearchModalOpen] = useState(false);
     const [productSearchTerm, setProductSearchTerm] = useState('');
@@ -462,17 +464,18 @@ const handleSaveSupplier = async () => {
           const getNum = (val) => parseFloat(String(val).replace(',', '.')) || 0;
 
           // 1. Recálculo de Totais (Se mudar Qtd ou Custo)
-          if (field === 'quantity' || field === 'unitPrice') {
-              const q = field === 'quantity' ? getNum(value) : item.quantity;
-              const c = field === 'unitPrice' ? getNum(value) : item.unitPrice;
-              updates.total = q * c;
-              
-              // Se mudou o custo, sugere novo preço de venda mantendo a margem
-              if (field === 'unitPrice') {
-                  const m = item.margin || 30;
-                  updates.sellingPrice = (c * (1 + m / 100)).toFixed(2);
-              }
-          }
+            if (field === 'quantity' || field === 'unitPrice') {
+                const q = field === 'quantity' ? getNum(value) : item.quantity;
+                const c = field === 'unitPrice' ? getNum(value) : item.unitPrice;
+                updates.total = q * c;
+                
+                // --- CORREÇÃO DA TRAVA ---
+                // Só recalcula o preço se a opção "Atualizar Preço" estiver MARCADA (true)
+                if (field === 'unitPrice' && autoUpdatePrice) {
+                    const m = item.margin || 30;
+                    updates.sellingPrice = (c * (1 + m / 100)).toFixed(2);
+                }
+            }
 
           // 2. Margem alterada -> Recalcula Preço de Venda
           if (field === 'margin') {
@@ -967,13 +970,22 @@ const handleSaveSupplier = async () => {
                       updatedHistory.push(newHistoryEntry);
                   }
 
-                  // O Update Real
-                  batch.update(productRef, {
-                      stock: increment(Number(item.quantity)), // SOMA ao estoque atual
-                      cost: Number(item.unitPrice), // ATUALIZA o custo
-                      last_purchase: entryDate,
-                      suppliersHistory: updatedHistory 
-                  });
+                    const currentPriceInTable = Number(item.sellingPrice || item.price || 0);
+
+                    batch.update(productRef, {
+                        stock: increment(Number(item.quantity)), 
+                        cost: Number(item.unitPrice), // Custo SEMPRE atualiza
+                        last_purchase: entryDate,
+                        suppliersHistory: updatedHistory,
+                        
+                        // LÓGICA DE TRAVA:
+                        // Só atualiza o preço no banco se:
+                        // 1. O checkbox "Atualizar Preço" estiver MARCADO
+                        // 2. E o preço for válido (> 0)
+                        ...(autoUpdatePrice && currentPriceInTable > 0 ? { 
+                            price: currentPriceInTable 
+                        } : {}) 
+                    });
 
                     if (productData.itemType === 'pack' && productData.parentId && productData.conversionFactor) {
     
@@ -1179,6 +1191,20 @@ const handleSaveSupplier = async () => {
                         <Plus size={14}/> Adicionar Item Manual
                     </button>
                 </div>
+            </div>
+
+            {/* --- CHECKBOX TRAVA --- */}
+            <div className="bg-yellow-50 border border-yellow-200 px-3 py-2 rounded flex items-center gap-2">
+                <input 
+                    type="checkbox" 
+                    id="chkAutoUpdateStep2"
+                    className="w-4 h-4 text-indigo-600 rounded cursor-pointer"
+                    checked={autoUpdatePrice}
+                    onChange={e => setAutoUpdatePrice(e.target.checked)}
+                />
+                <label htmlFor="chkAutoUpdateStep2" className="cursor-pointer text-sm font-bold text-slate-700 select-none">
+                    Recalcular Venda ao alterar Custo?
+                </label>
             </div>
 
             {/* Grid Editável (Estilo Excel) */}
