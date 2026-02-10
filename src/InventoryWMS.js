@@ -314,38 +314,55 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
   const handleSave = async () => {
     try {
         const storeId = String(storeConfig.id);
-        const isSupply = currentProduct.itemType === 'supply';
         
-        if (!currentProduct.name) {
-            return showNotification('O nome do produto é obrigatório.', 'error');
-        }
-        
-        // Só exige preço se NÃO for suprimento
-        if (!isSupply && !currentProduct.price) {
-            return showNotification('O preço de venda é obrigatório para itens de revenda.', 'error');
+        if (!currentProduct.name) return showNotification('Nome obrigatório.', 'error');
+
+        // 1. Lógica de Herança Fiscal (que já discutimos)
+        let finalTaxProfileId = currentProduct.taxProfileId;
+        if (!finalTaxProfileId && currentProduct.parentId) {
+            const parentProduct = products.find(p => p.id === currentProduct.parentId);
+            if (parentProduct) finalTaxProfileId = parentProduct.taxProfileId;
         }
 
+        // 2. Objeto de Dados BLINDADO
         const productData = {
+            // Espalha as propriedades originais (para pegar ID, createdAt, etc)
             ...currentProduct,
-            name: currentProduct.name.toUpperCase(),
-            cbaCode: currentProduct.barcode,
-            barcode: currentProduct.barcode,
-            price: Number(currentProduct.price),
+
+            // TRATAMENTO DE TEXTOS (Evita undefined)
+            name: (currentProduct.name || '').toUpperCase(),
+            barcode: currentProduct.barcode || '',
+            category: currentProduct.category || 'Geral',
+            ncm: currentProduct.ncm || '',
+            unit: currentProduct.unit || 'UN',
+            
+            // TRATAMENTO DO PERFIL FISCAL (Sua correção)
+            taxProfileId: finalTaxProfileId || '', 
+
+            // TRATAMENTO NUMÉRICO (Crucial para o PDV e Relatórios!)
+            // Garante que "10.50" vire 10.50 (número real)
+            price: Number(currentProduct.price) || 0,
             wholesalePrice: Number(currentProduct.wholesalePrice) || 0,
-            cost: Number(currentProduct.costPrice) || 0,
-            costPrice: Number(currentProduct.costPrice) || 0,
+            
+            // Normaliza o Custo (Formulário usa 'costPrice', Sistema usa 'cost')
+            cost: Number(currentProduct.costPrice || currentProduct.cost) || 0,
+            costPrice: Number(currentProduct.costPrice || currentProduct.cost) || 0, // Mantém compatibilidade
+            
             profitMargin: Number(currentProduct.profitMargin) || 0,
-            stock: Number(currentProduct.stock),
-            conversionFactor: Number(currentProduct.packQuantity) || 1,
-            packQuantity: Number(currentProduct.packQuantity) || 1,
-            supplierId: currentProduct.supplierId, // Salva o fornecedor
-            suppliersHistory: currentProduct.suppliersHistory || [],
-            itemType: currentProduct.itemType || 'unit',
-            isCheckoutEnabled: currentProduct.itemType === 'supply' ? (currentProduct.isCheckoutEnabled || false) : false,
+            stock: Number(currentProduct.stock) || 0,
+            minStock: Number(currentProduct.minStock) || 0,
+
+            // DADOS DE CAIXA/PACK
+            packQuantity: Number(currentProduct.packQuantity) || 0,
+            conversionFactor: Number(currentProduct.conversionFactor || currentProduct.packQuantity) || 1,
+            parentId: currentProduct.parentId || '', // Evita undefined se não for caixa
+
+            // Timestamp de atualização
             last_updated: serverTimestamp()
         };
 
         let mainDocRef;
+        // 1. Salva Principal
         if (currentProduct.id) {
             await updateDoc(doc(db, 'artifacts', storeId, 'public', 'data', 'products', currentProduct.id), productData);
             mainDocRef = { id: currentProduct.id };
@@ -356,32 +373,50 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
             showNotification('Produto criado!', 'success');
         }
 
-        if (!currentProduct.id && createPackMode && mainDocRef.id) {
-            // Criação automática da Caixa
+        // 2. VÍNCULO REVERSO (Sem alterações aqui)
+        if (currentProduct.itemType === 'unit' && currentProduct.linkedPackId) {
+             // ... (código igual ao anterior)
+             const packRef = doc(db, 'artifacts', storeId, 'public', 'data', 'products', currentProduct.linkedPackId);
+             await updateDoc(packRef, { parentId: mainDocRef.id, conversionFactor: Number(currentProduct.packQuantity) || 1 });
+        }
+
+        // 3. CRIAÇÃO RÁPIDA (AGORA COMPLETA)
+        if (createPackMode && mainDocRef.id) {
             const packData = {
-                name: `CX ${currentProduct.name}`,
+                // Usa o nome definido no formulário ou gera um automático
+                name: packFormData.name ? packFormData.name.toUpperCase() : `CX ${currentProduct.name}`,
                 cbaCode: packFormData.barcode,
                 barcode: packFormData.barcode,
+                taxProfileId: currentProduct.taxProfileId || '',
+                
+                // Preços e Custos do Formulário Novo
                 price: Number(packFormData.price),
                 wholesalePrice: Number(packFormData.wholesalePrice) || 0,
                 cost: Number(packFormData.costPrice) || 0,
-                stock: 0,
-                itemType: 'pack',
-                parentId: mainDocRef.id, 
-                conversionFactor: Number(packFormData.quantity),
-                packQuantity: Number(packFormData.quantity),
+                profitMargin: Number(packFormData.profitMargin) || 0,
+                
+                // Dados Fiscais herdados ou do form
+                ncm: packFormData.ncm || currentProduct.ncm,
                 taxProfileId: currentProduct.taxProfileId, 
                 category: currentProduct.category,
+                
+                // Estrutura WMS
+                stock: 0,
+                itemType: 'pack',
+                parentId: mainDocRef.id,
+                conversionFactor: Number(packFormData.quantity),
+                packQuantity: Number(packFormData.quantity),
                 unit: 'CX',
                 created_at: serverTimestamp()
             };
             await addDoc(collection(db, 'artifacts', storeId, 'public', 'data', 'products'), packData);
-            showNotification('Caixa vinculada criada!', 'success');
+            showNotification('Caixa criada com dados completos!', 'success');
         }
 
         setIsModalOpen(false);
         setCreatePackMode(false);
-        setPackFormData({ barcode: '', quantity: 12, price: '', wholesalePrice: '', costPrice: '' });
+        // Reset do formulário completo
+        setPackFormData({ name: '', barcode: '', quantity: 12, price: '', wholesalePrice: '', costPrice: '', profitMargin: '', ncm: '' });
 
     } catch (error) {
         console.error("Erro ao salvar:", error);
@@ -931,71 +966,176 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                                 </div>
                             </div>
 
-                            {!currentProduct.id && currentProduct.itemType !== 'pack' && (
-                                <div className={`p-4 rounded border transition-all ${createPackMode ? 'bg-purple-50 border-purple-200 shadow-inner' : 'bg-slate-50 border-slate-200'}`}>
-                                    <div className="flex items-center gap-2 mb-4">
-                                        <input 
-                                            type="checkbox" 
-                                            id="createPack" 
-                                            className="w-4 h-4 text-purple-600 rounded"
-                                            checked={createPackMode}
-                                            onChange={e => setCreatePackMode(e.target.checked)}
-                                        />
-                                        <label htmlFor="createPack" className="font-bold text-slate-700 cursor-pointer select-none flex items-center gap-2 text-sm">
-                                            <Layers size={18} className="text-purple-600"/>
-                                            Deseja cadastrar também a Caixa/Fardo deste item?
-                                        </label>
-                                    </div>
+                            {/* --- ÁREA DE GESTÃO DE EMBALAGEM (VÍNCULO UNIDADE <-> CAIXA) --- */}
+                            <div className="mt-6 pt-4 border-t border-slate-200 animate-in fade-in">
+                                <h4 className="font-bold text-slate-700 mb-3 flex items-center gap-2">
+                                    <Boxes size={18} className="text-indigo-600"/> Gestão de Fardos/Caixas
+                                </h4>
 
-                                    {createPackMode && (
-                                        <div className="grid grid-cols-1 md:grid-cols-12 gap-4 animate-in slide-in-from-top-2">
-                                            <div className="md:col-span-3">
-                                                <label className="text-[10px] font-bold text-purple-800 uppercase">Cód. Barras da Caixa</label>
-                                                <input 
-                                                    className="w-full border border-purple-200 p-2 rounded text-sm focus:border-purple-500" 
-                                                    placeholder="EAN da Caixa"
-                                                    value={packFormData.barcode}
-                                                    onChange={e => setPackFormData({...packFormData, barcode: masks.ean(e.target.value)})}
-                                                />
-                                            </div>
-                                            <div className="md:col-span-2">
-                                                <label className="text-[10px] font-bold text-purple-800 uppercase">Qtd na Caixa</label>
-                                                <input 
-                                                    type="number"
-                                                    className="w-full border border-purple-200 p-2 rounded text-sm focus:border-purple-500 font-bold" 
-                                                    value={packFormData.quantity}
-                                                    onChange={e => {
-                                                        const qtd = e.target.value;
-                                                        setPackFormData({
-                                                            ...packFormData, 
-                                                            quantity: qtd,
-                                                            costPrice: (Number(currentProduct.costPrice || 0) * Number(qtd)).toFixed(2)
-                                                        });
+                                {currentProduct.itemType === 'unit' && (
+                                    <div className="bg-slate-50 p-4 rounded border border-slate-200">
+                                        <p className="text-xs text-slate-500 mb-3 font-bold">Vincular ou Criar Caixa/Fardo para esta unidade:</p>
+                                        
+                                        <div className="flex flex-col gap-3">
+                                            {/* 1. Seleção de Existente (FILTRO CORRIGIDO: Só órfãos) */}
+                                            <div>
+                                                <label className="text-[10px] font-bold text-slate-500 uppercase">Vincular a Caixa Existente</label>
+                                                <select 
+                                                    className="w-full border p-2 rounded text-sm bg-white"
+                                                    value={currentProduct.linkedPackId || ''}
+                                                    onChange={(e) => {
+                                                        const packId = e.target.value;
+                                                        const pack = products.find(p => p.id === packId);
+                                                        setCurrentProduct(prev => ({
+                                                            ...prev, 
+                                                            linkedPackId: packId,
+                                                            packQuantity: pack ? (pack.conversionFactor || pack.packQuantity || 1) : prev.packQuantity
+                                                        }));
+                                                        setCreatePackMode(false);
                                                     }}
-                                                />
+                                                >
+                                                    <option value="">-- Selecione (Apenas Livres) --</option>
+                                                    {products
+                                                        // MOSTRA APENAS CAIXAS QUE NÃO TÊM PAI (ÓRFÃS) OU QUE JÁ SÃO FILHAS DESTE PRODUTO
+                                                        .filter(p => p.itemType === 'pack' && (!p.parentId || p.parentId === currentProduct.id) && p.id !== currentProduct.id)
+                                                        .sort((a, b) => a.name.localeCompare(b.name))
+                                                        .map(p => (
+                                                        <option key={p.id} value={p.id}>
+                                                            {p.name} (Fator: {p.conversionFactor || p.packQuantity})
+                                                        </option>
+                                                    ))}
+                                                </select>
                                             </div>
-                                            <div className="md:col-span-2">
-                                                <label className="text-[10px] font-bold text-purple-800 uppercase">Custo Caixa</label>
-                                                <input 
-                                                    className="w-full border border-purple-200 p-2 rounded text-sm bg-purple-100 text-purple-700" 
-                                                    value={packFormData.costPrice}
-                                                    readOnly
-                                                />
-                                            </div>
-                                            <div className="md:col-span-2">
-                                                <label className="text-[10px] font-bold text-purple-800 uppercase">Venda Caixa</label>
-                                                <input 
-                                                    type="number"
-                                                    className="w-full border border-purple-200 p-2 rounded text-sm focus:border-purple-500" 
-                                                    value={packFormData.price}
-                                                    onChange={e => setPackFormData({...packFormData, price: e.target.value})}
-                                                    placeholder="R$"
-                                                />
-                                            </div>
+
+                                            {/* 2. Criação Completa */}
+                                            {!currentProduct.linkedPackId && (
+                                                <div className={`mt-2 p-4 rounded border transition-all ${createPackMode ? 'bg-white border-indigo-200 shadow-md' : 'bg-slate-100 border-dashed border-slate-300'}`}>
+                                                    <label className="flex items-center gap-2 cursor-pointer mb-2">
+                                                        <input 
+                                                            type="checkbox" 
+                                                            className="w-4 h-4 text-indigo-600 rounded"
+                                                            checked={createPackMode}
+                                                            onChange={e => {
+                                                                const checked = e.target.checked;
+                                                                setCreatePackMode(checked);
+                                                                if(checked) {
+                                                                    // Pré-popula dados ao marcar
+                                                                    const defaultQty = 12;
+                                                                    const unitCost = Number(currentProduct.costPrice) || 0;
+                                                                    setPackFormData({
+                                                                        ...packFormData,
+                                                                        name: `CX ${currentProduct.name}`, // Nome Sugerido
+                                                                        ncm: currentProduct.ncm, // Herda NCM
+                                                                        quantity: defaultQty,
+                                                                        costPrice: (unitCost * defaultQty).toFixed(2),
+                                                                        profitMargin: currentProduct.profitMargin, // Herda Margem Sugerida
+                                                                        // Calcula preço sugerido baseado na margem herdada
+                                                                        price: ((unitCost * defaultQty) * (1 + (Number(currentProduct.profitMargin)||0)/100)).toFixed(2)
+                                                                    });
+                                                                }
+                                                            }}
+                                                        />
+                                                        <span className="font-bold text-slate-700 text-sm">Não existe? Cadastrar Caixa Completa</span>
+                                                    </label>
+
+                                                    {createPackMode && (
+                                                        <div className="grid grid-cols-1 md:grid-cols-12 gap-3 animate-in slide-in-from-top-2 mt-3">
+                                                            {/* Linha 1: Nome e Código */}
+                                                            <div className="md:col-span-8">
+                                                                <label className="text-[10px] font-bold text-indigo-800 uppercase">Nome da Caixa</label>
+                                                                <input className="w-full border p-2 rounded text-sm uppercase font-bold" value={packFormData.name} onChange={e => setPackFormData({...packFormData, name: e.target.value})}/>
+                                                            </div>
+                                                            <div className="md:col-span-4">
+                                                                <label className="text-[10px] font-bold text-indigo-800 uppercase">EAN Caixa</label>
+                                                                <input className="w-full border p-2 rounded text-sm" value={packFormData.barcode} onChange={e => setPackFormData({...packFormData, barcode: e.target.value})}/>
+                                                            </div>
+
+                                                            {/* Linha 2: Conversão e NCM */}
+                                                            <div className="md:col-span-3">
+                                                                <label className="text-[10px] font-bold text-indigo-800 uppercase">Qtd (Fator)</label>
+                                                                <input 
+                                                                    type="number" className="w-full border p-2 rounded text-sm font-bold bg-indigo-50"
+                                                                    value={packFormData.quantity}
+                                                                    onChange={e => {
+                                                                        const q = Number(e.target.value);
+                                                                        const unitC = Number(currentProduct.costPrice) || 0;
+                                                                        const newCost = unitC * q;
+                                                                        // Recalcula custo e preço baseado na margem atual do form
+                                                                        const margin = Number(packFormData.profitMargin) || 0;
+                                                                        setPackFormData({
+                                                                            ...packFormData, 
+                                                                            quantity: q, 
+                                                                            costPrice: newCost.toFixed(2),
+                                                                            price: (newCost * (1 + margin/100)).toFixed(2)
+                                                                        });
+                                                                    }}
+                                                                />
+                                                            </div>
+                                                            <div className="md:col-span-4">
+                                                                <label className="text-[10px] font-bold text-indigo-800 uppercase">NCM (Herdado)</label>
+                                                                <input className="w-full border p-2 rounded text-sm bg-slate-50" value={packFormData.ncm} onChange={e => setPackFormData({...packFormData, ncm: e.target.value})}/>
+                                                            </div>
+                                                            <div className="md:col-span-5">
+                                                                <label className="text-[10px] font-bold text-indigo-800 uppercase">Custo Total (Calc.)</label>
+                                                                <input className="w-full border p-2 rounded text-sm bg-slate-100 text-slate-500" readOnly value={packFormData.costPrice}/>
+                                                            </div>
+
+                                                            {/* Linha 3: Preços */}
+                                                            <div className="md:col-span-3">
+                                                                <label className="text-[10px] font-bold text-indigo-800 uppercase">Margem %</label>
+                                                                <input 
+                                                                    type="number" className="w-full border p-2 rounded text-sm" 
+                                                                    value={packFormData.profitMargin}
+                                                                    onChange={e => {
+                                                                        const m = Number(e.target.value);
+                                                                        const c = Number(packFormData.costPrice);
+                                                                        setPackFormData({...packFormData, profitMargin: m, price: (c * (1 + m/100)).toFixed(2)});
+                                                                    }}
+                                                                />
+                                                            </div>
+                                                            <div className="md:col-span-4">
+                                                                <label className="text-[10px] font-bold text-indigo-800 uppercase">Preço Venda</label>
+                                                                <input type="number" className="w-full border border-blue-300 bg-blue-50 p-2 rounded text-sm font-bold text-blue-900" value={packFormData.price} onChange={e => setPackFormData({...packFormData, price: e.target.value})}/>
+                                                            </div>
+                                                            <div className="md:col-span-5">
+                                                                <label className="text-[10px] font-bold text-indigo-800 uppercase">Preço Atacado</label>
+                                                                <input type="number" className="w-full border border-emerald-300 bg-emerald-50 p-2 rounded text-sm font-bold text-emerald-900" value={packFormData.wholesalePrice} onChange={e => setPackFormData({...packFormData, wholesalePrice: e.target.value})}/>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
                                         </div>
-                                    )}
+                                    </div>
+                                )}
+                                
+                                {/* Bloco de editar Caixa (mantém igual ao anterior) */}
+                                {currentProduct.itemType === 'pack' && (
+                                // ... (manter o bloco da caixa que já te mandei antes)
+                                <div className="bg-slate-50 p-4 rounded border border-slate-200">
+                                    {/* ...Inputs de ParentId e Fator... */}
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            <div>
+                                                <label className="text-[10px] font-bold text-slate-500 uppercase">Unidade Filha</label>
+                                                <select 
+                                                    className="w-full border p-2 rounded text-sm bg-white"
+                                                    value={currentProduct.parentId || ''}
+                                                    onChange={(e) => setCurrentProduct({...currentProduct, parentId: e.target.value})}
+                                                >
+                                                    <option value="">-- Selecione a Unidade --</option>
+                                                    {products.filter(p => p.itemType === 'unit' || !p.itemType).map(p => (
+                                                        <option key={p.id} value={p.id}>{p.name}</option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label className="text-[10px] font-bold text-slate-500 uppercase">Fator</label>
+                                                <input type="number" className="w-full border p-2 rounded text-sm" value={currentProduct.packQuantity} onChange={e => setCurrentProduct({...currentProduct, packQuantity: e.target.value, conversionFactor: e.target.value})}/>
+                                            </div>
+                                    </div>
                                 </div>
-                            )}
+                                )}
+                            </div>
                         </div>
                     )}
 

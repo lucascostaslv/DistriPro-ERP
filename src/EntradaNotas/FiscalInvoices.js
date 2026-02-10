@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   FileText, Search, Filter, Download, Ban, 
-  Edit3, Printer, AlertTriangle, CheckCircle, Calendar 
+  Edit3, Printer, AlertTriangle, CheckCircle, Calendar, Trash2
 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import { NFeService } from '../utils/NFeService';
@@ -55,7 +55,7 @@ const downloadSmart = (base64, filename) => {
 };
 
 
-const FiscalInvoices = ({ storeConfig, showNotification }) => {
+const FiscalInvoices = ({ storeConfig, showNotification, currentUser}) => {
   const [invoices, setInvoices] = useState([]);
   const [loading, setLoading] = useState(false);
   
@@ -212,6 +212,39 @@ const FiscalInvoices = ({ storeConfig, showNotification }) => {
         console.error("Erro Crítico:", error);
         setFeedbackData({ type: 'error', title: 'Erro de Comunicação', message: error.message, details: 'Verifique conexão.' });
     }
+  };
+
+  const handleDeleteInvoice = async (id) => {
+      // 1. Segurança: Verifica se o usuário chegou até aqui
+      if (!currentUser) {
+          return alert('Erro: Usuário não identificado. Tente recarregar a página.');
+      }
+
+      // 2. Pede a senha
+      const password = prompt(`USUÁRIO: ${currentUser.username || 'Atual'}\n\nPara remover este registro do SPED (banco de dados), digite SUA senha:`);
+      
+      if (password === null) return; // Cancelou
+
+      // 3. Compara com a senha do objeto usuário recebido do App.js -> Transactions.js
+      if (password !== currentUser.password) {
+          return alert('Senha incorreta! Ação bloqueada.');
+      }
+
+      // 4. Exclui se a senha bater
+      try {
+          const { error } = await supabase
+              .from('fiscal_invoices')
+              .delete()
+              .eq('id', id);
+
+          if (error) throw error;
+          
+          alert('Registro removido com sucesso.');
+          fetchInvoices(); 
+
+      } catch (e) {
+          alert('Erro ao excluir: ' + e.message);
+      }
   };
 
   return (
@@ -379,6 +412,13 @@ const FiscalInvoices = ({ storeConfig, showNotification }) => {
                                 </button>
                                 <button onClick={() => downloadSmart(inv.xml_content, `NFe-${inv.nfe_number}.xml`)} className="p-2 text-slate-600 hover:bg-slate-100 rounded" title="Baixar XML">
                                     <Download size={16}/>
+                                </button>
+                                <button 
+                                    onClick={() => handleDeleteInvoice(inv.id)} 
+                                    className="p-2 text-slate-300 hover:text-red-600 hover:bg-red-50 rounded transition-colors ml-1" 
+                                    title="Excluir Registro (Não cancela na SEFAZ)"
+                                >
+                                    <Trash2 size={16}/>
                                 </button>
                             </div>
                         </td>

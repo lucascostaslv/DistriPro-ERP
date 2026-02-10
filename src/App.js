@@ -1480,6 +1480,20 @@ const ExpenseHistory = ({ transactions, categories }) => {
 
   const totalFiltered = filteredData.reduce((acc, t) => acc + (Number(t.amount) || 0), 0);
 
+  const handleDeleteExpense = async (id) => {
+    // Apenas confirmação simples, sem senha
+    if(!window.confirm("Tem certeza que deseja excluir este registro financeiro?")) return;
+
+    try {
+        const appId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
+        await deleteDoc(doc(firebase.db, 'artifacts', appId, 'public', 'data', 'financial_movements', id));
+        alert('Registro excluído com sucesso.');
+    } catch (e) {
+        console.error(e);
+        alert('Erro ao excluir registro: ' + e.message);
+    }
+  };
+
   return (
     <div className="bg-white p-6 rounded border border-slate-200 shadow-sm mt-6 animate-in slide-in-from-bottom-4">
         <h3 className="font-bold text-slate-700 mb-4 flex items-center gap-2">
@@ -1554,6 +1568,18 @@ const ExpenseHistory = ({ transactions, categories }) => {
                                 <td className="p-3 text-right font-bold text-red-600">
                                     - {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(item.amount)}
                                 </td>
+                                <td className="p-3 text-right font-bold text-red-600">
+                                  <div className="flex items-center justify-end gap-2">
+                                      <span>- {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(item.amount)}</span>
+                                      <button 
+                                          onClick={() => handleDeleteExpense(item.id)}
+                                          className="p-1 text-slate-300 hover:text-red-600 transition-colors"
+                                          title="Excluir Registro"
+                                      >
+                                          <Trash2 size={14}/>
+                                      </button>
+                                  </div>
+                              </td>
                             </tr>
                         ))
                     )}
@@ -3606,6 +3632,7 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
                 priceGroups={store.priceGroups || []} 
                 onSaveEntry={() => {}} 
                 storeConfig={store} // <--- ADICIONAR ESTA LINHA
+                currentUser={currentUser}
               />
             )}
             {activeModule === 'priceGroups' && <PriceGroups products={products} showNotification={showNotification} />}
