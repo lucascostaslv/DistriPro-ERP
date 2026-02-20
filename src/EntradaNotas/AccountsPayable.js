@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Calendar, Search, CheckCircle, Eye, X, Package, 
-  ChevronLeft, ChevronRight, CalendarDays, RefreshCw
+  ChevronLeft, ChevronRight, CalendarDays, RefreshCw, Trash2
 } from 'lucide-react';
-import { collection, query, orderBy, where, onSnapshot } from 'firebase/firestore';
+import { collection, query, orderBy, where, onSnapshot, doc, deleteDoc} from 'firebase/firestore';
 import { db } from '../firebase'; 
 
 // Utilitários de formatação
@@ -147,6 +147,28 @@ const AccountsPayable = ({ products, storeConfig }) => { // Aceita storeConfig p
         unsubExpenses();
     };
   }, [storeConfig]);
+
+  // --- AÇÃO DE EXCLUSÃO ---
+  const handleDeleteDocument = async (modalData) => {
+      const isExpense = modalData.source === 'expense';
+      const confirm = window.confirm(`Tem certeza que deseja excluir esta ${isExpense ? 'Despesa' : 'Nota Fiscal'}?\nIsso apagará o registro permanentemente.`);
+      if (!confirm) return;
+
+      const rawId = storeConfig?.id || (typeof window !== 'undefined' ? window.__app_id : null);
+      if (!rawId) return;
+
+      try {
+          // Define a coleção correta baseada na origem do documento
+          const collectionName = isExpense ? 'financial_movements' : 'invoices';
+          await deleteDoc(doc(db, 'artifacts', String(rawId), 'public', 'data', collectionName, modalData.id));
+          
+          setDetailsModal(null); // Fecha o modal após a exclusão
+          alert(`${isExpense ? 'Despesa' : 'Nota'} excluída com sucesso!`);
+      } catch (error) {
+          console.error("Erro ao excluir documento:", error);
+          alert("Erro ao excluir o documento: " + error.message);
+      }
+  };
 
   // --- PROCESSAMENTO E UNIFICAÇÃO ---
   const payableItems = useMemo(() => {
@@ -403,7 +425,15 @@ const AccountsPayable = ({ products, storeConfig }) => { // Aceita storeConfig p
                         <Package size={18} className="text-indigo-600"/> 
                         Detalhes: {detailsModal.header.entityName}
                     </h3>
-                    <button onClick={() => setDetailsModal(null)} className="text-slate-400 hover:text-red-500"><X size={20}/></button>
+                    <div className="flex items-center gap-4">
+                        <button 
+                            onClick={() => handleDeleteDocument(detailsModal)} 
+                            className="text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded transition-colors flex items-center gap-1 text-xs font-bold border border-red-200"
+                        >
+                            <Trash2 size={16}/> Excluir
+                        </button>
+                        <button onClick={() => setDetailsModal(null)} className="text-slate-400 hover:text-slate-600 bg-slate-100 hover:bg-slate-200 p-1.5 rounded"><X size={20}/></button>
+                    </div>
                 </div>
                 
                 <div className="p-6 overflow-y-auto space-y-6">

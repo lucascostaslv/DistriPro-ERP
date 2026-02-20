@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { 
   TrendingUp, ShoppingCart, 
   Filter, ChevronDown, CheckCircle,
-  Search, Truck, AlertCircle, Package, ArrowRight, X, Copy
+  Search, Truck, AlertCircle, Package, ArrowRight, X, Copy, Plus
 } from 'lucide-react';
 
 // --- UTILITÁRIOS ---
@@ -107,10 +107,15 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
   }, [products, sales, daysAnalysis, daysCoverage, searchTerm, supplierFilter, cart]);
 
   // --- AÇÕES DO CARRINHO ---
-  const toggleCartItem = (product, supplierHistoryItem, customQty = null) => {
+  const toggleCartItem = (product, supplierHistoryItem = null, customQty = null) => {
       const pid = product.id;
       
-      if (cart[pid] && cart[pid].supplierId === supplierHistoryItem.supplierId) {
+      // Se não houver fornecedor selecionado, cria dados genéricos
+      const supId = supplierHistoryItem ? supplierHistoryItem.supplierId : 'sem_fornecedor';
+      const supName = supplierHistoryItem ? supplierHistoryItem.supplierName : 'Sem Fornecedor';
+      const cost = supplierHistoryItem ? supplierHistoryItem.lastCost : (product.cost || product.costPrice || 0);
+
+      if (cart[pid] && cart[pid].supplierId === supId) {
           const newCart = { ...cart };
           delete newCart[pid];
           setCart(newCart);
@@ -125,11 +130,11 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
               productName: product.name,
               productUnit: product.unit,
               productId: pid,
-              supplierId: supplierHistoryItem.supplierId,
-              supplierName: supplierHistoryItem.supplierName,
-              cost: supplierHistoryItem.lastCost,
+              supplierId: supId,
+              supplierName: supName,
+              cost: cost,
               qty: qty,
-              total: qty * supplierHistoryItem.lastCost
+              total: qty * cost
           }
       }));
   };
@@ -293,7 +298,15 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
                                         <h4 className="text-xs font-bold text-slate-500 uppercase flex items-center gap-2">
                                             <Truck size={14}/> Melhores Ofertas
                                         </h4>
-                                        <span className="text-[10px] text-slate-400">Selecione um card para adicionar ao pedido</span>
+                                        <div className="flex items-center gap-3">
+                                            <button 
+                                                onClick={() => toggleCartItem(prod, null)}
+                                                className="text-[10px] bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-1.5 rounded border border-slate-300 font-bold transition-colors flex items-center gap-1 shadow-sm"
+                                            >
+                                                <Plus size={12}/> Adicionar|Remover s/ Fornecedor
+                                            </button>
+                                            <span className="text-[10px] text-slate-400 hidden sm:inline">Selecione um card para adicionar ao pedido</span>
+                                        </div>
                                     </div>
                                     
                                     {prod.suppliersHistory && prod.suppliersHistory.length > 0 ? (

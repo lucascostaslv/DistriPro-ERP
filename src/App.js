@@ -1233,8 +1233,31 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
                                 </div>
                             </div>
 
-                            <div className="text-right px-2 border-r border-slate-100">
-                                <div className="font-bold text-slate-600 text-sm">{formatCurrency(item.price)}</div>
+                            {/* CAMPO DE PREÇO EDITÁVEL */}
+                            <div className="text-right px-2 border-r border-slate-100 flex items-center justify-end">
+                                <span className="text-[10px] text-slate-400 mr-1 font-bold">R$</span>
+                                <input 
+                                    type="text" 
+                                    inputMode="decimal"
+                                    className="w-16 font-bold text-slate-700 text-sm text-right border-b-2 border-dashed border-slate-300 outline-none focus:border-indigo-500 bg-transparent transition-colors hover:bg-slate-100"
+                                    value={item.price}
+                                    onChange={(e) => {
+                                        // Troca vírgula por ponto e aceita apenas números e ponto
+                                        let val = e.target.value.replace(',', '.').replace(/[^0-9.]/g, '');
+                                        // Evita múltiplos pontos
+                                        if ((val.match(/\./g) || []).length > 1) val = val.replace(/\.+$/, '');
+                                        
+                                        // Atualiza o carrinho com a string (para permitir digitar "10.")
+                                        setCart(cart.map(i => i.id === item.id ? { ...i, price: val } : i));
+                                    }}
+                                    onBlur={(e) => {
+                                        // Ao sair do campo, garante que vira um float válido (Ex: "10." vira 10)
+                                        const finalVal = parseFloat(item.price) || 0;
+                                        setCart(cart.map(i => i.id === item.id ? { ...i, price: finalVal } : i));
+                                    }}
+                                    onFocus={e => e.target.select()}
+                                    title="Editar Preço"
+                                />
                             </div>
 
                             {/* Controle Qtd Compacto */}

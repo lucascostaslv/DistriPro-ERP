@@ -2,12 +2,15 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Search, Plus, Edit, Trash2, Package, Save, X, AlertTriangle, 
   CheckCircle, BarChart3, Boxes, ArrowRightLeft, Lock, ArrowUpCircle, ArrowDownCircle,
-  DollarSign, Layers, Calculator, Clock, Share, Copy, Truck, FileText, Calendar, Filter
+  DollarSign, Layers, Calculator, Clock, Share, Copy, Truck, FileText, Calendar, Filter,
+  Download, ChevronLeft, ChevronRight
 } from 'lucide-react';
 import { collection, doc, updateDoc, deleteDoc, addDoc, serverTimestamp, increment, query, where, getDocs } from "firebase/firestore";
 import { db } from './firebase'; 
 import { supabase } from './supabaseClient';
 import PurchaseSuggestion from './PurchaseSuggestion';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 // --- UTILITÁRIOS ---
 const masks = {
@@ -157,8 +160,53 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
       ncm: '', cest: '', taxProfileId: '', itemType: 'unit', parentId: '', packQuantity: 0,
       supplierId: '', suppliersHistory: []
   };
-  
 
+  // --- ESTADOS DE PAGINAÇÃO ---
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 50; // Quantidade de itens carregados por vez na tela
+
+  // Sempre que o usuário digitar na busca, volta para a página 1
+  useEffect(() => {
+      setCurrentPage(1);
+  }, [searchTerm]); // Se você tiver um estado diferente para busca, ajuste o nome aqui
+
+  // --- FUNÇÃO DE EXPORTAR PDF ---
+  const handleExportPDF = () => {
+      const doc = new jsPDF();
+      
+      // Título do Documento
+      doc.setFontSize(14);
+      doc.text("Relatório de Estoque Completo", 14, 15);
+      doc.setFontSize(10);
+      doc.text(`Gerado em: ${new Date().toLocaleDateString('pt-BR')}`, 14, 22);
+      
+      // Cabeçalho da Tabela (Alterado)
+      const tableColumn = ["Nº", "Nome do Produto", "Cód. Barras", "NCM"];
+      const tableRows = [];
+
+      // Mapeando todos os produtos adicionando o índice (index)
+      products.forEach((product, index) => {
+          const productData = [
+              index + 1, // Numeração sequencial começando do 1
+              product.name || '-',
+              product.barcode || '-',
+              product.ncm || '-'
+          ];
+          tableRows.push(productData);
+      });
+
+      autoTable(doc, {
+          head: [tableColumn],
+          body: tableRows,
+          startY: 28,
+          styles: { fontSize: 8 },
+          headStyles: { fillColor: [30, 41, 59] }, // Cor slate-800
+          alternateRowStyles: { fillColor: [248, 250, 252] } // Cor slate-50
+      });
+
+      doc.save("estoque_completo.pdf");
+  };
+  
   const [currentProduct, setCurrentProduct] = useState(initialFormState);
   const [selectedHistoryProduct, setSelectedHistoryProduct] = useState(null);
   
@@ -530,6 +578,13 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
       });
   }, [products, searchTerm]);
 
+  const totalPages = Math.ceil(filteredProducts.length / itemsPerPage);
+  
+  const paginatedProducts = useMemo(() => {
+      const startIndex = (currentPage - 1) * itemsPerPage;
+      return filteredProducts.slice(startIndex, startIndex + itemsPerPage);
+  }, [filteredProducts, currentPage]);
+
   // Lista de Produtos Parados (> 30 dias sem venda)
   const deadStockProducts = useMemo(() => {
       const limitDays = deadStockDays > 0 ? deadStockDays : 30; // Se zero/vazio, usa 30
@@ -625,11 +680,18 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                         onChange={e => setSearchTerm(e.target.value)}
                     />
                 </div>
-                {activeTab === 'management' && (
-                    <button onClick={handleAddNew} className="bg-slate-800 text-white px-4 py-2 rounded font-bold hover:bg-slate-700 flex gap-2 ml-4">
-                        <Plus size={20}/> Novo Produto
-                    </button>
-                )}
+                <div className="flex gap-2 ml-4">
+                    {activeTab === 'management' && (
+                        <button onClick={handleExportPDF} className="bg-indigo-50 text-indigo-700 px-4 py-2 rounded font-bold hover:bg-indigo-100 flex items-center gap-2 border border-indigo-200">
+                            <Download size={18}/> Exportar Estoque
+                        </button>
+                    )}
+                    {activeTab === 'management' && (
+                        <button onClick={handleAddNew} className="bg-slate-800 text-white px-4 py-2 rounded font-bold hover:bg-slate-700 flex items-center gap-2">
+                            <Plus size={20}/> Novo Produto
+                        </button>
+                    )}
+                </div>
             </div>
           )}
       </div>
@@ -638,7 +700,7 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
       {activeTab === 'quick' && (
           <div className="flex-1 overflow-y-auto">
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 p-1">
-                {filteredProducts.map(prod => (
+                {paginatedProducts.map(prod => (
                     <StockCard 
                         key={prod.id}
                         product={prod} 
@@ -667,7 +729,7 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                     </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                    {filteredProducts.map(prod => (
+                    {paginatedProducts.map(prod => (
                         <tr 
                             key={prod.id} 
                             className="hover:bg-slate-50 cursor-pointer" // Adicionei cursor-pointer para indicar clique
@@ -782,6 +844,32 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
               sales={sales}
               suppliers={globalSuppliers}
           />
+      )}
+
+      {(activeTab === 'quick' || activeTab === 'management') && totalPages > 1 && (
+          <div className="bg-white p-3 border-t border-slate-200 flex items-center justify-between shadow-sm mt-auto shrink-0">
+              <p className="text-xs text-slate-500 font-medium">
+                  Página <span className="font-bold text-slate-800">{currentPage}</span> de <span className="font-bold text-slate-800">{totalPages}</span> 
+                  <span className="hidden sm:inline"> (Total: {filteredProducts.length} itens)</span>
+              </p>
+              
+              <div className="flex items-center gap-2">
+                  <button 
+                      onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                      disabled={currentPage === 1}
+                      className="p-2 border border-slate-200 rounded text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                      <ChevronLeft size={16} />
+                  </button>
+                  <button 
+                      onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                      disabled={currentPage === totalPages}
+                      className="p-2 border border-slate-200 rounded text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                      <ChevronRight size={16} />
+                  </button>
+              </div>
+          </div>
       )}
 
       {/* --- MODAL DE CADASTRO/EDIÇÃO --- */}

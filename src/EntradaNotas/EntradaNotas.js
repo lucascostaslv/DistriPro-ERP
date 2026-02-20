@@ -102,6 +102,8 @@ export default function EntradaNotas({ storeConfig, onClose, products: globalPro
     const [launchPaid, setLaunchPaid] = useState(false);
 
     const [suppliers, setSuppliers] = useState([]);
+
+    const [activeRowSearch, setActiveRowSearch] = useState(null);
     
   
   // Determina o ID da Loja corretamente (Prioridade: Prop > Global)
@@ -1232,7 +1234,97 @@ const handleSaveSupplier = async () => {
                     </thead>
                     <tbody className="divide-y">
                         {items.map(item => (
-                            <tr key={item.id} className={`hover:bg-blue-50 ${item.isNew ? 'bg-yellow-50' : ''}`}>
+                            <tr key={item.id} className={`hover:bg-blue-100 transition-colors ${item.productId ? 'bg-emerald-50/60' : 'bg-red-50/60'}`}>
+                                
+                                {/* Item 7: Código de Barras (Corrigido) */}
+                                <td className="p-1 border-r relative group">
+                                    <input 
+                                        className={`w-full h-full bg-transparent outline-none text-center font-bold text-xs ${item.productId ? 'text-emerald-800' : 'text-red-800'}`}
+                                        value={item.systemSku || item.barcode || ''}
+                                        onChange={(e) => {
+                                            handleItemChange(item.id, 'systemSku', e.target.value);
+                                            handleItemChange(item.id, 'barcode', e.target.value); // Aciona sua busca automática
+                                        }}
+                                        placeholder="Cód."
+                                    />
+                                    
+                                    {/* Botão aparece apenas se for Pack */}
+                                    {['CX', 'FD', 'FARDO', 'PCT'].includes(item.unit) && (
+                                        <button 
+                                            onClick={() => setPackConfigModal({ open: true, itemId: item.id })}
+                                            className="absolute right-0 top-0 bottom-0 bg-orange-100 text-orange-600 px-1 hover:bg-orange-200 z-10"
+                                            title="Vincular Item Filho (Unidade)"
+                                        >
+                                            <Package size={12}/>
+                                        </button>
+                                    )}
+                                    {item.childId && <div className="absolute top-0 right-0 -mt-1 -mr-1 w-2 h-2 bg-green-500 rounded-full"></div>}
+                                </td>
+
+                                {/* Item 8: Descrição Editável (COM BUSCA INLINE) */}
+                                <td className="p-1 border-r relative">
+                                    <div className="flex items-center w-full h-full relative">
+                                        {/* Bolinha Indicadora de Status */}
+                                        <div 
+                                            className={`w-2 h-2 rounded-full mx-2 shrink-0 ${item.productId ? 'bg-emerald-500 shadow-[0_0_4px_#10b981]' : 'bg-red-500 shadow-[0_0_4px_#ef4444]'}`}
+                                            title={item.productId ? "Vinculado" : "Não Encontrado (Será criado)"}
+                                        ></div>
+                                        
+                                        <input 
+                                            className={`w-full h-full bg-transparent outline-none uppercase font-bold text-xs ${item.productId ? 'text-emerald-900' : 'text-red-900'}`} 
+                                            value={item.productName} 
+                                            onChange={(e) => {
+                                                handleItemChange(item.id, 'productName', e.target.value);
+                                                setActiveRowSearch(item.id); 
+                                            }}
+                                            onFocus={() => { if (!item.productId) setActiveRowSearch(item.id); }}
+                                            onBlur={() => setTimeout(() => setActiveRowSearch(null), 200)}
+                                            placeholder="Nome do Produto"
+                                        />
+                                    </div>
+
+                                    {/* DROPDOWN INLINE (A MÁGICA DA VINCULAÇÃO) */}
+                                    {activeRowSearch === item.id && item.productName && !item.productId && (
+                                        <div className="absolute z-50 left-0 top-full mt-1 w-[450px] bg-white border border-slate-300 shadow-2xl rounded-lg max-h-64 overflow-y-auto">
+                                            <div className="p-2 text-[10px] font-bold text-slate-400 uppercase bg-slate-50 border-b border-slate-200">
+                                                Vincular a produto existente:
+                                            </div>
+                                            {products
+                                                .filter(p => p.name.toUpperCase().includes(item.productName.toUpperCase()) || (p.barcode && p.barcode.includes(item.productName)))
+                                                .slice(0, 10)
+                                                .map(p => (
+                                                    <div 
+                                                        key={p.id}
+                                                        className="p-2 border-b border-slate-100 hover:bg-indigo-50 cursor-pointer flex justify-between items-center group"
+                                                        onMouseDown={() => {
+                                                            // Força o vínculo pegando os dados do produto que o usuário clicou
+                                                            handleItemChange(item.id, 'productId', p.id);
+                                                            handleItemChange(item.id, 'productName', p.name);
+                                                            handleItemChange(item.id, 'unit', p.unit || 'UN');
+                                                            handleItemChange(item.id, 'sellingPrice', p.price || 0);
+                                                            handleItemChange(item.id, 'margin', p.profitMargin || 30);
+                                                            handleItemChange(item.id, 'systemSku', p.barcode || p.cbaCode || '');
+                                                            if (!item.unitPrice) handleItemChange(item.id, 'unitPrice', p.cost || 0);
+                                                            setActiveRowSearch(null);
+                                                        }}
+                                                    >
+                                                        <div>
+                                                            <div className="font-bold text-slate-700 text-xs group-hover:text-indigo-700">{p.name}</div>
+                                                            <div className="text-[10px] text-slate-500">Cód: {p.barcode || p.cbaCode || 'S/N'} • Estq: {p.stock || 0}</div>
+                                                        </div>
+                                                        <div className="text-indigo-600 font-bold text-xs bg-indigo-50 px-2 py-1 rounded">
+                                                            {formatCurrency(p.price)}
+                                                        </div>
+                                                    </div>
+                                            ))}
+                                            {products.filter(p => p.name.toUpperCase().includes(item.productName.toUpperCase())).length === 0 && (
+                                                <div className="p-3 text-xs text-slate-500 italic bg-slate-50">
+                                                    Nenhum produto encontrado. Se prosseguir, será cadastrado como novo.
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </td>
                                 {/* Item 7: Código de Barras (Busca) */}
                                 <td className="p-1 border-r relative group">
                                     <select 

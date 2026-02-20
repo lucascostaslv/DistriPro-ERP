@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
-  Search, Plus, Trash2, ArrowRight, User, 
+  Search, Plus, Minus, Trash2, ArrowRight, User, 
   FileText, CheckSquare, Square, X, Lock, 
   AlertTriangle, Utensils, ChevronLeft
 } from 'lucide-react';
@@ -19,6 +19,7 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
   const [isCreating, setIsCreating] = useState(false);
   const [newCustomerName, setNewCustomerName] = useState('');
   const [newTableNumber, setNewTableNumber] = useState('');
+  const [addQty, setAddQty] = useState(1);
 
   // Estados de Adição de Item
   const [productSearch, setProductSearch] = useState('');
@@ -73,47 +74,73 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
       try {
           const comandaRef = doc(db, 'artifacts', String(storeConfig.id), 'public', 'data', 'tabs', selectedComanda.id);
           
-          // Item a ser adicionado (com ID único para permitir parciais)
-          const newItem = {
-              uniqueId: Date.now() + Math.random().toString(36).substr(2, 9), // ID único do item na lista
-              productId: product.id,
-              name: product.name,
-              price: Number(product.price),
-              quantity: 1, // Sempre adiciona 1 por vez ou lógica de qtd
-              addedAt: new Date().toISOString(),
-              addedBy: currentUser?.username
-          };
+          const existingItem = (selectedComanda.items || []).find(i => i.productId === product.id);
+          let newItems;
+          
+          if (existingItem) {
+              // Se já tem, soma a quantidade do multiplicador
+              newItems = selectedComanda.items.map(i => 
+                  i.productId === product.id ? { ...i, quantity: (i.quantity || 1) + addQty } : i
+              );
+          } else {
+              // Se não tem, cria um novo com a quantidade do multiplicador
+              const newItem = {
+                  uniqueId: Date.now() + Math.random().toString(36).substr(2, 9),
+                  productId: product.id,
+                  name: product.name,
+                  price: Number(product.price),
+                  quantity: addQty,
+                  addedAt: new Date().toISOString(),
+                  addedBy: currentUser?.username
+              };
+              newItems = [...(selectedComanda.items || []), newItem];
+          }
 
-          await updateDoc(comandaRef, {
-              items: arrayUnion(newItem)
-          });
-          
-          // Atualiza localmente para feedback instantâneo (o snapshot vai confirmar depois)
-          setSelectedComanda(prev => ({
-              ...prev, 
-              items: [...(prev.items || []), newItem]
-          }));
-          
-          showNotification('Item adicionado!', 'success');
+          await updateDoc(comandaRef, { items: newItems });
+          setSelectedComanda(prev => ({ ...prev, items: newItems }));
+          showNotification(`Item adicionado (${addQty}x)!`, 'success');
           setProductSearch('');
+          setAddQty(1); // Reseta a quantidade após adicionar
       } catch(e) {
           console.error(e);
           showNotification('Erro ao adicionar item', 'error');
       }
   };
 
+  const handleUpdateQty = async (itemUniqueId, delta) => {
+      if (!selectedComanda) return;
+      const item = selectedComanda.items.find(i => i.uniqueId === itemUniqueId);
+      if (!item) return;
+
+      const newQty = (item.quantity || 1) + delta;
+      
+      if (newQty <= 0) {
+          handleRemoveItem(item);
+          return;
+      }
+
+      const newItems = selectedComanda.items.map(i => 
+          i.uniqueId === itemUniqueId ? { ...i, quantity: newQty } : i
+      );
+
+      try {
+          const comandaRef = doc(db, 'artifacts', String(storeConfig.id), 'public', 'data', 'tabs', selectedComanda.id);
+          await updateDoc(comandaRef, { items: newItems });
+          setSelectedComanda(prev => ({ ...prev, items: newItems }));
+      } catch (e) {
+          showNotification('Erro ao atualizar quantidade', 'error');
+      }
+  };
+
   const handleRemoveItem = async (itemToRemove) => {
       if(!window.confirm(`Remover "${itemToRemove.name}" da comanda?`)) return;
       try {
+          const newItems = selectedComanda.items.filter(i => i.uniqueId !== itemToRemove.uniqueId);
           const comandaRef = doc(db, 'artifacts', String(storeConfig.id), 'public', 'data', 'tabs', selectedComanda.id);
-          await updateDoc(comandaRef, {
-              items: arrayRemove(itemToRemove)
-          });
-          // Atualiza visualização local
-          setSelectedComanda(prev => ({
-              ...prev,
-              items: prev.items.filter(i => i.uniqueId !== itemToRemove.uniqueId)
-          }));
+          
+          await updateDoc(comandaRef, { items: newItems });
+          setSelectedComanda(prev => ({ ...prev, items: newItems }));
+          setSelectedItemsToPay(prev => prev.filter(id => id !== itemToRemove.uniqueId));
           showNotification('Item removido.', 'success');
       } catch(e) {
           showNotification('Erro ao remover item', 'error');
@@ -155,7 +182,7 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
           originalId: i.productId,
           name: i.name,
           price: i.price,
-          qty: 1,
+          qty: i.quantity || 1,
           
           // METADADOS DE RASTREIO (Importante para baixa na comanda)
           source: 'tab',
@@ -229,7 +256,7 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
 
           <div className="flex-1 overflow-y-auto p-2 space-y-2">
               {comandas.filter(c => c.customerName.toLowerCase().includes(searchTerm.toLowerCase())).map(comanda => {
-                  const total = comanda.items?.reduce((acc, i) => acc + (i.price || 0), 0) || 0;
+                  const total = comanda.items?.reduce((acc, i) => acc + ((i.price || 0) * (i.quantity || 1)), 0) || 0;
                   return (
                       <div 
                           key={comanda.id} 
@@ -279,17 +306,48 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
                   {/* BARRA DE ADICIONAR PRODUTO */}
                   <div className="mb-4 relative">
                       <div className="flex gap-2">
+                          
+                          {/* Seletor Visual de Quantidade (Igual ao PDV) */}
+                          <div className="flex items-center bg-slate-100 rounded border border-slate-200 h-10 transition-colors focus-within:border-indigo-400">
+                              <button 
+                                 onClick={() => setAddQty(Math.max(1, addQty - 1))}
+                                 className="px-2 h-full text-slate-500 hover:text-indigo-600 hover:bg-slate-200 rounded-l font-bold"
+                              ><Minus size={14}/></button>
+                              <input 
+                                 type="number"
+                                 className="w-10 h-full text-center bg-transparent outline-none font-bold text-indigo-700 text-sm appearance-none"
+                                 value={addQty}
+                                 onChange={(e) => setAddQty(Math.max(1, parseInt(e.target.value) || 1))}
+                                 min="1"
+                              />
+                              <button 
+                                 onClick={() => setAddQty(addQty + 1)}
+                                 className="px-2 h-full text-slate-500 hover:text-indigo-600 hover:bg-slate-200 rounded-r font-bold"
+                              ><Plus size={14}/></button>
+                          </div>
+
                           <div className="relative flex-1">
                               <Search className="absolute left-3 top-2.5 text-slate-400" size={18}/>
                               <input 
                                   className="w-full pl-10 pr-4 py-2 border rounded shadow-sm focus:ring-2 focus:ring-indigo-500 outline-none" 
-                                  placeholder="Adicionar produto à comanda (Nome ou Código)..."
+                                  placeholder="Ex: 5* e busque (Nome ou Cód)..."
                                   value={productSearch}
-                                  onChange={e => setProductSearch(e.target.value)}
+                                  onChange={e => {
+                                      const val = e.target.value;
+                                      // Mágica do multiplicador
+                                      const match = val.match(/^(\d+)[*xX]$/);
+                                      if (match) {
+                                          setAddQty(parseInt(match[1]));
+                                          setProductSearch('');
+                                      } else {
+                                          setProductSearch(val);
+                                      }
+                                  }}
                               />
                           </div>
                       </div>
-                      {/* Dropdown de Sugestões */}
+                      
+                      {/* Dropdown de Sugestões (MANTÉM IGUAL) */}
                       {productSearch && (
                           <div className="absolute top-full left-0 right-0 bg-white border rounded shadow-xl mt-1 max-h-60 overflow-y-auto z-20">
                               {filteredProducts.map(p => (
@@ -344,7 +402,13 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
                                       </div>
                                   </div>
                                   <div className="flex items-center gap-4">
-                                      <span className="font-bold text-slate-800">{formatCurrency(item.price)}</span>
+                                      {/* Controle Qtd Compacto */}
+                                      <div className="flex items-center bg-white border border-slate-200 rounded shadow-sm h-8">
+                                          <button onClick={() => handleUpdateQty(item.uniqueId, -1)} className="w-7 h-full flex items-center justify-center text-slate-500 hover:bg-slate-100 hover:text-red-500 transition-colors"><Minus size={14}/></button>
+                                          <span className="w-8 text-center font-bold text-sm text-slate-800">{item.quantity || 1}</span>
+                                          <button onClick={() => handleUpdateQty(item.uniqueId, 1)} className="w-7 h-full flex items-center justify-center text-slate-500 hover:bg-slate-100 hover:text-green-500 transition-colors"><Plus size={14}/></button>
+                                      </div>
+                                      <span className="font-bold text-slate-800 w-16 text-right">{formatCurrency(item.price * (item.quantity || 1))}</span>
                                       <button onClick={() => handleRemoveItem(item)} className="text-red-300 hover:text-red-500 p-1 opacity-0 group-hover:opacity-100 transition-opacity">
                                           <Trash2 size={16}/>
                                       </button>
@@ -364,7 +428,7 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
                       <div>
                           <p className="text-xs text-slate-500 uppercase font-bold">Total Geral</p>
                           <p className="text-2xl font-bold text-slate-800">
-                              {formatCurrency((selectedComanda.items || []).reduce((a, b) => a + b.price, 0))}
+                              {formatCurrency((selectedComanda.items || []).reduce((a, b) => a + ((b.price || 0) * (b.quantity || 1)), 0))}
                           </p>
                       </div>
                       <div className="text-right">
@@ -373,7 +437,7 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
                               {formatCurrency(
                                   (selectedComanda.items || [])
                                   .filter(i => selectedItemsToPay.includes(i.uniqueId))
-                                  .reduce((a, b) => a + b.price, 0)
+                                  .reduce((a, b) => a + ((b.price || 0) * (b.quantity || 1)), 0)
                               )}
                           </p>
                       </div>
