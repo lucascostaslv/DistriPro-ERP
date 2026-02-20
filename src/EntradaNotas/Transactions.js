@@ -40,6 +40,16 @@ const Transactions = (props) => {
       if(isExpenseModalOpen) fetchCategories();
   }, [isExpenseModalOpen, props.storeConfig]);
 
+  // Função blindada para converter moeda
+  const safeCurrencyToNumber = (val) => {
+      if (!val) return 0;
+      if (typeof val === 'number') return val;
+      // Remove todos os pontos de milhar e troca a vírgula decimal por ponto
+      const cleaned = String(val).replace(/\./g, '').replace(',', '.');
+      const result = parseFloat(cleaned);
+      return isNaN(result) ? 0 : result;
+  };
+
   const handleSaveExpense = async () => {
       if (!expenseForm.description || !expenseForm.value || !expenseForm.category) {
           alert("Preencha descrição, valor e categoria.");
@@ -54,11 +64,10 @@ const Transactions = (props) => {
 
           await addDoc(collection(db, 'artifacts', storeId, 'public', 'data', 'financial_movements'), {
               type: 'EXPENSE',
-              category: expenseForm.category, // Apenas o nome da categoria
+              category: expenseForm.category,
               description: expenseForm.description,
-              amount: parseFloat(expenseForm.value.replace(',', '.')),
+              amount: safeCurrencyToNumber(expenseForm.value), // <--- APLICAÇÃO DA CORREÇÃO AQUI
               date: expenseForm.date,
-              
               status: calculatedStatus,
               createdAt: serverTimestamp(),
               userId: 'manager' 

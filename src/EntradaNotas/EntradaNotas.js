@@ -898,20 +898,26 @@ const handleSaveSupplier = async () => {
           batch.set(invoiceRef, invoicePayload);
 
           // 3. Gerar Parcelas no Financeiro (Accounts Payable)
-          if (installments.length > 0 && selectedType?.financialAction === 'EXPENSE') {
+          if (installments.length > 0 && selectedType?.financialAction === 'PAGAR') {
               installments.forEach(inst => {
                   const billRef = doc(collection(db, 'artifacts', storeId, 'public', 'data', 'financial_movements'));
                   batch.set(billRef, {
                       type: 'EXPENSE', 
                       description: `Nota ${headerData.number} - ${headerData.entityName} (${inst.number}/${installments.length})`,
-                      value: Number(inst.value),
+                      
+                      // CORREÇÃO 2: O Financeiro usa 'amount' e 'date'. Usamos o safeFloat para blindar contra NaN.
+                      amount: safeFloat(inst.value), 
+                      value: safeFloat(inst.value), // Mantido por precaução
+                      date: entryDate, // Essencial para os filtros de data funcionarem
+                      
                       dueDate: inst.dueDate,
-                      status: 'PENDENTE',
-                      category: 'COMPRA_MERCADORIA',
+                      status: inst.status || 'PENDENTE',
+                      category: 'Revenda', // Ideal para o DRE identificar que é compra de mercadoria
                       paymentMethod: financialConfig.paymentMethod,
                       supplierId: headerData.entityId, 
                       supplierName: headerData.entityName,
                       invoiceId: invoiceRef.id, 
+                      createdAt: serverTimestamp(),
                       created_at: serverTimestamp()
                   });
               });

@@ -459,13 +459,16 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
               await updateDoc(ref, { stock: increment(qtyChange) });
           }
 
-          // Se tiver motivo (Perca), registra no histórico de vendas como "PERCA" para constar no financeiro
+          // Se tiver motivo (Perca), registra nas Vendas E no Financeiro
           if (reason) {
+              const lossCost = (Number(product.cost) || 0) * Math.abs(qtyChange);
+
+              // 1. Registro em Vendas (Para bater o CMV e DRE no App.js)
               const saleRef = collection(db, 'artifacts', storeId, 'public', 'data', 'sales');
               await addDoc(saleRef, {
                   date: new Date().toISOString(),
-                  total: 0, // Financeiro zero
-                  cost: (product.cost || 0) * Math.abs(qtyChange),
+                  total: 0, // Financeiro de entrada zero
+                  cost: lossCost,
                   items: [{ ...product, qty: Math.abs(qtyChange) }],
                   paymentMethod: 'PERCA',
                   isLoss: true,
@@ -473,11 +476,25 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                   userId: 'WMS',
                   clientName: 'AJUSTE ESTOQUE'
               });
+
+              // 2. Registro no Financeiro (Para aparecer no Histórico de Despesas)
+              const finRef = collection(db, 'artifacts', storeId, 'public', 'data', 'financial_movements');
+              await addDoc(finRef, {
+                  type: 'EXPENSE',
+                  category: 'Percas e Quebras', // Categoria para identificar fácil
+                  description: `PERCA ESTOQUE: ${product.name} - ${reason}`,
+                  amount: lossCost, // Valor do prejuízo (Custo x Qtd)
+                  date: new Date().toISOString().split('T')[0],
+                  status: 'PAGO', // Já foi realizado
+                  userId: 'WMS',
+                  createdAt: serverTimestamp()
+              });
           }
 
           showNotification(qtyChange > 0 ? "Estoque adicionado!" : "Baixa realizada.", "success");
           setLossModalOpen(false);
       } catch (e) {
+          console.error(e);
           showNotification("Erro ao atualizar estoque.", "error");
       }
   };

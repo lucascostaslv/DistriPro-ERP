@@ -715,6 +715,8 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
   const [showSearchResults, setShowSearchResults] = useState(false);
   const searchInputRef = useRef(null);
 
+  const [addQty, setAddQty] = useState(1);
+
   useEffect(() => {
     const fetchProfiles = async () => {
       if (!storeConfig?.id) return;
@@ -834,13 +836,17 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
       }));
   };
 
-  const addToCart = (product) => {
+  const addToCart = (product, customQty = null) => {
+    // Usa a quantidade passada por parâmetro ou a do estado visual
+    const qtyToAdd = customQty !== null ? customQty : addQty;
+    
     const currentStock = getDisplayStock(product, products);
     const itemInCart = cart.find(i => i.id === product.id);
     const cartQty = itemInCart ? itemInCart.qty : 0;
 
-    if (currentStock <= cartQty) {
-        showNotification(`Estoque insuficiente! Disponível: ${currentStock}`, 'error');
+    // Verifica se tem estoque suficiente para a quantidade solicitada
+    if (currentStock < cartQty + qtyToAdd) {
+        showNotification(`Estoque insuficiente! Disponível: ${currentStock - cartQty}`, 'error');
         return;
     }
 
@@ -855,14 +861,16 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
       if (existingItem) {
         return prevCart.map((item) =>
           item.id === product.id
-            ? { ...item, qty: item.qty + 1, price: item.isWholesale ? wholesalePrice : retailPrice }
+            ? { ...item, qty: item.qty + qtyToAdd, price: item.isWholesale ? wholesalePrice : retailPrice }
             : item
         );
       } else {
-        return [...prevCart, { ...product, qty: 1, price: finalPrice, priceMode: priceLabel, isWholesale: useWholesale }];
+        return [...prevCart, { ...product, qty: qtyToAdd, price: finalPrice, priceMode: priceLabel, isWholesale: useWholesale }];
       }
     });
-    // Feedback visual opcional ou som de beep
+    
+    // Reseta a quantidade para 1 após adicionar com sucesso
+    setAddQty(1);
   };
 
   const updateQty = (id, delta) => {
@@ -1077,18 +1085,54 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
       {/* 1. BARRA DE BUSCA (Mais compacta: h-10 em vez de h-12) */}
       <div className="relative mb-3 z-30">
         <div className="flex items-center gap-2 bg-white p-1.5 rounded-lg border border-indigo-100 shadow-sm">
+            
+            {/* NOVO: Seletor Visual de Quantidade */}
+            <div className="flex items-center bg-slate-100 rounded border border-slate-200 h-9 transition-colors focus-within:border-indigo-400">
+                <button 
+                   onClick={() => setAddQty(Math.max(1, addQty - 1))}
+                   className="px-2 h-full text-slate-500 hover:text-indigo-600 hover:bg-slate-200 rounded-l font-bold"
+                ><Minus size={14}/></button>
+                <input 
+                   type="number"
+                   className="w-10 h-full text-center bg-transparent outline-none font-bold text-indigo-700 text-sm appearance-none"
+                   value={addQty}
+                   onChange={(e) => setAddQty(Math.max(1, parseInt(e.target.value) || 1))}
+                   min="1"
+                   title="Quantidade a adicionar"
+                />
+                <button 
+                   onClick={() => setAddQty(addQty + 1)}
+                   className="px-2 h-full text-slate-500 hover:text-indigo-600 hover:bg-slate-200 rounded-r font-bold"
+                ><Plus size={14}/></button>
+            </div>
+            
+            <div className="text-slate-200">|</div>
+
             <div className="p-2 bg-indigo-50 text-indigo-600 rounded">
                 <Search size={20}/>
             </div>
+            
             <input 
                 ref={searchInputRef}
                 className="flex-1 h-9 text-base outline-none bg-transparent placeholder:text-slate-300 font-medium"
-                placeholder="Bipar código ou digitar nome..."
+                placeholder="Ex: 5* e bipe o código..."
                 value={searchTerm}
-                onChange={(e) => { setSearchTerm(e.target.value); setShowSearchResults(true); }}
+                onChange={(e) => { 
+                    const val = e.target.value;
+                    // Lógica Mágica: Se terminar com * ou X, captura o número antes e joga pra quantidade
+                    const match = val.match(/^(\d+)[*xX]$/);
+                    if (match) {
+                        setAddQty(parseInt(match[1]));
+                        setSearchTerm(''); // Limpa a barra para o próximo bipe
+                    } else {
+                        setSearchTerm(val); 
+                        setShowSearchResults(true); 
+                    }
+                }}
                 onFocus={() => setShowSearchResults(true)}
                 onKeyDown={handleSearchSubmit}
             />
+            
             {searchTerm && (
                 <button onClick={() => { setSearchTerm(''); searchInputRef.current.focus(); }} className="p-1.5 text-slate-400 hover:text-slate-600">
                     <X size={18}/>
