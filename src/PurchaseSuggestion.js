@@ -2,8 +2,10 @@ import React, { useState, useMemo } from 'react';
 import { 
   TrendingUp, ShoppingCart, 
   Filter, ChevronDown, CheckCircle,
-  Search, Truck, AlertCircle, Package, ArrowRight, X, Copy, Plus
+  Search, Truck, AlertCircle, Package, ArrowRight, X, Copy, Plus,  FileText 
 } from 'lucide-react';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 // --- UTILITÁRIOS ---
 const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
@@ -106,6 +108,50 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
     return list;
   }, [products, sales, daysAnalysis, daysCoverage, searchTerm, supplierFilter, cart]);
 
+  const handleExportPDF = () => {
+        const doc = new jsPDF();
+        let currentY = 15;
+
+        doc.setFontSize(14);
+        doc.text('Pedidos de Compra', 14, currentY);
+        currentY += 7;
+        doc.setFontSize(9);
+        doc.setTextColor(100);
+        doc.text(`Gerado em: ${new Date().toLocaleDateString('pt-BR')}`, 14, currentY);
+        currentY += 8;
+
+        Object.entries(generatedOrders).forEach(([supplierName, data]) => {
+            doc.setFontSize(11);
+            doc.setTextColor(30, 41, 59);
+            doc.text(`Fornecedor: ${supplierName}`, 14, currentY);
+            currentY += 2;
+
+            autoTable(doc, {
+                startY: currentY,
+                head: [['Produto', 'Qtd', 'Un', 'Vlr Base Unit.', 'Total']],
+                body: data.items.map(i => [
+                    i.productName,
+                    i.qty,
+                    i.productUnit || 'UN',
+                    formatCurrency(i.basePrice ?? i.cost),
+                    formatCurrency(i.total)
+                ]),
+                foot: [[
+                    { content: 'Total do Fornecedor', colSpan: 4, styles: { halign: 'right', fontStyle: 'bold' } },
+                    { content: formatCurrency(data.total), styles: { fontStyle: 'bold', textColor: [5, 150, 105] } }
+                ]],
+                styles: { fontSize: 8 },
+                headStyles: { fillColor: [30, 41, 59] },
+                footStyles: { fillColor: [241, 245, 249] },
+                alternateRowStyles: { fillColor: [248, 250, 252] },
+            });
+
+            currentY = doc.lastAutoTable.finalY + 12;
+        });
+
+        doc.save(`pedidos_compra_${new Date().toLocaleDateString('pt-BR').replace(/\//g, '-')}.pdf`);
+    };
+
   // --- AÇÕES DO CARRINHO ---
   const toggleCartItem = (product, supplierHistoryItem = null, customQty = null) => {
       const pid = product.id;
@@ -133,6 +179,7 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
               supplierId: supId,
               supplierName: supName,
               cost: cost,
+              basePrice: cost,
               qty: qty,
               total: qty * cost
           }
@@ -151,6 +198,42 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
           }
       }));
   };
+
+    const updateCartBasePrice = (pid, newPrice) => {
+        if (!cart[pid]) return;
+        const val = parseFloat(newPrice) || 0;
+        setCart(prev => ({
+            ...prev,
+            [pid]: {
+                ...prev[pid],
+                basePrice: val,
+                total: prev[pid].qty * val
+            }
+        }));
+    };
+
+    const removeFromCart = (pid) => {
+        setCart(prev => {
+            const next = { ...prev };
+            delete next[pid];
+            return next;
+        });
+    };
+
+    const changeCartSupplier = (pid, supplierHistoryItem) => {
+        if (!cart[pid]) return;
+        setCart(prev => ({
+            ...prev,
+            [pid]: {
+                ...prev[pid],
+                supplierId: supplierHistoryItem.supplierId,
+                supplierName: supplierHistoryItem.supplierName,
+                cost: supplierHistoryItem.lastCost,
+                basePrice: supplierHistoryItem.lastCost,
+                total: prev[pid].qty * supplierHistoryItem.lastCost
+            }
+        }));
+    };
 
   const generatedOrders = useMemo(() => {
       const grouped = {};
@@ -434,13 +517,62 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
                                 
                                 <ul className="space-y-2">
                                     {data.items.map((item, i) => (
-                                        <li key={i} className="text-sm flex justify-between items-center text-slate-600 bg-slate-50 p-2 rounded">
-                                            <span className="flex items-center gap-2">
-                                                <span className="font-bold text-slate-800 w-16 text-right">{item.qty} {item.productUnit}</span> 
-                                                <span className="text-slate-400">|</span>
-                                                <span>{item.productName}</span>
-                                            </span>
-                                            <span className="font-mono text-xs text-slate-400 font-medium">{formatCurrency(item.total)}</span>
+                                        <li key={i} className="text-sm bg-slate-50 p-2 rounded border border-slate-100">
+                                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                                                <span className="font-bold text-slate-800 flex-1 min-w-[120px]">{item.productName}</span>
+                                                <button
+                                                    onClick={() => removeFromCart(item.productId)}
+                                                    className="text-red-400 hover:text-red-600 p-1 rounded hover:bg-red-50"
+                                                    title="Remover item"
+                                                ><X size={14}/></button>
+                                            </div>
+                                            <div className="flex items-center gap-3 mt-2 flex-wrap">
+                                                <div>
+                                                    <label className="text-[9px] uppercase font-bold text-slate-400 block">Qtd</label>
+                                                    <input
+                                                        type="number"
+                                                        className="w-16 border rounded p-1 text-center text-sm font-bold"
+                                                        value={item.qty}
+                                                        onChange={e => updateCartQty(item.productId, e.target.value)}
+                                                    />
+                                                </div>
+                                                <span className="text-slate-300 text-lg font-light mt-3">×</span>
+                                                <div>
+                                                    <label className="text-[9px] uppercase font-bold text-slate-400 block">Vlr Base (R$)</label>
+                                                    <input
+                                                        type="number"
+                                                        step="0.01"
+                                                        className="w-24 border rounded p-1 text-center text-sm font-bold text-indigo-700"
+                                                        value={item.basePrice ?? item.cost}
+                                                        onChange={e => updateCartBasePrice(item.productId, e.target.value)}
+                                                    />
+                                                </div>
+                                                <span className="text-slate-300 text-lg font-light mt-3">=</span>
+                                                <div className="mt-3">
+                                                    <span className="font-mono font-bold text-emerald-600">{formatCurrency(item.total)}</span>
+                                                </div>
+                                                {/* Atrelar / Trocar fornecedor */}
+                                                    <div className="ml-auto">
+                                                        <label className="text-[9px] uppercase font-bold text-slate-400 block">Fornecedor</label>
+                                                        <select
+                                                            className="border rounded p-1 text-xs bg-white text-slate-700 font-bold max-w-[160px]"
+                                                            value={item.supplierId}
+                                                            onChange={e => {
+                                                                const sup = suppliers.find(s => String(s.id) === e.target.value);
+                                                                if (sup) changeCartSupplier(item.productId, {
+                                                                    supplierId: String(sup.id),
+                                                                    supplierName: sup.name,
+                                                                    lastCost: item.basePrice ?? item.cost
+                                                                });
+                                                            }}
+                                                        >
+                                                            <option value="sem_fornecedor">Sem Fornecedor</option>
+                                                            {suppliers.map(s => (
+                                                                <option key={s.id} value={String(s.id)}>{s.name}</option>
+                                                            ))}
+                                                        </select>
+                                                    </div>
+                                            </div>
                                         </li>
                                     ))}
                                 </ul>
@@ -448,8 +580,14 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
                         ))}
                     </div>
 
-                    <div className="p-4 border-t bg-white flex justify-end">
-                        <button onClick={() => setIsOrderModalOpen(false)} className="px-8 py-3 bg-slate-800 text-white font-bold rounded-lg hover:bg-slate-900 transition-transform active:scale-95">
+                    <div className="p-4 border-t bg-white flex justify-between items-center gap-3">
+                        <button
+                            onClick={handleExportPDF}
+                            className="px-5 py-2.5 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-colors flex items-center gap-2 text-sm"
+                        >
+                            <FileText size={16}/> Exportar PDF
+                        </button>
+                        <button onClick={() => setIsOrderModalOpen(false)} className="px-8 py-2.5 bg-slate-800 text-white font-bold rounded-lg hover:bg-slate-900 transition-transform active:scale-95">
                             Fechar
                         </button>
                     </div>

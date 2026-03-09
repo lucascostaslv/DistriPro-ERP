@@ -8,7 +8,7 @@ import { NFeService } from '../utils/NFeService';
 
 // Função auxiliar para baixar Base64
 
-const downloadSmart = (base64, filename) => {
+export const downloadSmart = (base64, filename) => {
     if (!base64) return alert('Conteúdo do arquivo não disponível.');
     
     try {

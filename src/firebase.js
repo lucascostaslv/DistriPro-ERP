@@ -1,5 +1,8 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
+import { 
+  collection, doc, getDocs, getDoc, addDoc, updateDoc, deleteDoc, 
+  onSnapshot, query, where, orderBy, writeBatch, serverTimestamp, getFirestore, setDoc
+} from "firebase/firestore";
 import { getAuth } from "firebase/auth";
 
 // This is the config for your central "admin" database
@@ -76,4 +79,63 @@ export const updateStoreData = async (storeData) => {
   const storeDocRef = doc(db, "store", "data");
   const { id, firebaseConfig, ...dataToSave } = storeData;
   await setDoc(storeDocRef, dataToSave);
+};
+
+// ============================================================================
+// DATA ACCESS LAYER (DAL) - MULTI-TENANT
+// ============================================================================
+
+// Centralizador de caminhos: Se a estrutura de pastas mudar, muda só aqui.
+const getTenantPath = (appId, collectionName) => `artifacts/${appId}/public/data/${collectionName}`;
+
+export const tenantDAL = {
+  // --- Leituras (Read) ---
+  getAll: async (appId, collectionName, queryConstraints = []) => {
+    const colRef = collection(db, getTenantPath(appId, collectionName));
+    const q = query(colRef, ...queryConstraints);
+    const snap = await getDocs(q);
+    return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  },
+
+  getById: async (appId, collectionName, docId) => {
+    const docRef = doc(db, getTenantPath(appId, collectionName), docId);
+    const snap = await getDoc(docRef);
+    return snap.exists() ? { id: snap.id, ...snap.data() } : null;
+  },
+
+  // --- Escritas (Write) ---
+  add: async (appId, collectionName, data) => {
+    const colRef = collection(db, getTenantPath(appId, collectionName));
+    const docRef = await addDoc(colRef, { ...data, createdAt: serverTimestamp() });
+    return docRef.id;
+  },
+
+  update: async (appId, collectionName, docId, data) => {
+    const docRef = doc(db, getTenantPath(appId, collectionName), docId);
+    await updateDoc(docRef, { ...data, updatedAt: serverTimestamp() });
+  },
+
+  delete: async (appId, collectionName, docId) => {
+    const docRef = doc(db, getTenantPath(appId, collectionName), docId);
+    await deleteDoc(docRef);
+  },
+
+  // --- Realtime (Listen) ---
+  // Retorna diretamente a função de unsubscribe do Firebase
+  subscribe: (appId, collectionName, callback, queryConstraints = []) => {
+    const colRef = collection(db, getTenantPath(appId, collectionName));
+    const q = query(colRef, ...queryConstraints);
+    
+    return onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      callback(data);
+    });
+  },
+
+  // Retorna a referência crua apenas para casos de BATCH ou transações complexas
+  getRawRef: (appId, collectionName, docId = null) => {
+    return docId 
+      ? doc(db, getTenantPath(appId, collectionName), docId)
+      : collection(db, getTenantPath(appId, collectionName));
+  }
 };

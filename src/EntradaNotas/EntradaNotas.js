@@ -1325,51 +1325,6 @@ const handleSaveSupplier = async () => {
                                         </div>
                                     )}
                                 </td>
-                                {/* Item 7: Código de Barras (Busca) */}
-                                <td className="p-1 border-r relative group">
-                                    <select 
-                                        className="w-full h-full bg-transparent outline-none text-center appearance-none font-bold"
-                                        value={item.unit}
-                                        onChange={(e) => handleItemChange(item.id, 'unit', e.target.value)}
-                                    >
-                                        <option>UN</option><option>CX</option><option>KG</option><option>PCT</option><option>FARDO</option><option>FD</option>
-                                    </select>
-                                    
-                                    {/* Botão aparece apenas se for Pack */}
-                                    {['CX', 'FD', 'FARDO', 'PCT'].includes(item.unit) && (
-                                        <button 
-                                            onClick={() => setPackConfigModal({ open: true, itemId: item.id })}
-                                            className="absolute right-0 top-0 bottom-0 bg-orange-100 text-orange-600 px-1 hover:bg-orange-200 z-10"
-                                            title="Vincular Item Filho (Unidade)"
-                                        >
-                                            <Package size={12}/>
-                                        </button>
-                                    )}
-                                    
-                                    {/* Indicador se já está configurado */}
-                                    {item.childId && (
-                                        <div className="absolute top-0 right-0 -mt-1 -mr-1 w-2 h-2 bg-green-500 rounded-full"></div>
-                                    )}
-                                </td>
-                                {/* Item 8: Descrição Editável */}
-                                <td className="p-1 border-r">
-                                    <input 
-                                        className="w-full h-full bg-transparent outline-none uppercase font-bold text-gray-700" 
-                                        value={item.productName} 
-                                        onChange={(e) => handleItemChange(item.id, 'productName', e.target.value)}
-                                        placeholder="Nome do Produto"
-                                    />
-                                </td>
-                                {/* Item 9: Unidade */}
-                                <td className="p-1 border-r">
-                                    <select 
-                                        className="w-full h-full bg-transparent outline-none text-center appearance-none"
-                                        value={item.unit}
-                                        onChange={(e) => handleItemChange(item.id, 'unit', e.target.value)}
-                                    >
-                                        <option>UN</option><option>CX</option><option>KG</option><option>PCT</option><option>FARDO</option>
-                                    </select>
-                                </td>
                                 {/* Item 10: Quantidade */}
                                 <td className="p-1 border-r">
                                     <input 

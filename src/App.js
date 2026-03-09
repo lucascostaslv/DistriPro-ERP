@@ -26,6 +26,17 @@ import { calculateItemTaxes } from './utils/TaxCalculator';
 import { buildNFePayload } from './utils/NFeBuilder';
 import { NFeService } from './utils/NFeService';
 import ComandaManager from './ComandaManager';
+import { downloadSmart } from './EntradaNotas/FiscalInvoices';
+
+import { TenantProvider } from './contexts/TenantContext';
+
+function Root() {
+  return (
+    <TenantProvider>
+      <App /> 
+    </TenantProvider>
+  );
+}
 
 // --- UTILS ---
 const formatCurrency = (value) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
@@ -2338,13 +2349,35 @@ const Finance = ({ sales, transactions, feeProfiles, setFeeProfiles, transaction
                         <td className="p-4 font-bold text-slate-800">{formatCurrency(s.total)}</td>
                         <td className="p-4 text-right flex justify-end gap-2">
                             <button onClick={() => setViewSale(s)} className="text-indigo-600 hover:bg-indigo-50 p-2 rounded" title="Ver Detalhes"><Eye size={18}/></button>
-                            <button 
-                                onClick={() => onEmitNFe && onEmitNFe(s)} 
-                                className={`p-2 rounded transition-colors ${s.nfeStatus === 'AUTORIZADA' ? 'text-green-600 bg-green-50' : 'text-slate-400 hover:text-blue-600 hover:bg-blue-50'}`}
-                                title={s.nfeStatus ? `Status NFe: ${s.nfeStatus}` : "Emitir Nota Fiscal"}
-                            >
-                                <FileText size={18}/>
-                            </button>
+                            {s.nfeStatus === 'AUTORIZADA' ? (
+                              <button 
+                                  onClick={async () => {
+                                      // Busca o PDF do banco em vez de reemitir
+                                      const { data } = await supabase
+                                          .from('fiscal_invoices')
+                                          .select('pdf_base64, nfe_number')
+                                          .eq('sale_id', String(s.id))
+                                          .single();
+                                      if (data?.pdf_base64) {
+                                          downloadSmart(data.pdf_base64, `NFe-${data.nfe_number}`);
+                                      } else {
+                                          alert('PDF não encontrado para esta nota.');
+                                      }
+                                  }}
+                                  className="p-2 rounded text-green-600 bg-green-50 hover:bg-green-100 transition-colors"
+                                  title="Baixar PDF da Nota Autorizada"
+                              >
+                                  <Download size={18}/>
+                              </button>
+                          ) : (
+                              <button 
+                                  onClick={() => onEmitNFe && onEmitNFe(s)} 
+                                  className="p-2 rounded text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                                  title={s.nfeStatus === 'REJEITADA' ? 'Tentar Reemitir' : 'Emitir Nota Fiscal'}
+                              >
+                                  <FileText size={18}/>
+                              </button>
+                          )}
                         </td>
                         </tr>
                     ))}
