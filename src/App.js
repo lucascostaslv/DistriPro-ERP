@@ -10,7 +10,7 @@ import {
   MapPin,
   Boxes,
   Upload,
-  Loader2, Send, Utensils
+  Loader2, Send, Utensils, Wine
 } from 'lucide-react';
 import { collection, query, where, getDocs, setDoc, doc, updateDoc, getDoc, onSnapshot, increment, writeBatch, serverTimestamp, addDoc, deleteDoc} from "firebase/firestore";
 import logo from './img/LOGO-MAQUINA-PNG.png';
@@ -688,11 +688,322 @@ const Dashboard = ({ sales, products }) => {
   );
 };
 
+const BottleCard = ({ bottle, onSell, onDiscard, editingBottle, setEditingBottle, onUpdateField }) => {
+    const [doseQty, setDoseQty] = useState(1);
+    const pct = bottle.maxDoses > 0 ? (bottle.remainingDoses / bottle.maxDoses) * 100 : 0;
+    const barColor = pct > 50 ? 'bg-green-500' : pct > 20 ? 'bg-amber-500' : 'bg-red-500';
+
+    return (
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
+            <div className="flex items-start justify-between">
+                <div>
+                    <p className="font-bold text-slate-800 text-sm leading-tight">{bottle.productName}</p>
+                    <p className="text-[10px] text-slate-400">Aberta em {bottle.openedAt?.toDate ? bottle.openedAt.toDate().toLocaleString('pt-BR') : '—'}</p>
+                </div>
+                <button onClick={() => onDiscard(bottle)} className="text-xs text-red-400 hover:text-red-600 border border-red-200 hover:bg-red-50 px-2 py-1 rounded flex items-center gap-1">
+                    <Trash2 size={12}/> Descartar
+                </button>
+            </div>
+
+            <div>
+                <div className="flex justify-between text-xs text-slate-500 mb-1">
+                    {bottle.maxDoses === 0 ? (
+                        <span className="text-red-500 font-bold">⚠️ Configure os volumes abaixo para vender</span>
+                    ) : (
+                        <>
+                            <span>{bottle.remainingDoses} doses restantes</span>
+                            <span>{bottle.maxDoses} máx</span>
+                        </>
+                    )}
+                </div>
+                <div className="w-full bg-slate-200 rounded-full h-2">
+                    <div className={`h-2 rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }}/>
+                </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 pt-1 border-t border-slate-200">
+                {[
+                    { field: 'dosePrice', label: 'Preço (R$)', prefix: 'R$' },
+                    { field: 'bottleVolumeMl', label: 'Vol. Garrafa (ml)', prefix: '' },
+                    { field: 'doseVolumeMl', label: 'Vol. Dose (ml)', prefix: '' },
+                ].map(({ field, label, prefix }) => (
+                    <div key={field}>
+                        <label className="text-[9px] font-bold text-slate-400 uppercase block">{label}</label>
+                        {editingBottle?.id === bottle.id && editingBottle?.field === field ? (
+                            <input
+                                autoFocus
+                                type="number"
+                                className="w-full border border-purple-400 rounded p-1 text-xs font-bold text-center focus:outline-none"
+                                defaultValue={bottle[field]}
+                                onBlur={e => onUpdateField(bottle, field, e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') onUpdateField(bottle, field, e.target.value); if (e.key === 'Escape') setEditingBottle(null); }}
+                            />
+                        ) : (
+                            <button
+                                onClick={() => setEditingBottle({ id: bottle.id, field })}
+                                className="w-full text-xs font-bold text-slate-700 bg-white border border-slate-200 rounded p-1 hover:border-purple-400 hover:text-purple-700 text-center"
+                            >
+                                {prefix}{bottle[field]}
+                            </button>
+                        )}
+                    </div>
+                ))}
+            </div>
+
+            <div className="flex items-center gap-2 pt-1">
+                <div className="flex items-center border rounded overflow-hidden flex-shrink-0">
+                    <button onClick={() => setDoseQty(q => Math.max(1, q - 1))} className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-sm font-bold">−</button>
+                    {/* RESTRIÇÃO DE MAX REMOVIDA DO INPUT */}
+                    <input
+                        type="number" min="1"
+                        value={doseQty}
+                        onChange={e => setDoseQty(Math.max(1, Number(e.target.value)))}
+                        className="w-10 text-center text-sm font-bold border-x p-1 outline-none"
+                    />
+                    {/* RESTRIÇÃO REMOVIDA DO BOTÃO DE MAIS */}
+                    <button onClick={() => setDoseQty(q => q + 1)} className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-sm font-bold">+</button>
+                </div>
+                {/* BOTÃO NÃO FICA MAIS DISABLED POR CAUSA DO ESTOQUE, APENAS SE FALTAR CONFIGURAÇÃO */}
+                <button
+                    onClick={() => onSell(bottle, doseQty)}
+                    disabled={bottle.maxDoses === 0}
+                    className="flex-1 bg-purple-600 text-white py-1.5 rounded-lg text-sm font-bold hover:bg-purple-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-1"
+                >
+                    <ShoppingCart size={14}/> Vender {doseQty} dose{doseQty > 1 ? 's' : ''} · R$ {((bottle.dosePrice || 0) * doseQty).toFixed(2)}
+                </button>
+            </div>
+        </div>
+    );
+};
+
+const DosePanel = ({ products, storeConfig, showNotification, onAddDoseToCart, onClose }) => {
+    const [search, setSearch] = useState('');
+    const [openBottles, setOpenBottles] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [editingBottle, setEditingBottle] = useState(null); // { id, field, value }
+
+    // Carrega garrafas abertas
+    useEffect(() => {
+        if (!storeConfig?.id) return;
+        const storeId = String(storeConfig.id);
+        const ref = collection(firebase.db, 'artifacts', storeId, 'public', 'data', 'open_bottles');
+        const unsub = onSnapshot(ref, snap => {
+            setOpenBottles(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+            setLoading(false);
+        });
+        return () => unsub();
+    }, [storeConfig]);
+
+    const handleOpenBottle = async (product) => {
+        const bottleVol = parseFloat(product.bottleVolumeMl) || 0;
+        const doseVol = parseFloat(product.doseVolumeMl) || 0;
+        const maxDoses = doseVol > 0 ? Math.floor(bottleVol / doseVol) : 0;
+        
+        // --- BLOQUEIO REMOVIDO: Agora permite abrir a garrafa mesmo sem ter os volumes configurados. ---
+
+        const storeId = String(storeConfig.id);
+        // Desconta 1 unidade do estoque
+        const prodRef = doc(firebase.db, 'artifacts', storeId, 'public', 'data', 'products', product.id);
+        await updateDoc(prodRef, { stock: increment(-1) });
+        // Cria garrafa aberta
+        await addDoc(collection(firebase.db, 'artifacts', storeId, 'public', 'data', 'open_bottles'), {
+            productId: product.id,
+            productName: product.name,
+            dosePrice: parseFloat(product.dosePrice) || 0,
+            bottleVolumeMl: bottleVol,
+            doseVolumeMl: doseVol,
+            maxDoses,
+            remainingDoses: maxDoses,
+            openedAt: serverTimestamp(),
+        });
+        showNotification(`Garrafa de ${product.name} aberta!`, 'success');
+    };
+
+    const handleSellDoses = async (bottle, qty) => {
+        if (qty <= 0) return;
+        
+        // NOVO BLOQUEIO: Não deixa VENDER se os dados da garrafa não foram preenchidos
+        if (bottle.maxDoses === 0 || !bottle.bottleVolumeMl || !bottle.doseVolumeMl) {
+            showNotification('Configure os volumes (Garrafa e Dose) na garrafa aberta antes de vender.', 'error');
+            return;
+        }
+
+        // --- RESTRIÇÃO DE ESTOQUE REMOVIDA TEMPORARIAMENTE ---
+        /*
+        if (qty > bottle.remainingDoses) {
+            showNotification(`Apenas ${bottle.remainingDoses} doses disponíveis nesta garrafa.`, 'error');
+            return;
+        }
+        */
+
+        const storeId = String(storeConfig.id);
+        const bottleRef = doc(firebase.db, 'artifacts', storeId, 'public', 'data', 'open_bottles', bottle.id);
+        const newRemaining = bottle.remainingDoses - qty;
+
+        // Adiciona ao carrinho do PDV
+        onAddDoseToCart({
+            id: bottle.productId,
+            name: `${bottle.productName} (Dose ${bottle.doseVolumeMl}ml)`,
+            price: bottle.dosePrice,
+            cost: 0,
+            qty,
+            isDose: true,
+            bottleId: bottle.id,
+        });
+
+        if (newRemaining <= 0) {
+            // Garrafa vazia — remove e pergunta se abre outra
+            await deleteDoc(bottleRef);
+            showNotification(`Garrafa de ${bottle.productName} esvaziada!`, 'success');
+            const product = products.find(p => p.id === bottle.productId);
+            if (product && window.confirm(`Garrafa de ${bottle.productName} esvaziada! Deseja abrir outra?`)) {
+                await handleOpenBottle(product);
+            }
+        } else {
+            await updateDoc(bottleRef, { remainingDoses: newRemaining });
+        }
+    };
+
+    const handleDiscard = async (bottle) => {
+        if (!window.confirm(`Descartar garrafa de ${bottle.productName} com ${bottle.remainingDoses} doses restantes?`)) return;
+        const storeId = String(storeConfig.id);
+        await deleteDoc(doc(firebase.db, 'artifacts', storeId, 'public', 'data', 'open_bottles', bottle.id));
+        showNotification('Garrafa descartada.', 'success');
+        const product = products.find(p => p.id === bottle.productId);
+        if (product && window.confirm(`Deseja abrir outra garrafa de ${bottle.productName}?`)) {
+            await handleOpenBottle(product);
+        }
+    };
+
+    const handleUpdateBottleField = async (bottle, field, value) => {
+        const storeId = String(storeConfig.id);
+        const bottleRef = doc(firebase.db, 'artifacts', storeId, 'public', 'data', 'open_bottles', bottle.id);
+        const parsed = parseFloat(value) || 0;
+        const update = { [field]: parsed };
+        // Recalcula maxDoses e remainingDoses se volume mudar
+        if (field === 'bottleVolumeMl' || field === 'doseVolumeMl') {
+            const newBottleVol = field === 'bottleVolumeMl' ? parsed : bottle.bottleVolumeMl;
+            const newDoseVol = field === 'doseVolumeMl' ? parsed : bottle.doseVolumeMl;
+            if (newDoseVol > 0) {
+                const newMax = Math.floor(newBottleVol / newDoseVol);
+                const usedDoses = bottle.maxDoses - bottle.remainingDoses;
+                update.maxDoses = newMax;
+                update.remainingDoses = Math.max(0, newMax - usedDoses);
+            }
+        }
+        await updateDoc(bottleRef, update);
+        setEditingBottle(null);
+    };
+
+    const filteredProducts = products.filter(p =>
+        p.name.toLowerCase().includes(search.toLowerCase()) ||
+        String(p.barcode || '').includes(search)
+    );
+
+    return (
+        <div className="fixed inset-0 z-50 flex">
+            {/* Overlay */}
+            <div className="flex-1 bg-black/40" onClick={onClose}/>
+
+            {/* Painel */}
+            <div className="w-[480px] bg-white flex flex-col h-full shadow-2xl">
+                {/* Header */}
+                <div className="bg-purple-700 text-white p-4 flex items-center justify-between flex-shrink-0">
+                    <div className="flex items-center gap-2">
+                        <Wine size={22}/>
+                        <div>
+                            <h2 className="font-bold text-lg leading-tight">Controle de Doses</h2>
+                            <p className="text-purple-200 text-xs">{openBottles.length} garrafa(s) aberta(s)</p>
+                        </div>
+                    </div>
+                    <button onClick={onClose} className="p-2 hover:bg-purple-600 rounded-lg">
+                        <X size={20}/>
+                    </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto flex flex-col">
+                    {/* Garrafas abertas */}
+                    <div className="p-4 border-b">
+                        <h3 className="text-xs font-bold text-slate-500 uppercase mb-3 flex items-center gap-1">
+                            <span className="w-2 h-2 bg-green-500 rounded-full inline-block"></span>
+                            Garrafas Abertas
+                        </h3>
+
+                        {loading && <p className="text-sm text-slate-400 text-center py-4">Carregando...</p>}
+
+                        {!loading && openBottles.length === 0 && (
+                            <p className="text-sm text-slate-400 text-center py-4 italic">Nenhuma garrafa aberta. Abra uma abaixo.</p>
+                        )}
+
+                        <div className="space-y-3">
+                            {openBottles.map(bottle => (
+                                <BottleCard
+                                    key={bottle.id}
+                                    bottle={bottle}
+                                    onSell={handleSellDoses}
+                                    onDiscard={handleDiscard}
+                                    editingBottle={editingBottle}
+                                    setEditingBottle={setEditingBottle}
+                                    onUpdateField={handleUpdateBottleField}
+                                />
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* Abrir nova garrafa */}
+                    <div className="p-4">
+                        <h3 className="text-xs font-bold text-slate-500 uppercase mb-3">Abrir Nova Garrafa</h3>
+                        <div className="relative mb-3">
+                            <Search className="absolute left-3 top-2.5 text-slate-400" size={16}/>
+                            <input
+                                className="w-full pl-9 pr-4 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-400 outline-none"
+                                placeholder="Buscar produto..."
+                                value={search}
+                                onChange={e => setSearch(e.target.value)}
+                            />
+                        </div>
+                        {search.length > 1 && (
+                            <div className="bg-white border rounded-lg overflow-hidden shadow-sm max-h-60 overflow-y-auto">
+                                {filteredProducts.slice(0, 10).map(p => {
+                                    const maxDoses = p.doseVolumeMl > 0 ? Math.floor((p.bottleVolumeMl || 0) / p.doseVolumeMl) : 0;
+                                    return (
+                                        <div
+                                            key={p.id}
+                                            className="p-3 border-b hover:bg-purple-50 cursor-pointer flex justify-between items-center"
+                                            onClick={() => { handleOpenBottle(p); setSearch(''); }}
+                                        >
+                                            <div>
+                                                <p className="font-bold text-sm text-slate-800">{p.name}</p>
+                                                <p className="text-xs text-slate-400">
+                                                    {maxDoses > 0
+                                                        ? `${maxDoses} doses de ${p.doseVolumeMl}ml · R$ ${(p.dosePrice || 0).toFixed(2)}/dose`
+                                                        : <span className="text-amber-500">⚠ Configure volume e dose no cadastro</span>
+                                                    }
+                                                </p>
+                                            </div>
+                                            <div className="text-right text-xs text-slate-500">
+                                                <p>Estoque: {p.stock || 0}</p>
+                                                <span className="text-purple-600 font-bold text-xs">+ Abrir</span>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct, clients = [], setClients, feeProfiles = [], onNewSale, showNotification, companyInfo, storeConfig}) => {
   const [cart, setCart] = useState([]);
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('');
   const [showComandas, setShowComandas] = useState(false);
+
+  const [showDosePanel, setShowDosePanel] = useState(false);
 
   const [sangriaModalOpen, setSangriaModalOpen] = useState(false);
   const [sangriaData, setSangriaData] = useState({ value: '', password: '', reason: '' });
@@ -778,6 +1089,7 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
         
         const matchesTerm = p.name.toLowerCase().includes(term) ||
           (p.cbaCode && p.cbaCode.includes(term)) ||
+          (p.extraBarcodes && p.extraBarcodes.some(bc => bc.includes(term))) ||
           (p.barcode && p.barcode.includes(term));
 
         return isVisibleType && matchesTerm;
@@ -788,7 +1100,7 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
   const handleSearchSubmit = (e) => {
       if (e.key === 'Enter') {
           // 1. Se tiver um código exato, adiciona direto
-          const exactMatch = products.find(p => p.cbaCode === searchTerm || p.barcode === searchTerm);
+          const exactMatch = products.find(p => p.cbaCode === searchTerm || p.barcode === searchTerm || (p.extraBarcodes && p.extraBarcodes.includes(searchTerm)));
           if (exactMatch) {
               addToCart(exactMatch);
               setSearchTerm('');
@@ -819,7 +1131,41 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
               showNotification={showNotification}
               onSendToCart={handleReceiveFromComanda}
               onClose={() => setShowComandas(false)}
+              renderDosePanel={(onClosePanel, onAddDose) => (
+                  <div className="absolute inset-0 z-[60]">
+                      <DosePanel
+                          products={products}
+                          storeConfig={storeConfig}
+                          showNotification={showNotification}
+                          onAddDoseToCart={onAddDose}
+                          onClose={onClosePanel}
+                      />
+                  </div>
+              )}
           />
+      );
+  }
+
+  if (showDosePanel) {
+      return (
+          <div className="relative h-full">
+              {/* Mantém o PDV atrás */}
+              <DosePanel
+                  products={products}
+                  storeConfig={storeConfig}
+                  showNotification={showNotification}
+                  onAddDoseToCart={(doseItem) => {
+                      setCart(prev => {
+                          const key = doseItem.bottleId; // chave única por garrafa
+                          const exists = prev.find(i => i.bottleId === key);
+                          if (exists) return prev.map(i => i.bottleId === key ? {...i, qty: i.qty + doseItem.qty} : i);
+                          return [...prev, doseItem];
+                      });
+                      setShowDosePanel(false);
+                  }}
+                  onClose={() => setShowDosePanel(false)}
+              />
+          </div>
       );
   }
 
@@ -855,10 +1201,12 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
     const itemInCart = cart.find(i => i.id === product.id);
     const cartQty = itemInCart ? itemInCart.qty : 0;
 
-    // Verifica se tem estoque suficiente para a quantidade solicitada
     if (currentStock < cartQty + qtyToAdd) {
-        showNotification(`Estoque insuficiente! Disponível: ${currentStock - cartQty}`, 'error');
-        return;
+        if (!currentUser?.can_sell_without_stock) {
+            showNotification(`Estoque insuficiente! Disponível: ${currentStock - cartQty}`, 'error');
+            return;
+        }
+        showNotification(`⚠️ Estoque insuficiente, mas venda permitida para este usuário.`, 'warning');
     }
 
     const retailPrice = Number(product.price) || 0;
@@ -882,6 +1230,7 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
     
     // Reseta a quantidade para 1 após adicionar com sucesso
     setAddQty(1);
+    setTimeout(() => searchInputRef.current?.focus(), 50);
   };
 
   const updateQty = (id, delta) => {
@@ -891,11 +1240,12 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
     if (delta > 0) {
         const product = products.find(p => p.id === (itemInCart.originalId || itemInCart.id));
         const currentStock = getDisplayStock(product, products);
-        if (itemInCart.qty >= currentStock) {
+        if (itemInCart.qty >= currentStock && !currentUser?.can_sell_without_stock) {
             showNotification('Estoque máximo atingido.', 'error');
             return;
         }
     }
+    
     const newQty = itemInCart.qty + delta;
     if (newQty <= 0) {
       setCart(cart.filter(item => item.id !== id));
@@ -1204,6 +1554,12 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
             <div className="flex items-center gap-1">
                 <button onClick={() => setShowComandas(true)} className="bg-white border border-indigo-200 text-indigo-700 px-3 py-1.5 rounded-md font-bold hover:bg-indigo-50 flex items-center gap-1.5 text-xs shadow-sm">
                     <Utensils size={14}/> Comandas
+                </button>
+                <button 
+                    onClick={() => setShowDosePanel(true)} 
+                    className="bg-white border border-purple-200 text-purple-700 px-3 py-1.5 rounded-md font-bold hover:bg-purple-50 flex items-center gap-1.5 text-xs shadow-sm"
+                >
+                    <Wine size={14}/> Doses
                 </button>
                 <button onClick={() => setShowHistory(true)} className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors" title="Histórico">
                     <Clock size={18}/>
@@ -2560,13 +2916,18 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
   const [taxProfiles, setTaxProfiles] = useState([]);
   
   // ESTADOS USUÁRIOS
-  const [newUser, setNewUser] = useState({ username: '', password: '', role: 'cashier' });
+  const [newUser, setNewUser] = useState({ username: '', password: '', role: 'cashier', can_sell_without_stock: false });
   const [storeUsers, setStoreUsers] = useState([]); 
 
   const [editingUserId, setEditingUserId] = useState(null);
 
   const handleEditUserClick = (user) => {
-      setNewUser({ username: user.username, password: user.password, role: user.role || 'cashier' });
+      setNewUser({ 
+          username: user.username, 
+          password: user.password, 
+          role: user.role || 'cashier',
+          can_sell_without_stock: user.can_sell_without_stock || false  
+      });
       setEditingUserId(user.id);
       // Foca no input para facilitar
       document.querySelector('input[placeholder="Ex: caixa01"]')?.focus();
@@ -2787,7 +3148,8 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
             await updateDoc(userDoc, { 
                 username: newUser.username, 
                 password: newUser.password, 
-                role: newUser.role 
+                role: newUser.role,
+                can_sell_without_stock: newUser.can_sell_without_stock || false 
             });
             showNotification('Usuário atualizado!', 'success');
             setEditingUserId(null); // Sai do modo edição
@@ -2993,6 +3355,19 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
                       </select>
                   </div>
 
+                  <div className="flex flex-col justify-end pb-1">
+                    <label className="text-xs font-bold text-indigo-700 mb-1">Vender s/ Estoque</label>
+                    <label className="flex items-center gap-2 cursor-pointer h-[38px]">
+                        <input
+                            type="checkbox"
+                            className="w-4 h-4 rounded"
+                            checked={newUser.can_sell_without_stock || false}
+                            onChange={e => setNewUser({...newUser, can_sell_without_stock: e.target.checked})}
+                        />
+                        <span className="text-xs text-indigo-600 font-bold">Permitido</span>
+                    </label>
+                </div>
+
                   {/* AQUI ESTÁ A CORREÇÃO DOS BOTÕES DE AÇÃO */}
                   <div className="flex gap-1">
                       {editingUserId && (
@@ -3016,13 +3391,19 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
 
                <div className="border rounded overflow-hidden">
                    <table className="w-full text-sm text-left">
-                       <thead className="bg-slate-50 uppercase text-xs text-slate-500"><tr><th className="p-3">Usuário</th><th className="p-3">Função</th><th className="p-3">Status</th><th className="p-3 text-right">Ação</th></tr></thead>
+                       <thead className="bg-slate-50 uppercase text-xs text-slate-500"><tr><th className="p-3">Usuário</th><th className="p-3">Função</th><th className="p-3">Status</th><th className="p-3">Vender s/ Estoque</th><th className="p-3 text-right">Ação</th></tr></thead>
                        <tbody className="divide-y divide-slate-100">
                            {storeUsers.map(u => (
                                <tr key={u.id} className="hover:bg-slate-50">
                                    <td className="p-3 font-bold text-slate-700">{u.username}</td>
                                    <td className="p-3"><span className={`text-[10px] uppercase font-bold px-2 py-1 rounded ${u.role === 'admin' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}`}>{u.role === 'admin' ? 'Gerente' : 'Caixa'}</span></td>
                                    <td className="p-3"><span className={`text-[10px] font-bold px-2 py-1 rounded ${u.active !== false ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{u.active !== false ? 'Ativo' : 'Bloqueado'}</span></td>
+
+                                   <td className="p-3">
+                                      <span className={`text-[10px] font-bold px-2 py-1 rounded ${u.can_sell_without_stock ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-400'}`}>
+                                          {u.can_sell_without_stock ? 'Sim' : 'Não'}
+                                      </span>
+                                  </td>
                                    
                                    {/* --- AQUI VAI O TRECHO 2 (CÉLULA DA TABELA) --- */}
                                    <td className="p-3 text-right flex justify-end gap-2">
@@ -3130,6 +3511,7 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
   const [showCashierEmitModal, setShowCashierEmitModal] = useState({ open: false, sale: null });
   const [realtimeTransactions, setRealtimeTransactions] = useState([]);
   const [transactionCategories, setTransactionCategories] = useState([]);
+  const [showNonFiscalStep, setShowNonFiscalStep] = useState(false);
 
   // --- CORREÇÃO: Estado EXCLUSIVO para clientes do Supabase ---
   // Isso garante que não usamos dados antigos do Firebase/LocalStorage
@@ -3277,14 +3659,18 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
             // A. Estoque
             const originalProd = products.find(p => p.id === (item.originalId || item.id));
             if (originalProd) {
-                const updatePayload = { stock: increment(-item.qty), lastSale: serverTimestamp() };
                 if (originalProd.itemType === 'pack' && originalProd.parentId && originalProd.conversionFactor) {
-                    const parentRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'products', originalProd.parentId);
+                    const parentProd = products.find(p => p.id === originalProd.parentId);
+                    const currentParentStock = parentProd?.stock || 0;
                     const qtyToDeduct = item.qty * originalProd.conversionFactor;
-                    batch.update(parentRef, { stock: increment(-qtyToDeduct), lastSale: serverTimestamp() });
+                    const newParentStock = Math.max(0, currentParentStock - qtyToDeduct);
+                    const parentRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'products', originalProd.parentId);
+                    batch.update(parentRef, { stock: newParentStock, lastSale: serverTimestamp() });
                 } else {
+                    const currentStock = originalProd.stock || 0;
+                    const newStock = Math.max(0, currentStock - item.qty);
                     const productRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'products', originalProd.id);
-                    batch.update(productRef, updatePayload);
+                    batch.update(productRef, { stock: newStock, lastSale: serverTimestamp() });
                 }
             }
 
@@ -3336,8 +3722,14 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
         }
 
         // Modal de Nota
-        const shouldAskToEmit = !sale.isLoss && (currentUser?.role === 'cashier' || currentUser?.role === 'admin');
-        if (shouldAskToEmit) {
+        const hasDoseItems = sale.items?.some(i => i.isDose);
+        const shouldAskToEmit = !sale.isLoss && !hasDoseItems && (currentUser?.role === 'cashier' || currentUser?.role === 'admin');
+
+        if (hasDoseItems) {
+            // Dose: cupom não fiscal direto, sem perguntar NF-e
+            printReceipt(finalSale, store.companyInfo);
+            showNotification('Venda de doses registrada!', 'success');
+        } else if (shouldAskToEmit) {
             setShowCashierEmitModal({ open: true, sale: finalSale });
         } else {
             showNotification(sale.isLoss ? 'Perca registrada.' : 'Venda realizada!', 'success');
@@ -3775,35 +4167,82 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
             )}
 
             {/* --- NOVO MODAL: PERGUNTA AO CAIXA SE QUER EMITIR NOTA --- */}
-            <Modal isOpen={showCashierEmitModal.open} onClose={() => setShowCashierEmitModal({open:false, sale:null})} title="Emissão Fiscal">
+            <Modal 
+                isOpen={showCashierEmitModal.open} 
+                onClose={() => { 
+                    setShowCashierEmitModal({open:false, sale:null}); 
+                    setShowNonFiscalStep(false);  // ← adicionar isso
+                }} 
+                title="Emissão Fiscal"
+            >
                 <div className="text-center p-4">
-                    <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4 text-blue-600">
-                        <FileText size={32} />
-                    </div>
-                    <h3 className="text-xl font-bold text-slate-800 mb-2">Venda Finalizada!</h3>
-                    <p className="text-slate-600 mb-6">Deseja emitir a Nota Fiscal (NFC-e) agora?</p>
-                    
-                    <div className="grid grid-cols-2 gap-3">
-                        <button 
-                            onClick={() => {
-                                setShowCashierEmitModal({open:false, sale:null});
-                                showNotification('Venda salva. Nota pendente.', 'success');
-                            }}
-                            className="py-3 border border-slate-300 rounded font-bold text-slate-600 hover:bg-slate-50"
-                        >
-                            Não Emitir
-                        </button>
-                        <button 
-                            onClick={() => {
-                                handleEmitNFe(showCashierEmitModal.sale);
-                                setShowCashierEmitModal({open:false, sale:null});
-                            }}
-                            className="py-3 bg-blue-600 text-white rounded font-bold hover:bg-blue-700 shadow-lg"
-                        >
-                            SIM, EMITIR
-                        </button>
-                    </div>
-                </div>
+                  {!showNonFiscalStep ? (
+                      // PASSO 1: Emitir NF-e?
+                      <>
+                          <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4 text-blue-600">
+                              <FileText size={32} />
+                          </div>
+                          <h3 className="text-xl font-bold text-slate-800 mb-2">Venda Finalizada!</h3>
+                          <p className="text-slate-600 mb-6">Deseja emitir a Nota Fiscal (NFC-e) agora?</p>
+                          <div className="grid grid-cols-2 gap-3">
+                              <button
+                                  onClick={() => setShowNonFiscalStep(true)}
+                                  className="py-3 border border-slate-300 rounded font-bold text-slate-600 hover:bg-slate-50"
+                              >
+                                  Não Emitir
+                              </button>
+                              <button
+                                  onClick={() => {
+                                      handleEmitNFe(showCashierEmitModal.sale);
+                                      setShowCashierEmitModal({ open: false, sale: null });
+                                      setShowNonFiscalStep(false);
+                                  }}
+                                  className="py-3 bg-blue-600 text-white rounded font-bold hover:bg-blue-700 shadow-lg"
+                              >
+                                  SIM, EMITIR
+                              </button>
+                          </div>
+                      </>
+                  ) : (
+                      // PASSO 2: Emitir Cupom Não Fiscal?
+                      <>
+                          <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4 text-amber-600">
+                              <Printer size={32} />
+                          </div>
+                          <h3 className="text-xl font-bold text-slate-800 mb-2">Cupom Não Fiscal</h3>
+                          <p className="text-slate-600 mb-6">Deseja imprimir o cupom não fiscal da venda?</p>
+                          <div className="grid grid-cols-2 gap-3">
+                              <button
+                                  onClick={() => {
+                                      setShowCashierEmitModal({ open: false, sale: null });
+                                      setShowNonFiscalStep(false);
+                                      showNotification('Venda salva sem documento.', 'success');
+                                  }}
+                                  className="py-3 border border-slate-300 rounded font-bold text-slate-600 hover:bg-slate-50"
+                              >
+                                  Não Imprimir
+                              </button>
+                              <button
+                                  onClick={() => {
+                                      printReceipt(showCashierEmitModal.sale, store.companyInfo);
+                                      setShowCashierEmitModal({ open: false, sale: null });
+                                      setShowNonFiscalStep(false);
+                                      showNotification('Cupom enviado para impressão.', 'success');
+                                  }}
+                                  className="py-3 bg-amber-500 text-white rounded font-bold hover:bg-amber-600 shadow-lg flex items-center justify-center gap-2"
+                              >
+                                  <Printer size={18}/> Imprimir
+                              </button>
+                          </div>
+                          <button
+                              onClick={() => setShowNonFiscalStep(false)}
+                              className="mt-3 text-xs text-slate-400 hover:underline"
+                          >
+                              ← Voltar
+                          </button>
+                      </>
+                  )}
+              </div>
             </Modal>
           </div>
         </div>

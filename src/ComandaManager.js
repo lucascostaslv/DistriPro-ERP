@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Search, Plus, Minus, Trash2, ArrowRight, User, 
   FileText, CheckSquare, Square, X, Lock, 
-  AlertTriangle, Utensils, ChevronLeft
+  AlertTriangle, Utensils, ChevronLeft, Wine
 } from 'lucide-react';
 import { collection, query, where, onSnapshot, addDoc, updateDoc, doc, deleteDoc, serverTimestamp, arrayUnion, arrayRemove } from "firebase/firestore";
 import { db } from './firebase'; 
@@ -10,7 +10,7 @@ import { db } from './firebase';
 // Formatação Moeda
 const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val);
 
-const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, showNotification, onClose }) => {
+const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, showNotification, onClose, renderDosePanel }) => {
   const [comandas, setComandas] = useState([]);
   const [selectedComanda, setSelectedComanda] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -30,6 +30,44 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
   // Modal de Senha para Exclusão
   const [deleteModal, setDeleteModal] = useState(null); // { comanda }
   const [deletePassword, setDeletePassword] = useState('');
+
+  const [showDoses, setShowDoses] = useState(false);
+
+  // 3. Adicione a função que processa a dose escolhida no modal
+  const handleAddDose = async (doseItem) => {
+      if (!selectedComanda) return showNotification('Selecione uma comanda primeiro.', 'error');
+      
+      try {
+          const comandaRef = doc(db, 'artifacts', String(storeConfig.id), 'public', 'data', 'tabs', selectedComanda.id);
+          
+          // Agrupa se já tiver a MESMA dose (mesma garrafa) na comanda
+          const existingItemIndex = (selectedComanda.items || []).findIndex(i => i.bottleId === doseItem.bottleId);
+          let newItems = [...(selectedComanda.items || [])];
+
+          if (existingItemIndex >= 0) {
+              newItems[existingItemIndex].quantity = (newItems[existingItemIndex].quantity || 1) + doseItem.qty;
+          } else {
+              newItems.push({
+                  uniqueId: Date.now() + Math.random().toString(36).substr(2, 9),
+                  productId: doseItem.id, // ID original
+                  bottleId: doseItem.bottleId, // Crucial para não bugar
+                  isDose: true, // Avisa o sistema que é dose
+                  name: doseItem.name,
+                  price: Number(doseItem.price),
+                  quantity: doseItem.qty,
+                  addedAt: new Date().toISOString(),
+                  addedBy: currentUser?.username
+              });
+          }
+
+          await updateDoc(comandaRef, { items: newItems });
+          setSelectedComanda(prev => ({ ...prev, items: newItems }));
+          showNotification(`Dose adicionada com sucesso!`, 'success');
+          setShowDoses(false); // Fecha o painel após adicionar
+      } catch(e) {
+          showNotification('Erro ao adicionar dose', 'error');
+      }
+  };
 
   // --- 1. LISTENER REALTIME (Sincronização entre caixas) ---
   useEffect(() => {
@@ -183,7 +221,8 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
           name: i.name,
           price: i.price,
           qty: i.quantity || 1,
-          
+          bottleId: i.bottleId,
+          isDose: i.isDose,
           // METADADOS DE RASTREIO (Importante para baixa na comanda)
           source: 'tab',
           tabId: selectedComanda.id,
@@ -285,11 +324,12 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
           <div className="flex-1 flex flex-col h-full bg-white relative">
               {/* HEADER DETALHES */}
               <div className="p-4 border-b flex justify-between items-center bg-slate-50 shadow-sm z-10">
-                  <div>
+                  <div className="min-w-0">
                       <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-                          <User size={20} className="text-indigo-600"/> {selectedComanda.customerName}
-                          {selectedComanda.tableNumber && <span className="text-sm font-normal text-slate-500"> (Mesa {selectedComanda.tableNumber})</span>}
-                      </h2>
+                        <User size={20} className="text-indigo-600 shrink-0"/> 
+                        <span className="truncate">{selectedComanda.customerName}</span>
+                        {selectedComanda.tableNumber && <span className="text-sm font-normal text-slate-500 shrink-0"> (Mesa {selectedComanda.tableNumber})</span>}
+                    </h2>
                       <p className="text-xs text-slate-400">Aberta em {selectedComanda.createdAt?.seconds ? new Date(selectedComanda.createdAt.seconds * 1000).toLocaleString() : '...'}</p>
                   </div>
                   <div className="flex gap-2">
@@ -363,6 +403,12 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
                               {filteredProducts.length === 0 && <div className="p-3 text-slate-400 text-sm">Nenhum produto encontrado.</div>}
                           </div>
                       )}
+                      <button
+                            onClick={() => setShowDoses(true)}
+                            className="bg-purple-100 text-purple-700 px-4 rounded font-bold hover:bg-purple-200 flex items-center gap-2 border border-purple-200 shadow-sm whitespace-nowrap"
+                        >
+                            <Wine size={18}/> <span className="hidden md:inline">Doses</span>
+                        </button>
                   </div>
 
                   {/* LISTA DE ITENS DA COMANDA */}
@@ -488,6 +534,7 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
               </div>
           </div>
       )}
+      {showDoses && renderDosePanel(() => setShowDoses(false), handleAddDose)}
     </div>
   );
 };

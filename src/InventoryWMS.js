@@ -3,14 +3,15 @@ import {
   Search, Plus, Edit, Trash2, Package, Save, X, AlertTriangle, 
   CheckCircle, BarChart3, Boxes, ArrowRightLeft, Lock, ArrowUpCircle, ArrowDownCircle,
   DollarSign, Layers, Calculator, Clock, Share, Copy, Truck, FileText, Calendar, Filter,
-  Download, ChevronLeft, ChevronRight
+  Download, ChevronLeft, ChevronRight, ShoppingCart, Wine
 } from 'lucide-react';
-import { collection, doc, updateDoc, deleteDoc, addDoc, serverTimestamp, increment, query, where, getDocs } from "firebase/firestore";
+import { collection, doc, updateDoc, deleteDoc, addDoc, serverTimestamp, increment, query, where, getDocs, writeBatch} from "firebase/firestore";
 import { db } from './firebase'; 
 import { supabase } from './supabaseClient';
 import PurchaseSuggestion from './PurchaseSuggestion';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { calculateItemTaxes } from './utils/TaxCalculator';
 
 // --- UTILITÁRIOS ---
 const masks = {
@@ -39,7 +40,7 @@ const getDaysDiff = (dateVal) => {
 };
 
 // --- CARD DE MOVIMENTAÇÃO RÁPIDA (ABA 1) ---
-const StockCard = ({ product, getDisplayStock, getParentName, onUpdateStock, onOpenHistory }) => {
+const StockCard = ({ product, onUpdateStock, onEdit, onOpenHistory, getParentName, saidaModo, onAddToSaida, getDisplayStock }) => {
     const [qtyInput, setQtyInput] = useState('');
     const isPack = product.itemType === 'pack';
     const displayStock = getDisplayStock(product);
@@ -126,6 +127,17 @@ const StockCard = ({ product, getDisplayStock, getParentName, onUpdateStock, onO
                      </button>
                 </div>
              </div>
+             {/* Overlay de modo saída */}
+                {saidaModo && (
+                    <button
+                        onClick={() => onAddToSaida(product)}
+                        className="absolute inset-0 bg-red-600/10 hover:bg-red-600/20 border-2 border-red-400 rounded-lg flex items-end justify-center pb-3 transition-all z-20"
+                    >
+                        <span className="bg-red-600 text-white text-xs font-bold px-3 py-1 rounded-full flex items-center gap-1 shadow-lg">
+                            <Plus size={12}/> Adicionar à Saída
+                        </span>
+                    </button>
+                )}
         </div>
     );
 };
@@ -158,7 +170,7 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
       name: '', barcode: '', price: '', wholesalePrice: '', costPrice: '', 
       profitMargin: '', stock: 0, minStock: 5, unit: 'UN', category: 'Geral',
       ncm: '', cest: '', taxProfileId: '', itemType: 'unit', parentId: '', packQuantity: 0,
-      supplierId: '', suppliersHistory: []
+      supplierId: '', suppliersHistory: [],  extraBarcodes: [], doseVolumeMl: '', bottleVolumeMl: '', dosePrice: ''
   };
 
   // --- ESTADOS DE PAGINAÇÃO ---
@@ -215,7 +227,19 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
       barcode: '', quantity: 12, price: '', wholesalePrice: '', costPrice: ''
   });
 
+  const [saidaModo, setSaidaModo] = useState(false);
+    const [saidaCart, setSaidaCart] = useState([]);
+    const [saidaJustificativa, setSaidaJustificativa] = useState('');
+
   const [showSupplierSuggestions, setShowSupplierSuggestions] = useState(false);
+
+    const addToSaidaCart = (product) => {
+        setSaidaCart(prev => {
+            const exists = prev.find(i => i.id === product.id);
+            if (exists) return prev.map(i => i.id === product.id ? {...i, qty: i.qty + 1} : i);
+            return [...prev, { ...product, qty: 1 }];
+        });
+    };
 
   // Carregar Dados Auxiliares (Perfis e Fornecedores)
   useEffect(() => {
@@ -271,7 +295,11 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
           costPrice: prod.cost || prod.costPrice || 0,
           packQuantity: prod.conversionFactor || prod.packQuantity || 0,
           supplierId: prod.supplierId || '',
-          suppliersHistory: prod.suppliersHistory || []
+          suppliersHistory: prod.suppliersHistory || [],
+          extraBarcodes: prod.extraBarcodes || [],
+          doseVolumeMl: prod.doseVolumeMl || '',
+            bottleVolumeMl: prod.bottleVolumeMl || '',
+            dosePrice: prod.dosePrice || '',
       });
       setCreatePackMode(false); 
       setIsModalOpen(true);
@@ -283,6 +311,11 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
       setCreatePackMode(false);
       setIsModalOpen(true);
   };
+
+  const openHistory = (product) => {
+        setSelectedHistoryProduct(product);
+        setIsHistoryOpen(true);
+    };
 
   // Dentro de InventoryWMS.js
 
@@ -383,6 +416,10 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
             category: currentProduct.category || 'Geral',
             ncm: currentProduct.ncm || '',
             unit: currentProduct.unit || 'UN',
+            extraBarcodes: currentProduct.extraBarcodes || [],
+            doseVolumeMl: parseFloat(currentProduct.doseVolumeMl) || 0,
+            bottleVolumeMl: parseFloat(currentProduct.bottleVolumeMl) || 0,
+            dosePrice: parseFloat(currentProduct.dosePrice) || 0,
             
             // TRATAMENTO DO PERFIL FISCAL (Sua correção)
             taxProfileId: finalTaxProfileId || '', 
@@ -649,6 +686,17 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
               >
                   <ArrowRightLeft size={18}/> Rápido
               </button>
+              <button
+                onClick={() => { setSaidaModo(!saidaModo); setSaidaCart([]); setSaidaJustificativa(''); }}
+                className={`ml-auto flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all border-2 ${
+                    saidaModo 
+                    ? 'bg-red-600 text-white border-red-600 shadow-lg' 
+                    : 'border-red-300 text-red-600 hover:bg-red-50'
+                }`}
+            >
+                <ArrowDownCircle size={16}/>
+                {saidaModo ? '🔴 Modo Saída ATIVO' : 'Saída Avulsa'}
+            </button>
               <button 
                 onClick={() => setActiveTab('management')}
                 className={`px-6 py-3 text-sm font-bold flex items-center gap-2 whitespace-nowrap transition-colors ${activeTab === 'management' ? 'bg-indigo-600 text-white' : 'hover:bg-slate-50 text-slate-500'}`}
@@ -698,21 +746,149 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
 
       {/* --- ABA 1: MOVIMENTAÇÃO RÁPIDA --- */}
       {activeTab === 'quick' && (
-          <div className="flex-1 overflow-y-auto">
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 p-1">
-                {paginatedProducts.map(prod => (
-                    <StockCard 
+        <div className="flex gap-4 items-start">
+            {/* Grid de produtos */}
+            <div className={`grid gap-3 transition-all ${saidaModo ? 'grid-cols-2 md:grid-cols-3 flex-1' : 'grid-cols-2 md:grid-cols-3 lg:grid-cols-4 w-full'}`}>
+                {filteredProducts.map(prod => (
+                    <StockCard
                         key={prod.id}
-                        product={prod} 
-                        getDisplayStock={getDisplayStock}
-                        getParentName={getParentName}
+                        product={prod}
                         onUpdateStock={handleUpdateStock}
-                        onOpenHistory={(p) => { setSelectedHistoryProduct(p); setIsHistoryOpen(true); }}
+                        onEdit={handleEdit}
+                        onOpenHistory={openHistory}
+                        getParentName={getParentName}
+                        saidaModo={saidaModo}
+                        onAddToSaida={addToSaidaCart}
+                        getDisplayStock={getDisplayStock}
                     />
                 ))}
             </div>
-          </div>
-      )}
+
+            {/* Painel de saída */}
+            {saidaModo && (
+                <div className="w-80 flex-shrink-0 bg-white border-2 border-red-200 rounded-xl shadow-xl sticky top-4 flex flex-col overflow-hidden">
+                    <div className="bg-red-600 text-white p-3 flex items-center justify-between">
+                        <span className="font-bold flex items-center gap-2">
+                            <ArrowDownCircle size={18}/> Carrinho de Saída
+                        </span>
+                        <span className="bg-white text-red-600 text-xs font-bold px-2 py-0.5 rounded-full">
+                            {saidaCart.length} item(ns)
+                        </span>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto max-h-[50vh]">
+                        {saidaCart.length === 0 ? (
+                            <div className="p-6 text-center text-slate-400 text-sm">
+                                <ShoppingCart size={32} className="mx-auto mb-2 opacity-20"/>
+                                Clique nos produtos para adicionar
+                            </div>
+                        ) : (
+                            <table className="w-full text-sm">
+                                <tbody className="divide-y divide-slate-100">
+                                    {saidaCart.map(item => (
+                                        <tr key={item.id} className="hover:bg-red-50">
+                                            <td className="p-2 text-xs font-medium text-slate-700 leading-tight">
+                                                {item.name}
+                                                <span className="block text-[10px] text-slate-400">{item.unit}</span>
+                                            </td>
+                                            <td className="p-2 w-20">
+                                                <div className="flex items-center gap-1">
+                                                    <button
+                                                        onClick={() => setSaidaCart(prev =>
+                                                            prev.map(i => i.id === item.id
+                                                                ? {...i, qty: Math.max(1, i.qty - 1)}
+                                                                : i
+                                                            )
+                                                        )}
+                                                        className="w-5 h-5 bg-slate-200 rounded text-xs font-bold hover:bg-slate-300 flex items-center justify-center"
+                                                    >−</button>
+                                                    <input
+                                                        type="number"
+                                                        min="1"
+                                                        value={item.qty}
+                                                        onChange={e => setSaidaCart(prev =>
+                                                            prev.map(i => i.id === item.id
+                                                                ? {...i, qty: Math.max(1, Number(e.target.value) || 1)}
+                                                                : i
+                                                            )
+                                                        )}
+                                                        className="w-8 text-center border rounded text-xs font-bold p-0.5"
+                                                    />
+                                                    <button
+                                                        onClick={() => setSaidaCart(prev =>
+                                                            prev.map(i => i.id === item.id ? {...i, qty: i.qty + 1} : i)
+                                                        )}
+                                                        className="w-5 h-5 bg-slate-200 rounded text-xs font-bold hover:bg-slate-300 flex items-center justify-center"
+                                                    >+</button>
+                                                </div>
+                                            </td>
+                                            <td className="p-2 w-8">
+                                                <button
+                                                    onClick={() => setSaidaCart(prev => prev.filter(i => i.id !== item.id))}
+                                                    className="text-red-300 hover:text-red-600"
+                                                >
+                                                    <Trash2 size={14}/>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        )}
+                    </div>
+
+                    {/* Justificativa + Confirmar */}
+                    <div className="p-3 border-t bg-amber-50 space-y-2">
+                        <label className="text-[10px] font-bold text-amber-700 uppercase block">Justificativa (obrigatória)</label>
+                        <select
+                            className="w-full border p-2 rounded text-sm bg-white"
+                            value={saidaJustificativa}
+                            onChange={e => setSaidaJustificativa(e.target.value)}
+                        >
+                            <option value="">Selecione o motivo...</option>
+                            <option value="DEVOLUCAO">Devolução ao Fornecedor</option>
+                            <option value="BONIFICACAO">Bonificação / Brinde</option>
+                            <option value="CONSUMO_INTERNO">Consumo Interno</option>
+                            <option value="PERDA">Perda / Avaria</option>
+                            <option value="AJUSTE">Ajuste de Inventário</option>
+                            <option value="OUTRO">Outro</option>
+                        </select>
+                        <button
+                            disabled={saidaCart.length === 0 || !saidaJustificativa}
+                            onClick={async () => {
+                                if (!saidaJustificativa) return showNotification('Selecione uma justificativa.', 'error');
+                                if (!window.confirm(`Confirma a baixa de ${saidaCart.length} item(ns)?`)) return;
+                                try {
+                                    const storeId = String(storeConfig.id);
+                                    const batch = writeBatch(db);
+                                    saidaCart.forEach(item => {
+                                        const ref = doc(db, 'artifacts', storeId, 'public', 'data', 'products', item.id);
+                                        batch.update(ref, { stock: increment(-item.qty) });
+                                    });
+                                    await addDoc(collection(db, 'artifacts', storeId, 'public', 'data', 'stock_movements'), {
+                                        type: 'SAIDA_AVULSA',
+                                        justificativa: saidaJustificativa,
+                                        items: saidaCart.map(i => ({ id: i.id, name: i.name, qty: i.qty })),
+                                        createdAt: serverTimestamp(),
+                                    });
+                                    await batch.commit();
+                                    showNotification('Baixa de estoque realizada!', 'success');
+                                    setSaidaCart([]);
+                                    setSaidaJustificativa('');
+                                    setSaidaModo(false);
+                                } catch(e) {
+                                    showNotification('Erro: ' + e.message, 'error');
+                                }
+                            }}
+                            className="w-full bg-red-600 text-white py-2 rounded font-bold hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-sm"
+                        >
+                            <ArrowDownCircle size={15}/> Confirmar Baixa
+                        </button>
+                    </div>
+                </div>
+            )}
+        </div>
+    )}
 
       {/* --- ABA 2: CADASTRO E GESTÃO --- */}
       {activeTab === 'management' && (
@@ -896,6 +1072,12 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                     >
                     <Truck size={18}/> Fornecedores & Custos
                     </button>
+                    <button 
+                        onClick={() => setEditTab('taxes')}
+                        className={`px-6 py-3 text-sm font-bold flex items-center gap-2 border-b-2 transition-colors ${editTab === 'taxes' ? 'border-emerald-600 text-emerald-600 bg-white' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+                    >
+                        <Calculator size={18}/> Impostos
+                    </button>
                 </div>
 
                {/* BODY DO MODAL - CORRIGIDO E UNIFICADO */}
@@ -960,6 +1142,69 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                                         onChange={e => setCurrentProduct({...currentProduct, barcode: masks.ean(e.target.value)})}
                                         placeholder="Sem GTIN"
                                     />
+                                </div>
+                                {/* Códigos de Barras Adicionais */}
+                                <div className="md:col-span-12">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase flex items-center gap-1 mb-1">
+                                        Códigos de Barras Adicionais
+                                        <span className="text-slate-300 font-normal normal-case">(promoções, embalagens alternativas)</span>
+                                    </label>
+                                    <div className="flex flex-wrap gap-2 mb-2">
+                                        {(currentProduct.extraBarcodes || []).map((bc, idx) => (
+                                            <span key={idx} className="flex items-center gap-1 bg-slate-100 border border-slate-200 px-2 py-1 rounded text-xs font-mono text-slate-700">
+                                                {bc}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setCurrentProduct(prev => ({
+                                                        ...prev,
+                                                        extraBarcodes: prev.extraBarcodes.filter((_, i) => i !== idx)
+                                                    }))}
+                                                    className="text-red-400 hover:text-red-600 ml-1"
+                                                >
+                                                    <X size={12}/>
+                                                </button>
+                                            </span>
+                                        ))}
+                                        {(currentProduct.extraBarcodes || []).length === 0 && (
+                                            <span className="text-xs text-slate-400 italic">Nenhum código adicional</span>
+                                        )}
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <input
+                                            id="extraBarcodeInput"
+                                            className="flex-1 border p-2 rounded text-sm font-mono"
+                                            placeholder="Digite ou escaneie o código adicional..."
+                                            onKeyDown={e => {
+                                                if (e.key === 'Enter' && e.target.value.trim()) {
+                                                    const val = e.target.value.trim();
+                                                    if (!(currentProduct.extraBarcodes || []).includes(val)) {
+                                                        setCurrentProduct(prev => ({
+                                                            ...prev,
+                                                            extraBarcodes: [...(prev.extraBarcodes || []), val]
+                                                        }));
+                                                    }
+                                                    e.target.value = '';
+                                                }
+                                            }}
+                                        />
+                                        <button
+                                            type="button"
+                                            className="bg-slate-200 text-slate-700 px-3 rounded hover:bg-slate-300 text-xs font-bold"
+                                            onClick={() => {
+                                                const input = document.getElementById('extraBarcodeInput');
+                                                const val = input.value.trim();
+                                                if (val && !(currentProduct.extraBarcodes || []).includes(val)) {
+                                                    setCurrentProduct(prev => ({
+                                                        ...prev,
+                                                        extraBarcodes: [...(prev.extraBarcodes || []), val]
+                                                    }));
+                                                    input.value = '';
+                                                }
+                                            }}
+                                        >
+                                            + Adicionar
+                                        </button>
+                                    </div>
                                 </div>
                                 <div className="md:col-span-6">
                                     <label className="text-[10px] font-bold text-slate-500 uppercase">Descrição</label>
@@ -1064,6 +1309,51 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                                         <option value="">-- Selecione --</option>
                                         {taxProfiles.map(tp => <option key={tp.id} value={tp.id}>{tp.name}</option>)}
                                     </select>
+                                </div>
+                                {/* --- CONFIGURAÇÃO DE DOSES --- */}
+                                <div className="md:col-span-12 mt-2 pt-4 border-t border-slate-200">
+                                    <h4 className="font-bold text-slate-700 mb-3 flex items-center gap-2 text-sm">
+                                        <Wine size={16} className="text-purple-500"/> Configuração de Doses
+                                        <span className="text-[10px] font-normal text-slate-400">(opcional — preencha se este produto é vendido por dose no PDV)</span>
+                                    </h4>
+                                    <div className="grid grid-cols-3 gap-4">
+                                        <div>
+                                            <label className="text-[10px] font-bold text-slate-500 uppercase">Volume da Garrafa (ml)</label>
+                                            <input
+                                                type="number"
+                                                className="w-full border p-2 rounded text-sm"
+                                                placeholder="Ex: 1000"
+                                                value={currentProduct.bottleVolumeMl}
+                                                onChange={e => setCurrentProduct({...currentProduct, bottleVolumeMl: e.target.value})}
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-[10px] font-bold text-slate-500 uppercase">Volume por Dose (ml)</label>
+                                            <input
+                                                type="number"
+                                                className="w-full border p-2 rounded text-sm"
+                                                placeholder="Ex: 50"
+                                                value={currentProduct.doseVolumeMl}
+                                                onChange={e => setCurrentProduct({...currentProduct, doseVolumeMl: e.target.value})}
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-[10px] font-bold text-slate-500 uppercase">Preço da Dose (R$)</label>
+                                            <input
+                                                type="number"
+                                                className="w-full border p-2 rounded text-sm"
+                                                placeholder="Ex: 8.00"
+                                                value={currentProduct.dosePrice}
+                                                onChange={e => setCurrentProduct({...currentProduct, dosePrice: e.target.value})}
+                                            />
+                                        </div>
+                                        {currentProduct.bottleVolumeMl > 0 && currentProduct.doseVolumeMl > 0 && (
+                                            <div className="col-span-3 bg-purple-50 border border-purple-200 rounded p-2 text-xs text-purple-700 flex items-center gap-2">
+                                                <Wine size={14}/>
+                                                Esta garrafa rende aproximadamente <strong>{Math.floor(currentProduct.bottleVolumeMl / currentProduct.doseVolumeMl)} doses</strong> de {currentProduct.doseVolumeMl}ml cada.
+                                            </div>
+                                        )}
+                                    </div>
                                 </div>
                                 <div className="md:col-span-2">
                                     <label className="text-[10px] font-bold text-slate-500 uppercase">NCM</label>
@@ -1440,6 +1730,95 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                             </div>
                         </div>
                     )}
+
+                    {editTab === 'taxes' && (() => {
+                        const profile = taxProfiles.find(tp => String(tp.id) === String(currentProduct.taxProfileId));
+                        const taxes = profile
+                            ? calculateItemTaxes(
+                                { ...currentProduct, price: currentProduct.price, qty: 1 },
+                                null, // sem cliente (simulação)
+                                null, // sem companyInfo aqui
+                                profile
+                            )
+                            : null;
+                        const price = parseFloat(currentProduct.price) || 0;
+
+                        return (
+                            <div className="space-y-4 animate-in fade-in p-2">
+                                {!profile ? (
+                                    <div className="bg-amber-50 border border-amber-200 p-4 rounded text-amber-700 text-sm flex items-center gap-2">
+                                        <AlertTriangle size={18}/>
+                                        Selecione um Perfil Tributário na aba "Dados Gerais" para visualizar os impostos.
+                                    </div>
+                                ) : (
+                                    <>
+                                        <div className="bg-slate-50 border border-slate-200 p-3 rounded text-xs text-slate-500 flex gap-4">
+                                            <span>Perfil: <strong className="text-slate-700">{profile.name}</strong></span>
+                                            <span>CSOSN: <strong className="text-slate-700">{taxes.csosn}</strong></span>
+                                            <span>CFOP: <strong className="text-slate-700">{taxes.cfop}</strong></span>
+                                            <span>Origem: <strong className="text-slate-700">{taxes.origin === '0' ? 'Nacional' : 'Importado'}</strong></span>
+                                        </div>
+
+                                        <table className="w-full text-sm border-collapse">
+                                            <thead>
+                                                <tr className="bg-slate-100 text-slate-500 uppercase text-xs">
+                                                    <th className="p-3 text-left">Imposto</th>
+                                                    <th className="p-3 text-center">CST / CSOSN</th>
+                                                    <th className="p-3 text-right">Base de Cálculo</th>
+                                                    <th className="p-3 text-right">Alíquota</th>
+                                                    <th className="p-3 text-right">Valor (R$)</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y">
+                                                <tr className="hover:bg-slate-50">
+                                                    <td className="p-3 font-bold text-slate-700">ICMS</td>
+                                                    <td className="p-3 text-center"><span className="bg-purple-100 text-purple-700 px-2 py-0.5 rounded text-xs font-bold">{taxes.csosn}</span></td>
+                                                    <td className="p-3 text-right text-slate-600">{masks.currency(taxes.vBC || price)}</td>
+                                                    <td className="p-3 text-right text-slate-600">{(taxes.pICMS || 0).toFixed(2)}%</td>
+                                                    <td className="p-3 text-right font-bold text-slate-800">{masks.currency(taxes.vICMS || 0)}</td>
+                                                </tr>
+                                                <tr className="hover:bg-slate-50">
+                                                    <td className="p-3 font-bold text-slate-700">PIS</td>
+                                                    <td className="p-3 text-center"><span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-xs font-bold">{taxes.cst_pis_cofins}</span></td>
+                                                    <td className="p-3 text-right text-slate-600">{masks.currency(price)}</td>
+                                                    <td className="p-3 text-right text-slate-600">{taxes.cst_pis_cofins === '07' ? '—' : '0.65%'}</td>
+                                                    <td className="p-3 text-right font-bold text-slate-800">{masks.currency(taxes.vPIS || 0)}</td>
+                                                </tr>
+                                                <tr className="hover:bg-slate-50">
+                                                    <td className="p-3 font-bold text-slate-700">COFINS</td>
+                                                    <td className="p-3 text-center"><span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-xs font-bold">{taxes.cst_pis_cofins}</span></td>
+                                                    <td className="p-3 text-right text-slate-600">{masks.currency(price)}</td>
+                                                    <td className="p-3 text-right text-slate-600">{taxes.cst_pis_cofins === '07' ? '—' : '3.00%'}</td>
+                                                    <td className="p-3 text-right font-bold text-slate-800">{masks.currency(taxes.vCOFINS || 0)}</td>
+                                                </tr>
+                                                {(taxes.vIPI > 0) && (
+                                                    <tr className="hover:bg-slate-50">
+                                                        <td className="p-3 font-bold text-slate-700">IPI</td>
+                                                        <td className="p-3 text-center"><span className="bg-orange-100 text-orange-700 px-2 py-0.5 rounded text-xs font-bold">50</span></td>
+                                                        <td className="p-3 text-right text-slate-600">{masks.currency(price)}</td>
+                                                        <td className="p-3 text-right text-slate-600">{(taxes.pIPI || 0).toFixed(2)}%</td>
+                                                        <td className="p-3 text-right font-bold text-slate-800">{masks.currency(taxes.vIPI)}</td>
+                                                    </tr>
+                                                )}
+                                            </tbody>
+                                            <tfoot>
+                                                <tr className="bg-slate-50 font-bold">
+                                                    <td colSpan={4} className="p-3 text-right text-slate-600">Total Impostos sobre Preço de Venda:</td>
+                                                    <td className="p-3 text-right text-red-600">
+                                                        {masks.currency((taxes.vICMS || 0) + (taxes.vPIS || 0) + (taxes.vCOFINS || 0) + (taxes.vIPI || 0))}
+                                                    </td>
+                                                </tr>
+                                            </tfoot>
+                                        </table>
+
+                                        <p className="text-[10px] text-slate-400 italic">
+                                            * Simulação baseada no preço de venda atual (R$ {price.toFixed(2)}) com 1 unidade, sem cliente definido.
+                                        </p>
+                                    </>
+                                )}
+                            </div>
+                        );
+                    })()}
                 </div>
 
                 <div className="p-4 bg-slate-50 border-t flex justify-end gap-2 shrink-0">
