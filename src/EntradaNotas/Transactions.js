@@ -1,50 +1,60 @@
 import React, { useState, useEffect } from 'react';
-import { PlusCircle, FileText, ScrollText, Minus, Save, X, Calendar, DollarSign, Tag, CheckSquare, Settings } from 'lucide-react';
-import { collection, addDoc, serverTimestamp, getDocs } from 'firebase/firestore';
+import { PlusCircle, FileText, ScrollText, Minus, Save, X, Calendar, DollarSign, Tag, CheckSquare, Settings, Landmark} from 'lucide-react';
+import { collection, addDoc, serverTimestamp, getDocs, writeBatch, doc, increment } from 'firebase/firestore';
 import { db } from '../firebase'; 
 import EntradaNotas from './EntradaNotas'; 
 import AccountsPayable from './AccountsPayable';
 import FiscalInvoices from './FiscalInvoices'; 
+import BankAccountsManager from './BankAccountsManager';
+
+const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
 
 const Transactions = (props) => {
   const [activeTab, setActiveTab] = useState('entry'); 
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
   
-  // Lista de categorias (vindo do banco)
+  // Listas do banco
   const [categories, setCategories] = useState([]);
+  const [bankAccounts, setBankAccounts] = useState([]); // <--- NOVO: Contas Bancárias
 
   // Estados para criação rápida de categoria
   const [isAddingCat, setIsAddingCat] = useState(false);
   const [tempCatName, setTempCatName] = useState('');
-  const [tempCatIsOp, setTempCatIsOp] = useState(true); // Novo: Define se a nova cat é operacional
+  const [tempCatIsOp, setTempCatIsOp] = useState(true);
 
-  // Formulário Limpo (Sem flags complexas)
+  // Formulário Atualizado com accountId
   const [expenseForm, setExpenseForm] = useState({
       description: '',
       value: '',
       date: new Date().toISOString().split('T')[0],
-      category: ''
+      category: '',
+      accountId: '' // <--- NOVO: Conta selecionada
   });
 
-  // Carregar categorias ao abrir o modal
+  // Carregar categorias e contas ao abrir o modal
   useEffect(() => {
-      const fetchCategories = async () => {
+      const fetchData = async () => {
           if(!props.storeConfig?.id) return;
           const storeId = String(props.storeConfig.id);
           try {
+              // Busca Categorias
               const catRef = collection(db, 'artifacts', storeId, 'public', 'data', 'transaction_categories');
-              const snap = await getDocs(catRef);
-              setCategories(snap.docs.map(d => ({id: d.id, ...d.data()})));
+              const snapCat = await getDocs(catRef);
+              setCategories(snapCat.docs.map(d => ({id: d.id, ...d.data()})));
+
+              // Busca Contas Bancárias
+              const accRef = collection(db, 'artifacts', storeId, 'public', 'data', 'bank_accounts');
+              const snapAcc = await getDocs(accRef);
+              setBankAccounts(snapAcc.docs.map(d => ({id: d.id, ...d.data()})));
           } catch(e) { console.error(e); }
       };
-      if(isExpenseModalOpen) fetchCategories();
+      if(isExpenseModalOpen) fetchData();
   }, [isExpenseModalOpen, props.storeConfig]);
 
   // Função blindada para converter moeda
   const safeCurrencyToNumber = (val) => {
       if (!val) return 0;
       if (typeof val === 'number') return val;
-      // Remove todos os pontos de milhar e troca a vírgula decimal por ponto
       const cleaned = String(val).replace(/\./g, '').replace(',', '.');
       const result = parseFloat(cleaned);
       return isNaN(result) ? 0 : result;
@@ -56,28 +66,64 @@ const Transactions = (props) => {
           return;
       }
 
-      try {
-          const storeId = String(props.storeConfig.id);
-          const todayStr = new Date().toISOString().split('T')[0];
-          // Se data futura = Pendente, se hoje/passado = Pago
-          const calculatedStatus = expenseForm.date > todayStr ? 'PENDENTE' : 'PAGO';
+      const storeId = String(props.storeConfig.id);
+      const todayStr = new Date().toISOString().split('T')[0];
+      const calculatedStatus = expenseForm.date > todayStr ? 'PENDENTE' : 'PAGO';
+      const amountNum = safeCurrencyToNumber(expenseForm.value);
 
-          await addDoc(collection(db, 'artifacts', storeId, 'public', 'data', 'financial_movements'), {
+      // Trava de segurança: Se for pago hoje, precisa dizer de onde o dinheiro saiu
+      if (calculatedStatus === 'PAGO' && !expenseForm.accountId) {
+          alert("Para despesas pagas hoje ou retroativas, selecione de qual conta o dinheiro saiu.");
+          return;
+      }
+
+      try {
+          const batch = writeBatch(db);
+
+          // 1. Ref da Movimentação Financeira (Despesa)
+          const finRef = doc(collection(db, 'artifacts', storeId, 'public', 'data', 'financial_movements'));
+          batch.set(finRef, {
               type: 'EXPENSE',
               category: expenseForm.category,
               description: expenseForm.description,
-              amount: safeCurrencyToNumber(expenseForm.value), // <--- APLICAÇÃO DA CORREÇÃO AQUI
+              amount: amountNum,
               date: expenseForm.date,
               status: calculatedStatus,
               createdAt: serverTimestamp(),
-              userId: 'manager' 
+              userId: props.currentUser?.id || 'manager',
+              userName: props.currentUser?.username || 'Gerente',
+              accountId: expenseForm.accountId || null // Associa a conta ao gasto
           });
 
-          const msg = calculatedStatus === 'PENDENTE' ? "Agendado no Contas a Pagar!" : "Despesa lançada!";
+          // 2. Se a despesa já está PAGA, desconta da conta bancária imediatamente
+          if (calculatedStatus === 'PAGO' && expenseForm.accountId) {
+              // Registra no extrato da conta
+              const accTxnRef = doc(collection(db, 'artifacts', storeId, 'public', 'data', 'account_transactions'));
+              batch.set(accTxnRef, {
+                  accountId: expenseForm.accountId,
+                  type: 'OUT',
+                  amount: amountNum,
+                  description: `DESPESA: ${expenseForm.description}`,
+                  category: expenseForm.category,
+                  date: expenseForm.date,
+                  createdAt: serverTimestamp(),
+                  userId: props.currentUser?.id || 'manager',
+                  userName: props.currentUser?.username || 'Gerente'
+              });
+
+              // Subtrai o valor do Saldo Atual da Conta
+              const accRef = doc(db, 'artifacts', storeId, 'public', 'data', 'bank_accounts', expenseForm.accountId);
+              batch.update(accRef, { currentBalance: increment(-amountNum) });
+          }
+
+          // Executa tudo ao mesmo tempo (Transação segura)
+          await batch.commit();
+
+          const msg = calculatedStatus === 'PENDENTE' ? "Agendado no Contas a Pagar!" : "Despesa paga e descontada da conta!";
           alert(msg);
           setIsExpenseModalOpen(false);
           setExpenseForm({ 
-              description: '', value: '', date: new Date().toISOString().split('T')[0], category: '' 
+              description: '', value: '', date: todayStr, category: '', accountId: '' 
           });
       } catch (e) {
           console.error(e);
@@ -121,6 +167,12 @@ const Transactions = (props) => {
           <button onClick={() => setActiveTab('invoices')} className={`px-6 py-4 font-bold text-sm flex items-center gap-2 ${activeTab === 'invoices' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-slate-500 hover:bg-slate-50'}`}>
               <FileText size={18}/> Notas Fiscais
           </button>
+          <button 
+            onClick={() => setActiveTab('accounts')}
+            className={`px-4 py-3 text-sm font-bold flex items-center gap-2 border-b-2 transition-colors ${activeTab === 'accounts' ? 'border-indigo-600 text-indigo-600 bg-white' : 'border-transparent text-slate-500 hover:text-slate-700 hover:bg-slate-50'}`}
+        >
+            <Landmark size={18}/> Contas Bancárias
+        </button>
           <div className="flex-1 flex justify-end items-center px-4">
               <button onClick={() => setIsExpenseModalOpen(true)} className="bg-red-100 text-red-700 px-4 py-2 rounded font-bold hover:bg-red-200 flex items-center gap-2 text-sm">
                   <Minus size={16}/> Lançar Despesa
@@ -130,8 +182,16 @@ const Transactions = (props) => {
 
       <div className="flex-1 bg-slate-50 overflow-hidden relative">
           {activeTab === 'entry' && <EntradaNotas storeConfig={props.storeConfig} showNotification={props.showNotification} products={props.products}/>}
-          {activeTab === 'payable' && <AccountsPayable products={props.products} storeConfig={props.storeConfig} />}
-          {activeTab === 'invoices' && <FiscalInvoices storeConfig={props.storeConfig} currentUser={props.currentUser} />}
+          {activeTab === 'payable' && <AccountsPayable products={props.products} storeConfig={props.storeConfig} currentUser={props.currentUser} />}
+          {activeTab === 'invoices' && <FiscalInvoices storeConfig={props.storeConfig} currentUser={props.currentUser} showNotification={props.showNotification || alert}/>}
+          {activeTab === 'accounts' && (
+                <div className="p-4 h-[calc(100vh-150px)] bg-slate-100">
+                    <BankAccountsManager 
+                        storeConfig={props.storeConfig} 
+                        showNotification={props.showNotification || alert} 
+                    />
+                </div>
+           )}
       </div>
 
       {/* MODAL SIMPLIFICADO */}
@@ -184,7 +244,6 @@ const Transactions = (props) => {
                                       <input className="w-full border p-2 rounded text-sm" placeholder="Nome da categoria..." value={tempCatName} onChange={e => setTempCatName(e.target.value)} autoFocus />
                                   </div>
                                   
-                                  {/* NOVO CHECKBOX: DEFINE SE É OPERACIONAL NO CADASTRO */}
                                   <div className="flex items-center gap-2 mb-3">
                                       <input 
                                           type="checkbox" id="newCatOp" 
@@ -204,6 +263,28 @@ const Transactions = (props) => {
                                       </button>
                                   </div>
                               </div>
+                          )}
+                      </div>
+
+                      {/* --- NOVO: SELEÇÃO DE CONTA BANCÁRIA --- */}
+                      <div className="border-t border-slate-100 pt-4 mt-2">
+                          <label className="text-xs font-bold text-slate-500 uppercase block mb-1 flex items-center gap-1">
+                              <Landmark size={12}/> Conta de Saída (Pagamento)
+                          </label>
+                          <select 
+                              className={`w-full border p-2 rounded text-sm bg-white focus:ring-2 outline-none ${expenseForm.date <= new Date().toISOString().split('T')[0] && !expenseForm.accountId ? 'border-red-400 focus:ring-red-200' : 'border-slate-200 focus:ring-indigo-200'}`}
+                              value={expenseForm.accountId} 
+                              onChange={e => setExpenseForm({...expenseForm, accountId: e.target.value})}
+                          >
+                              <option value="">{expenseForm.date <= new Date().toISOString().split('T')[0] ? '-- Selecione a Conta (Obrigatório) --' : '-- Nenhuma (Apenas Agendar) --'}</option>
+                              {bankAccounts.map((acc, i) => (
+                                  <option key={i} value={acc.id}>{acc.name} (Saldo: {formatCurrency(acc.currentBalance)})</option>
+                              ))}
+                          </select>
+                          {expenseForm.date <= new Date().toISOString().split('T')[0] && !expenseForm.accountId ? (
+                              <span className="text-[10px] text-red-500 font-bold mt-1 block">Necessário para debitar o valor do extrato hoje.</span>
+                          ) : expenseForm.date > new Date().toISOString().split('T')[0] && (
+                              <span className="text-[10px] text-slate-400 mt-1 block">O valor só será descontado no dia do pagamento efetivo.</span>
                           )}
                       </div>
                   </div>

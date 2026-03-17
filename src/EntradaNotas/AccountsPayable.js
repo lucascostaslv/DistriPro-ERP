@@ -1,9 +1,12 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Calendar, Search, CheckCircle, Eye, X, Package, 
-  ChevronLeft, ChevronRight, CalendarDays, RefreshCw, Trash2
+  ChevronLeft, ChevronRight, CalendarDays, RefreshCw, Trash2, Landmark
 } from 'lucide-react';
-import { collection, query, orderBy, where, onSnapshot, doc, deleteDoc} from 'firebase/firestore';
+import { 
+  collection, query, orderBy, where, onSnapshot, doc, 
+  deleteDoc, getDocs, writeBatch, increment, serverTimestamp, updateDoc 
+} from 'firebase/firestore';
 import { db } from '../firebase'; 
 
 // Utilitários de formatação
@@ -23,11 +26,17 @@ const formatDate = (dateStr) => {
   } catch (e) { return dateStr; }
 };
 
-const AccountsPayable = ({ products, storeConfig }) => { // Aceita storeConfig para garantir o ID
+const AccountsPayable = ({ products, storeConfig, currentUser }) => { // Aceita storeConfig para garantir o ID
   // Estados de Dados (Separados para evitar conflitos)
   const [rawInvoices, setRawInvoices] = useState([]);
   const [rawExpenses, setRawExpenses] = useState([]);
   const [loading, setLoading] = useState(true);
+
+  // Estados para a conexão bancária
+  const [bankAccounts, setBankAccounts] = useState([]);
+  const [selectedAccountId, setSelectedAccountId] = useState('');
+  const [isPayModalOpen, setIsPayModalOpen] = useState(false);
+  const [pendingPayment, setPendingPayment] = useState(null);
   
   // --- ESTADO DE DATA ---
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -51,6 +60,73 @@ const AccountsPayable = ({ products, storeConfig }) => { // Aceita storeConfig p
     const month = String(currentDate.getMonth() + 1).padStart(2, '0');
     return `${year}-${month}`;
   }, [currentDate]);
+
+
+
+  // Carrega as contas bancárias para o seletor
+  useEffect(() => {
+    if (!storeConfig?.id) return;
+    const fetchAccounts = async () => {
+      const accRef = collection(db, 'artifacts', String(storeConfig.id), 'public', 'data', 'bank_accounts');
+      const snap = await getDocs(accRef);
+      setBankAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    };
+    fetchAccounts();
+  }, [storeConfig]);
+
+  // Função para processar o pagamento no banco e no financeiro
+  const handleConfirmPayment = async () => {
+    if (!selectedAccountId) return alert("Selecione uma conta para o pagamento.");
+    if (!pendingPayment) return;
+
+    const { type, id, inst, invoice, expense } = pendingPayment;
+    const storeId = String(storeConfig.id);
+    const batch = writeBatch(db);
+    const amount = Number(inst?.value || expense?.amount || 0);
+    const description = type === 'INVOICE' 
+        ? `PGTO FORNECEDOR: ${invoice.header.entityName} (Parc. ${inst.number})`
+        : `PGTO DESPESA: ${expense.description}`;
+
+    try {
+        // 1. Registrar a Saída no Extrato da Conta Bancária
+        const accTxnRef = doc(collection(db, 'artifacts', storeId, 'public', 'data', 'account_transactions'));
+        batch.set(accTxnRef, {
+            accountId: selectedAccountId,
+            type: 'OUT',
+            amount: amount,
+            description: description,
+            category: 'Contas a Pagar',
+            date: new Date().toISOString(),
+            createdAt: serverTimestamp(),
+            userName: currentUser?.username || 'Gerente'
+        });
+
+        // 2. Atualizar o Saldo da Conta Bancária
+        const accRef = doc(db, 'artifacts', storeId, 'public', 'data', 'bank_accounts', selectedAccountId);
+        batch.update(accRef, { currentBalance: increment(-amount) });
+
+        // 3. Atualizar o Status no Financeiro Original
+        if (type === 'INVOICE') {
+            const invoiceRef = doc(db, 'artifacts', storeId, 'public', 'data', 'invoices', id);
+            const updatedFinancials = invoice.financials.map(f => 
+                f.number === inst.number ? { ...f, status: 'PAGO', paymentDate: new Date().toISOString(), accountId: selectedAccountId } : f
+            );
+            batch.update(invoiceRef, { financials: updatedFinancials });
+        } else {
+            const expenseRef = doc(db, 'artifacts', storeId, 'public', 'data', 'financial_movements', id);
+            batch.update(expenseRef, { status: 'PAGO', accountId: selectedAccountId });
+        }
+
+        await batch.commit();
+        alert("Pagamento processado com sucesso!");
+        setIsPayModalOpen(false);
+        setPendingPayment(null);
+        setSelectedAccountId('');
+    } catch (e) {
+        console.error(e);
+        alert("Erro ao processar pagamento.");
+    }
+  };
 
   // Controles de Navegação de Data
   const handlePrevMonth = () => setCurrentDate(prev => new Date(prev.getFullYear(), prev.getMonth() - 1, 1));
@@ -169,6 +245,20 @@ const AccountsPayable = ({ products, storeConfig }) => { // Aceita storeConfig p
           alert("Erro ao excluir o documento: " + error.message);
       }
   };
+
+  // Busca as contas bancárias disponíveis
+  useEffect(() => {
+    if (!storeConfig?.id) return;
+    const fetchAccounts = async () => {
+      try {
+        const accRef = collection(db, 'artifacts', String(storeConfig.id), 'public', 'data', 'bank_accounts');
+        const snap = await getDocs(accRef);
+        setBankAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      } catch (e) { console.error("Erro ao buscar contas:", e); }
+    };
+    fetchAccounts();
+  }, [storeConfig, isPayModalOpen]);
+
 
   // --- PROCESSAMENTO E UNIFICAÇÃO ---
   const payableItems = useMemo(() => {
@@ -366,53 +456,63 @@ const AccountsPayable = ({ products, storeConfig }) => { // Aceita storeConfig p
            Nenhuma conta encontrada para <strong>{monthNames[currentDate.getMonth()]}</strong>.
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {itemsToShow.map(item => {
-                const isLate = item.daysToDue < 0 && item.status !== 'PAGO';
-                const isNear = item.daysToDue >= 0 && item.daysToDue <= 5 && item.status !== 'PAGO';
-                const isPaid = item.status === 'PAGO';
-                
-                return (
-                    <div 
-                      key={item.uniqueId} 
-                      onClick={() => setDetailsModal(item.fullInvoice)}
-                      className={`bg-white rounded-lg border shadow-sm p-4 cursor-pointer hover:shadow-md transition-all relative overflow-hidden group 
-                        ${isPaid ? 'border-emerald-200 bg-emerald-50/30' : isLate ? 'border-red-200 bg-red-50' : isNear ? 'border-amber-200 bg-amber-50' : 'border-slate-200'}
-                      `}
-                    >
-                        <div className="flex justify-between items-start mb-2">
-                            <div>
-                                <h4 className="font-bold text-slate-800 text-sm truncate w-48" title={item.supplier}>{item.supplier}</h4>
-                                <div className="flex items-center gap-1 text-[10px] text-slate-500">
-                                    {item.source === 'expense' ? <span className="bg-slate-200 px-1 rounded">DESPESA</span> : <span className="bg-indigo-100 text-indigo-700 px-1 rounded">NOTA</span>}
-                                    <span>#{item.invoiceNumber}</span>
+        <div className="bg-white rounded-lg border shadow-sm overflow-hidden">
+            <table className="w-full text-left border-collapse">
+                <thead className="bg-slate-50 text-[10px] uppercase font-bold text-slate-500 border-b">
+                    <tr>
+                        <th className="p-3">Vencimento</th>
+                        <th className="p-3">Descrição / Fornecedor</th>
+                        <th className="p-3 text-center">Parcela</th>
+                        <th className="p-3 text-right">Valor</th>
+                        <th className="p-3 text-center">Status</th>
+                        <th className="p-3 text-right">Ações</th>
+                    </tr>
+                </thead>
+                <tbody className="divide-y text-sm">
+                    {itemsToShow.map((item) => (
+                        <tr key={item.uniqueId} className="hover:bg-slate-50 transition-colors">
+                            <td className="p-3 font-medium text-slate-700">{formatDate(item.dueDate)}</td>
+                            <td className="p-3">
+                                <p className="font-bold text-slate-700 truncate w-48">{item.supplier}</p>
+                                <p className="text-[10px] text-slate-400 uppercase">{item.source === 'expense' ? 'Despesa' : 'Nota Fiscal'}</p>
+                            </td>
+                            <td className="p-3 text-center text-slate-500">{item.installmentNum}ª</td>
+                            <td className="p-3 text-right font-bold text-slate-900">{formatCurrency(item.value)}</td>
+                            <td className="p-3 text-center">
+                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${item.status === 'PAGO' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                                    {item.status}
+                                </span>
+                            </td>
+                            <td className="p-3 text-right">
+                                <div className="flex justify-end gap-1">
+                                    {item.status !== 'PAGO' && (
+                                        <button 
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                setPendingPayment({ 
+                                                    type: item.source === 'expense' ? 'EXPENSE' : 'INVOICE', 
+                                                    id: item.invoiceId, 
+                                                    inst: { number: item.installmentNum, value: item.value }, 
+                                                    invoice: item.fullInvoice,
+                                                    expense: item.source === 'expense' ? { description: item.supplier, amount: item.value } : null
+                                                });
+                                                setIsPayModalOpen(true);
+                                            }}
+                                            className="p-1.5 bg-emerald-600 text-white rounded hover:bg-emerald-700 transition-colors shadow-sm"
+                                            title="Pagar agora"
+                                        >
+                                            <CheckCircle size={14}/>
+                                        </button>
+                                    )}
+                                    <button onClick={() => setDetailsModal(item.fullInvoice)} className="p-1.5 bg-slate-100 text-slate-600 rounded hover:bg-slate-200">
+                                        <Eye size={14}/>
+                                    </button>
                                 </div>
-                            </div>
-                            <span className={`text-[10px] font-bold px-2 py-1 rounded border ${isPaid ? 'bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
-                                {item.status}
-                            </span>
-                        </div>
-
-                        <div className="flex items-end justify-between mt-4">
-                            <div>
-                                <p className="text-[10px] text-slate-500 uppercase font-bold">Vencimento</p>
-                                <div className="flex items-center gap-1 font-medium text-sm text-slate-700">
-                                    <Calendar size={14}/> {formatDate(item.dueDate)}
-                                </div>
-                                {!isPaid && (
-                                    <p className={`text-[10px] mt-1 font-bold ${isLate ? 'text-red-600' : isNear ? 'text-amber-600' : 'text-slate-400'}`}>
-                                        {item.daysToDue < 0 ? `Atrasado ${Math.abs(item.daysToDue)} dias` : item.daysToDue === 0 ? 'Vence Hoje!' : `Faltam ${item.daysToDue} dias`}
-                                    </p>
-                                )}
-                            </div>
-                            <div className="text-right">
-                                <p className="text-[10px] text-slate-500 uppercase font-bold">Valor</p>
-                                <p className="text-xl font-bold text-slate-800">{formatCurrency(item.value)}</p>
-                            </div>
-                        </div>
-                    </div>
-                );
-            })}
+                            </td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
         </div>
       )}
 
@@ -487,6 +587,34 @@ const AccountsPayable = ({ products, storeConfig }) => { // Aceita storeConfig p
                 </div>
             </div>
          </div>
+      )}
+
+      {/* MODAL DE PAGAMENTO */}
+      {isPayModalOpen && (
+          <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+              <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6">
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-4">
+                      <Landmark size={20} className="text-indigo-600"/> Confirmar Pagamento
+                  </h3>
+                  <div className="space-y-4">
+                      <p className="text-sm">Selecione a conta para debitar <strong>{formatCurrency(pendingPayment?.inst?.value || pendingPayment?.expense?.amount)}</strong>:</p>
+                      <select 
+                          className="w-full border p-2 rounded text-sm bg-white"
+                          value={selectedAccountId}
+                          onChange={e => setSelectedAccountId(e.target.value)}
+                      >
+                          <option value="">-- Escolha a conta --</option>
+                          {bankAccounts.map(acc => (
+                              <option key={acc.id} value={acc.id}>{acc.name} (Saldo: {formatCurrency(acc.currentBalance)})</option>
+                          ))}
+                      </select>
+                      <div className="flex justify-end gap-2 pt-2">
+                          <button onClick={() => setIsPayModalOpen(false)} className="px-4 py-2 text-sm font-bold text-slate-500">Cancelar</button>
+                          <button onClick={handleConfirmPayment} className="px-4 py-2 bg-emerald-600 text-white rounded text-sm font-bold">Confirmar</button>
+                      </div>
+                  </div>
+              </div>
+          </div>
       )}
     </div>
   );

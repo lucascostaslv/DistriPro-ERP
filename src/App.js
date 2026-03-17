@@ -10,7 +10,7 @@ import {
   MapPin,
   Boxes,
   Upload,
-  Loader2, Send, Utensils, Wine
+  Loader2, Send, Utensils, Wine, Landmark
 } from 'lucide-react';
 import { collection, query, where, getDocs, setDoc, doc, updateDoc, getDoc, onSnapshot, increment, writeBatch, serverTimestamp, addDoc, deleteDoc} from "firebase/firestore";
 import logo from './img/LOGO-MAQUINA-PNG.png';
@@ -583,7 +583,7 @@ const printReceipt = (sale, companyInfo) => {
 
 // --- MODULES ---
 
-const Dashboard = ({ sales, products }) => {
+const Dashboard = ({ sales, products, bankAccounts = [] }) => {
   // Estado para fechar o alerta de cobrança (Item 2)
   const [showDueAlert, setShowDueAlert] = useState(true);
 
@@ -644,6 +644,33 @@ const Dashboard = ({ sales, products }) => {
         <CardKPI title="Vendas Hoje" value={sales.filter(s => isToday(s.date)).length} subtext="Pedidos realizados" icon={ShoppingCart} color="bg-indigo-500" />
         <CardKPI title="Estoque Baixo" value={lowStockItems.length} subtext="Itens críticos" icon={AlertTriangle} color="bg-red-500" />
       </div>
+      {/* WIDGET DE SALDO BANCÁRIO */}
+        {bankAccounts.length > 0 && (
+            <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4">
+                <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2">
+                    <Landmark size={18} className="text-indigo-500"/> Saldo por Conta
+                </h3>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {bankAccounts.map(acc => (
+                        <div key={acc.id} className="bg-slate-50 rounded-lg border border-slate-100 p-3 flex flex-col gap-1">
+                            <span className="text-[10px] font-bold text-slate-400 uppercase truncate">{acc.name}</span>
+                            <span className={`text-lg font-bold ${acc.currentBalance < 0 ? 'text-red-600' : 'text-slate-800'}`}>
+                                {formatCurrency(acc.currentBalance)}
+                            </span>
+                            <span className="text-[10px] text-slate-400">
+                                {acc.type === 'CASH' ? '💵 Caixa Físico' : acc.type === 'SAVINGS' ? '🏦 Poupança' : '🏢 Corrente'}
+                            </span>
+                        </div>
+                    ))}
+                    <div className="bg-indigo-50 rounded-lg border border-indigo-100 p-3 flex flex-col gap-1 justify-center">
+                        <span className="text-[10px] font-bold text-indigo-400 uppercase">Total Consolidado</span>
+                        <span className={`text-lg font-bold ${bankAccounts.reduce((a, b) => a + b.currentBalance, 0) < 0 ? 'text-red-600' : 'text-indigo-700'}`}>
+                            {formatCurrency(bankAccounts.reduce((a, b) => a + b.currentBalance, 0))}
+                        </span>
+                    </div>
+                </div>
+            </div>
+        )}
       
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="bg-white p-6 rounded-lg border border-slate-200 shadow-sm">
@@ -1281,18 +1308,57 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
 
     try {
         const appId = String(storeConfig.id);
-        // Usa a collection 'financial_movements' que já alimenta o Transactions
-        await addDoc(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'financial_movements'), {
+        const amountNum = Number(sangriaData.value.replace(',', '.'));
+        
+        // Usamos batch para garantir que o caixa e a conta bancária atualizem juntos
+        const batch = writeBatch(firebase.db);
+
+        // 1. Usa a collection 'financial_movements' que já alimenta o Transactions
+        const finRef = doc(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'financial_movements'));
+        batch.set(finRef, {
             type: 'EXPENSE', 
             category: 'SANGRIA', // Categoria chave para filtrar depois
             description: `SANGRIA: ${sangriaData.reason}`,
-            amount: Number(sangriaData.value.replace(',', '.')),
+            amount: amountNum,
             date: new Date().toISOString().split('T')[0],
             createdAt: serverTimestamp(),
             userId: currentUser?.id,
             userName: currentUser?.username || 'Caixa',
             isSangria: true
         });
+
+        // =================================================================
+        // --- INÍCIO DA INTEGRAÇÃO BANCÁRIA (ROTEAMENTO) ---
+        // =================================================================
+        const routeRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'financial_settings', 'routing');
+        const routeSnap = await getDoc(routeRef);
+        
+        if (routeSnap.exists() && routeSnap.data().dinheiro) {
+            const cashAccountId = routeSnap.data().dinheiro;
+            
+            // Grava a retirada no Extrato Bancário
+            const accTxnRef = doc(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'account_transactions'));
+            batch.set(accTxnRef, {
+                accountId: cashAccountId,
+                type: 'OUT', 
+                amount: amountNum,
+                description: `SANGRIA: ${sangriaData.reason}`,
+                category: 'Retirada de Caixa',
+                date: new Date().toISOString(),
+                createdAt: serverTimestamp(),
+                userId: currentUser?.id || 'anon',
+                userName: currentUser?.username || 'Caixa'
+            });
+
+            // Desconta o valor do Saldo da Conta
+            const accRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'bank_accounts', cashAccountId);
+            batch.update(accRef, { currentBalance: increment(-amountNum) });
+        }
+        // =================================================================
+        // --- FIM DA INTEGRAÇÃO BANCÁRIA ---
+        // =================================================================
+
+        await batch.commit();
 
         showNotification('Sangria realizada com sucesso!', 'success');
         setSangriaModalOpen(false);
@@ -2024,7 +2090,22 @@ const ExpenseHistory = ({ transactions, categories }) => {
   );
 };
 
-const CashClosure = ({ sales, transactions, onSaveHistory, feeProfiles, transactionCategories }) => {
+const CashClosure = ({ sales, transactions, onSaveHistory, feeProfiles, transactionCategories, bankAccounts = [], storeConfig }) => {
+
+  // Listener de entradas bancárias de venda (account_transactions)
+  const [bankSalesTotal, setBankSalesTotal] = useState(0);
+  useEffect(() => {
+      if (!storeConfig?.id) return;
+      const appId = String(storeConfig.id);
+      const ref = collection(firebase.db, 'artifacts', appId, 'public', 'data', 'account_transactions');
+      const q = query(ref, where('category', '==', 'Vendas'), where('type', '==', 'IN'));
+      const unsub = onSnapshot(q, (snap) => {
+          const total = snap.docs.reduce((acc, d) => acc + (Number(d.data().amount) || 0), 0);
+          setBankSalesTotal(total);
+      });
+      return () => unsub();
+  }, [storeConfig]);
+
   const [summary, setSummary] = useState({ 
       totalSales: 0, 
       cmv: 0, 
@@ -2173,6 +2254,47 @@ const CashClosure = ({ sales, transactions, onSaveHistory, feeProfiles, transact
                {fmt(summary.netProfit)}
            </div>
         </div>
+        {/* AUDITORIA FINANCEIRA */}
+        {bankAccounts.length > 0 && (() => {
+            // SUBSTITUIR por isso:
+            const totalBruto = summary.totalSales;
+            const totalLiquidoEsperado = totalBruto - summary.fees;
+            const diff = bankSalesTotal - totalLiquidoEsperado;
+            const isBalanced = Math.abs(diff) < 0.10;
+
+            return (
+                <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4 mt-4">
+                    <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2">
+                        <CheckCircle size={18} className="text-indigo-500"/> Auditoria: PDV vs Banco
+                    </h3>
+                    <div className="space-y-2 text-sm">
+                        <div className="flex justify-between items-center p-2 bg-slate-50 rounded">
+                            <span className="text-slate-600">(+) Vendas Brutas (PDV)</span>
+                            <span className="font-bold text-slate-800">{fmt(totalBruto)}</span>
+                        </div>
+                        <div className="flex justify-between items-center p-2 bg-slate-50 rounded">
+                            <span className="text-slate-600">(-) Taxas Estimadas</span>
+                            <span className="font-bold text-red-500">-{fmt(summary.fees)}</span>
+                        </div>
+                        <div className="flex justify-between items-center p-2 bg-indigo-50 rounded border border-indigo-100">
+                            <span className="font-bold text-indigo-700">(=) Líquido Esperado no Banco</span>
+                            <span className="font-bold text-indigo-700">{fmt(totalLiquidoEsperado)}</span>
+                        </div>
+                        <div className="flex justify-between items-center p-2 bg-slate-50 rounded">
+                            <span className="text-slate-600">Entradas Reais no Banco (Vendas)</span>
+                            <span className="font-bold text-slate-800">{fmt(bankSalesTotal)}</span>
+                        </div>
+                        <div className={`flex justify-between items-center p-3 rounded border font-bold ${isBalanced ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-red-50 border-red-200 text-red-700'}`}>
+                            <span className="flex items-center gap-2">
+                                {isBalanced ? <CheckCircle size={16}/> : <AlertTriangle size={16}/>}
+                                {isBalanced ? 'Caixa Conferido' : 'Divergência Detectada'}
+                            </span>
+                            <span>{isBalanced ? 'R$ 0,00' : fmt(Math.abs(diff))}</span>
+                        </div>
+                    </div>
+                </div>
+            );
+        })()}
       </div>
 
       {/* Gráfico Detalhado */}
@@ -2572,7 +2694,7 @@ const generateSPED = () => {
   );
 };
 
-const Finance = ({ sales, transactions, feeProfiles, setFeeProfiles, transactionCategories, onSaveHistory, users, showNotification, companyInfo, onPrintReceipt, onEmitNFe, products }) => {
+const Finance = ({ sales, transactions, feeProfiles, setFeeProfiles, transactionCategories, onSaveHistory, users, showNotification, companyInfo, onPrintReceipt, onEmitNFe, products, bankAccounts = [], storeConfig }) => {
   const [activeTab, setActiveTab] = useState('closure');
   const [history, setHistory] = useState([]);
   const [viewSale, setViewSale] = useState(null);
@@ -2623,6 +2745,8 @@ const Finance = ({ sales, transactions, feeProfiles, setFeeProfiles, transaction
                 feeProfiles={feeProfiles} 
                 transactionCategories={transactionCategories}
                 onSaveHistory={saveHistory} // Usa a função real que já existe no componente
+                bankAccounts={bankAccounts}
+                storeConfig={storeConfig}
             />
             
             <ExpenseHistory 
@@ -3589,6 +3713,18 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
     return () => unsubscribe();
   }, [store]);
 
+  // Listener Contas Bancárias
+    const [bankAccounts, setBankAccounts] = useState([]);
+    useEffect(() => {
+        if (!store?.id) return;
+        const appId = String(store.id);
+        const accountsRef = collection(firebase.db, 'artifacts', appId, 'public', 'data', 'bank_accounts');
+        const unsubscribe = onSnapshot(accountsRef, (snap) => {
+            setBankAccounts(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+        });
+        return () => unsubscribe();
+    }, [store]);
+
   // Listener Vendas
   useEffect(() => {
     const appId = getAppId();
@@ -3634,7 +3770,6 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
     return () => unsubscribe();
   }, [store]);
 
-  // Função de Venda (com baixa de estoque)
   // Função de Venda (com baixa de estoque e COMANDA)
   const handleNewSale = async (sale) => {
     try {
@@ -3695,6 +3830,44 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
                  date: sale.date.split('T')[0], paymentMethod: sale.paymentMethod, saleId: saleRef.id,
                  userId: currentUser?.id || 'anon', createdAt: serverTimestamp()
              });
+
+             // =================================================================
+             // --- INÍCIO DA NOVA INTEGRAÇÃO BANCÁRIA (ROTEAMENTO) ---
+             // =================================================================
+             const routeRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'financial_settings', 'routing');
+             const routeSnap = await getDoc(routeRef);
+             
+             if (routeSnap.exists() && sale.paymentMethod !== 'Fiado') {
+                 const routeMap = { 'Dinheiro': 'dinheiro', 'Pix': 'pix', 'Crédito': 'cartao_credito', 'Débito': 'cartao_debito' };
+                 const routeKey = routeMap[sale.paymentMethod];
+                 const targetAccountId = routeSnap.data()[routeKey];
+
+                 if (targetAccountId) {
+                     // Usa o valor Líquido da venda (descontando as taxas configuradas na máquina)
+                     const netAmount = sale.net || sale.total; 
+                     
+                     // Grava a movimentação no Extrato da Conta Bancária
+                     const accTxnRef = doc(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'account_transactions'));
+                     batch.set(accTxnRef, {
+                         accountId: targetAccountId,
+                         type: 'IN',
+                         amount: netAmount,
+                         description: `VENDA PDV #${saleRef.id.slice(-6)}`,
+                         category: 'Vendas',
+                         date: new Date().toISOString(),
+                         createdAt: serverTimestamp(),
+                         userId: currentUser?.id || 'anon',
+                         userName: currentUser?.username || 'Caixa'
+                     });
+
+                     // Atualiza o Saldo da Conta de forma segura usando increment
+                     const accRef = doc(firebase.db, 'artifacts', appId, 'public', 'data', 'bank_accounts', targetAccountId);
+                     batch.update(accRef, { currentBalance: increment(netAmount) });
+                 }
+             }
+             // =================================================================
+             // --- FIM DA NOVA INTEGRAÇÃO BANCÁRIA ---
+             // =================================================================
         }
 
         await batch.commit();
@@ -4077,7 +4250,7 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
 
         <div className="flex-1 overflow-auto p-4 md:p-6 bg-slate-100">
           <div className="max-w-7xl mx-auto animate-in fade-in duration-300">
-            {activeModule === 'dashboard' && <Dashboard sales={realtimeSales} products={products} />}
+            {activeModule === 'dashboard' && <Dashboard sales={realtimeSales} products={products} bankAccounts={bankAccounts} storeConfig={store}/>}
             {activeModule === 'pdv' && (
               <PDV 
                 products={products}
@@ -4143,6 +4316,7 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
                 onPrintReceipt={(sale) => printReceipt(sale, store.companyInfo)} 
                 onEmitNFe={handleEmitNFe} 
                 products={products}
+                bankAccounts={bankAccounts}
               />
             )}
             {activeModule === 'inventory' && (

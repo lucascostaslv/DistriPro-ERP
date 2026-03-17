@@ -227,6 +227,18 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
       barcode: '', quantity: 12, price: '', wholesalePrice: '', costPrice: ''
   });
 
+  // --- ESTADOS: MODAL DE AUDITORIA DE ESTOQUE ---
+  const [isAuditModalOpen, setIsAuditModalOpen] = useState(false);
+  const [auditSelection, setAuditSelection] = useState([]); 
+  const [auditSearchTerm, setAuditSearchTerm] = useState('');
+  const [auditFilterGroup, setAuditFilterGroup] = useState('');
+  const [auditShowZero, setAuditShowZero] = useState(true);
+  
+  // Estados para gestão de Templates
+  const [auditTemplates, setAuditTemplates] = useState([]);
+  const [newTemplateName, setNewTemplateName] = useState('');
+  const [selectedTemplateId, setSelectedTemplateId] = useState('');
+
   const [saidaModo, setSaidaModo] = useState(false);
     const [saidaCart, setSaidaCart] = useState([]);
     const [saidaJustificativa, setSaidaJustificativa] = useState('');
@@ -240,6 +252,7 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
             return [...prev, { ...product, qty: 1 }];
         });
     };
+
 
   // Carregar Dados Auxiliares (Perfis e Fornecedores)
   useEffect(() => {
@@ -599,6 +612,121 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
       return prod.stock; 
   };
 
+  // =========================================================================
+  // LÓGICA DE AUDITORIA DE ESTOQUE (Cirúrgico com o padrão do WMS)
+  // =========================================================================
+
+  // 1. Filtragem Inteligente
+  const filteredAuditProducts = useMemo(() => {
+      return products.filter(p => {
+          const matchName = p.name.toLowerCase().includes(auditSearchTerm.toLowerCase());
+          const matchGroup = auditFilterGroup ? p.category === auditFilterGroup : true;
+          // Agora o getDisplayStock já existe quando o código chegar aqui!
+          const matchZero = auditShowZero ? true : Number(getDisplayStock(p)) > 0;
+          return matchName && matchGroup && matchZero;
+      });
+  }, [products, auditSearchTerm, auditFilterGroup, auditShowZero]);
+
+  // 2. Ações de Seleção
+  const handleToggleAuditProduct = (product) => {
+      if (auditSelection.find(p => p.id === product.id)) {
+          setAuditSelection(auditSelection.filter(p => p.id !== product.id));
+      } else {
+          setAuditSelection([...auditSelection, product]);
+      }
+  };
+
+  const handleSelectAllFiltered = () => {
+       const newSelection = [...auditSelection];
+       filteredAuditProducts.forEach(p => {
+           if (!newSelection.find(sel => sel.id === p.id)) newSelection.push(p);
+       });
+       setAuditSelection(newSelection);
+  };
+
+  // 3. Salvar e Carregar Templates no Firebase
+  const fetchAuditTemplates = async () => {
+      if (!storeConfig?.id) return;
+      try {
+          const storeId = String(storeConfig.id);
+          const q = query(collection(db, 'artifacts', storeId, 'public', 'data', 'inventory_audit_templates'));
+          const snap = await getDocs(q);
+          setAuditTemplates(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      } catch (error) { console.error("Erro ao carregar templates:", error); }
+  };
+
+  useEffect(() => {
+      if (isAuditModalOpen) fetchAuditTemplates();
+  }, [isAuditModalOpen, storeConfig]);
+
+  const handleSaveTemplate = async () => {
+      if (!storeConfig?.id) return showNotification("Loja não identificada.", "error");
+      if (!newTemplateName.trim() || auditSelection.length === 0) {
+          return showNotification('Digite um nome e selecione produtos para salvar.', 'error');
+      }
+      try {
+          const storeId = String(storeConfig.id);
+          const templateData = {
+              name: newTemplateName,
+              productIds: auditSelection.map(p => p.id),
+              created_at: serverTimestamp()
+          };
+          
+          await addDoc(collection(db, 'artifacts', storeId, 'public', 'data', 'inventory_audit_templates'), templateData);
+          setNewTemplateName('');
+          fetchAuditTemplates();
+          showNotification('Template salvo com sucesso!', 'success');
+      } catch (error) {
+          showNotification("Erro ao salvar template", "error");
+      }
+  };
+
+  const handleLoadTemplate = (e) => {
+      const templateId = e.target.value;
+      setSelectedTemplateId(templateId);
+      if (!templateId) return setAuditSelection([]);
+      
+      const template = auditTemplates.find(t => t.id === templateId);
+      if (template) {
+          const productsToLoad = products.filter(p => template.productIds.includes(p.id));
+          setAuditSelection(productsToLoad);
+      }
+  };
+
+  // 4. Geração do PDF da Prancheta
+  const handleGenerateAuditPDF = () => {
+      if (auditSelection.length === 0) return showNotification('Selecione ao menos um produto.', 'error');
+
+      const doc = new jsPDF();
+      doc.setFontSize(14);
+      doc.text('Prancheta de Auditoria de Estoque', 14, 15);
+      doc.setFontSize(10);
+      doc.text(`Data: ${new Date().toLocaleDateString('pt-BR')} - Hora: ${new Date().toLocaleTimeString('pt-BR')}`, 14, 22);
+
+      const tableData = auditSelection.map(p => [
+          p.name,
+          getDisplayStock(p) || 0,
+          '                            ', // Linha para Contagem Manual
+          '                            '  // Linha para Diferença
+      ]);
+
+      autoTable(doc, {
+          startY: 28,
+          head: [['Nome do Item', 'Qtd. Sistema', 'Contagem Manual', 'Diferença']],
+          body: tableData,
+          theme: 'grid',
+          styles: { fontSize: 9, cellPadding: 3 },
+          headStyles: { fillColor: [30, 41, 59] }, // Cor slate-800
+          columnStyles: {
+              2: { cellWidth: 45 }, 
+              3: { cellWidth: 45 }
+          }
+      });
+
+      doc.save(`Auditoria_Estoque_${new Date().getTime()}.pdf`);
+      setIsAuditModalOpen(false);
+  };
+
   const handleCopyQuote = (supplierName, items) => {
       const text = `*COTAÇÃO - ${supplierName}*\n\n` + 
                    items.map(i => `- ${i.missing}x ${i.name} (${i.stock} em estoque)`).join('\n') +
@@ -739,6 +867,11 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                             <Plus size={20}/> Novo Produto
                         </button>
                     )}
+                    {activeTab === 'management' && (
+                          <button onClick={() => setIsAuditModalOpen(true)} className="bg-emerald-50 text-emerald-700 px-4 py-2 rounded font-bold hover:bg-emerald-100 flex items-center gap-2 border border-emerald-200">
+                              <FileText size={18}/> Nova Auditoria
+                          </button>
+                      )}
                 </div>
             </div>
           )}
@@ -1926,8 +2059,138 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
         </div>
     )}
 
-    </div>
-  );
-};
+          {/* ============================================================== */}
+          {/* MODAL DE AUDITORIA DE ESTOQUE */}
+          {/* ============================================================== */}
+          {isAuditModalOpen && (
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                <div className="bg-white rounded-xl shadow-2xl w-full max-w-5xl h-[85vh] flex flex-col overflow-hidden">
+                    {/* Header */}
+                    <div className="flex justify-between items-center p-4 border-b bg-slate-50">
+                        <div>
+                            <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                                <FileText className="text-indigo-600"/> Gerar Auditoria de Estoque
+                            </h2>
+                            <p className="text-sm text-slate-500">Selecione os itens e gere a prancheta de contagem em PDF.</p>
+                        </div>
+                        <button onClick={() => setIsAuditModalOpen(false)} className="text-slate-400 hover:text-slate-600">
+                            <X size={24} />
+                        </button>
+                    </div>
+
+                    {/* Body em Duas Colunas */}
+                    <div className="flex-1 flex overflow-hidden">
+                        
+                        {/* Coluna Esquerda: Filtros e Lista Completa */}
+                        <div className="w-1/2 border-r flex flex-col bg-white">
+                            <div className="p-4 border-b space-y-3 bg-slate-50">
+                                <h3 className="font-bold text-slate-700 text-sm">1. Filtrar Produtos</h3>
+                                <div className="flex gap-2">
+                                    <div className="flex-1 relative">
+                                        <Search className="absolute left-2.5 top-2 text-slate-400" size={16}/>
+                                        <input 
+                                            type="text" placeholder="Buscar..." 
+                                            className="w-full pl-8 pr-3 py-1.5 border rounded text-sm outline-none focus:border-indigo-500"
+                                            value={auditSearchTerm} onChange={(e) => setAuditSearchTerm(e.target.value)}
+                                        />
+                                    </div>
+                                    <select 
+                                        className="border rounded text-sm px-2 py-1.5 outline-none"
+                                        value={auditFilterGroup} onChange={(e) => setAuditFilterGroup(e.target.value)}
+                                    >
+                                        <option value="">Todas Categorias</option>
+                                        {[...new Set(products.map(p => p.category).filter(Boolean))].map(g => (
+                                            <option key={g} value={g}>{g}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div className="flex items-center justify-between">
+                                    <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
+                                        <input type="checkbox" checked={auditShowZero} onChange={(e) => setAuditShowZero(e.target.checked)}/>
+                                        Incluir estoque zerado
+                                    </label>
+                                    <button onClick={handleSelectAllFiltered} className="text-xs font-bold text-indigo-600 hover:text-indigo-800">
+                                        Adicionar Visíveis
+                                    </button>
+                                </div>
+                            </div>
+                            <div className="flex-1 overflow-y-auto p-2">
+                                {filteredAuditProducts.map(p => {
+                                    const isSelected = auditSelection.find(sel => sel.id === p.id);
+                                    return (
+                                        <div key={p.id} onClick={() => handleToggleAuditProduct(p)} 
+                                             className={`flex justify-between items-center p-2 mb-1 rounded cursor-pointer border transition-colors ${isSelected ? 'bg-indigo-50 border-indigo-200' : 'bg-white hover:bg-slate-50 border-transparent'}`}>
+                                            <div>
+                                                <p className="text-sm font-bold text-slate-800">{p.name}</p>
+                                                <p className="text-xs text-slate-500">{p.category} • Qtd: {getDisplayStock(p)}</p>
+                                            </div>
+                                            {isSelected ? <CheckCircle className="text-indigo-600" size={18}/> : <Plus className="text-slate-400" size={18}/>}
+                                        </div>
+                                    )
+                                })}
+                            </div>
+                        </div>
+
+                        {/* Coluna Direita: Seleção e Templates */}
+                        <div className="w-1/2 flex flex-col bg-slate-50/50">
+                            <div className="p-4 border-b space-y-3 bg-slate-50">
+                                <h3 className="font-bold text-slate-700 text-sm">2. Lista de Conferência ({auditSelection.length} itens)</h3>
+                                
+                                <div className="flex items-center gap-2 bg-white p-2 border rounded">
+                                    <Save className="text-slate-400" size={16}/>
+                                    <select className="flex-1 text-sm outline-none bg-transparent" value={selectedTemplateId} onChange={handleLoadTemplate}>
+                                        <option value="">-- Carregar Template Salvo --</option>
+                                        {auditTemplates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                                    </select>
+                                </div>
+
+                                <div className="flex gap-2">
+                                    <input 
+                                        type="text" placeholder="Nome para novo template..." 
+                                        className="flex-1 border rounded text-sm px-3 py-1.5 outline-none"
+                                        value={newTemplateName} onChange={(e) => setNewTemplateName(e.target.value)}
+                                    />
+                                    <button onClick={handleSaveTemplate} className="px-3 py-1.5 bg-slate-200 text-slate-700 text-xs font-bold rounded hover:bg-slate-300 transition-colors">
+                                        Salvar Atual
+                                    </button>
+                                </div>
+                            </div>
+                            
+                            <div className="flex-1 overflow-y-auto p-4">
+                                {auditSelection.length === 0 ? (
+                                    <div className="text-center text-slate-400 mt-10 text-sm">Nenhum produto selecionado.</div>
+                                ) : (
+                                    <div className="space-y-1">
+                                        {auditSelection.map(p => (
+                                            <div key={p.id} className="flex justify-between items-center p-2 bg-white border rounded shadow-sm">
+                                                <span className="text-sm font-medium text-slate-700">{p.name}</span>
+                                                <button onClick={() => handleToggleAuditProduct(p)} className="text-red-400 hover:text-red-600">
+                                                    <Trash2 size={16}/>
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Footer */}
+                    <div className="p-4 border-t bg-white flex justify-between items-center shrink-0">
+                        <button onClick={() => setAuditSelection([])} className="text-sm font-bold text-red-600 hover:underline">Limpar Lista</button>
+                        <div className="flex gap-3">
+                            <button onClick={() => setIsAuditModalOpen(false)} className="px-5 py-2.5 rounded-lg text-slate-600 font-bold hover:bg-slate-100 text-sm transition-colors">Cancelar</button>
+                            <button onClick={handleGenerateAuditPDF} className="px-6 py-2.5 bg-indigo-600 text-white rounded-lg font-bold hover:bg-indigo-700 flex items-center gap-2 text-sm shadow-lg shadow-indigo-200 transition-transform active:scale-95">
+                                <Download size={18}/> Gerar PDF para Prancheta
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+          )}
+
+        </div>
+      );
+    };
 
 export default InventoryWMS;
