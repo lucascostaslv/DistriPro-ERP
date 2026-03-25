@@ -512,6 +512,24 @@ const handleSaveSupplier = async () => {
                   updates.productId = ''; // Limpa ID para forçar criação
               }
           }
+          
+          // 4. Código de Barras / SKU (Busca automática de produto existente)
+          if (field === 'systemSku' || field === 'barcode') {
+              const code = String(value).trim();
+              if (code.length >= 3) {
+                  const match = products.find(p => String(p.barcode) === code || String(p.cbaCode) === code);
+                  if (match) {
+                      updates.productId = match.id;
+                      updates.productName = match.name;
+                      updates.unit = match.unit || 'UN';
+                      updates.sellingPrice = match.price || 0;
+                      updates.margin = match.profitMargin || 30;
+                      if (!item.unitPrice || item.unitPrice === 0) updates.unitPrice = match.cost || 0;
+                  } else {
+                      updates.productId = ''; 
+                  }
+              }
+          }
 
           return { ...item, ...updates };
       }));
@@ -660,34 +678,30 @@ const handleSaveSupplier = async () => {
         const ncm = getTagContent(prod, "NCM");
         const cEAN = getTagContent(prod, "cEAN");
         const uCom = getTagContent(prod, "uCom");
+        const validCode = (cEAN && cEAN !== "SEM GTIN") ? cEAN : cProd;
         
-        let existingProd = products.find(p => String(p.cbaCode) === String(cProd) || String(p.manufacturingCode) === String(cProd));
+        let existingProd = products.find(p => String(p.barcode) === validCode || String(p.cbaCode) === validCode);
         if (!existingProd) {
-             existingProd = products.find(p => (p.cbaCode && String(p.cbaCode).includes(cProd)) || (p.manufacturingCode && p.manufacturingCode.includes(cProd)));
+             existingProd = products.find(p => p.name.toUpperCase().trim() === xProd.toUpperCase().trim());
         }
 
         newItems.push({
             id: Math.random().toString(36).substring(2),
             productId: existingProd ? existingProd.id : '',
-            systemSku: existingProd ? existingProd.cbaCode : '',
+            systemSku: existingProd ? (existingProd.cbaCode || existingProd.barcode) : validCode, // Força o preenchimento do código!
             xmlProductCode: cProd, 
             ncm: ncm || '',
-            ean: (cEAN && cEAN !== "SEM GTIN") ? cEAN : '',
+            ean: validCode,
             xmlProductName: xProd,
             productName: existingProd ? existingProd.name : xProd,
-            unit: getTagContent(prod, "uCom"),
+            unit: uCom || 'UN',
             quantity: qCom || 0, 
             unitPrice: vUnCom || 0,
             discount: 0, surcharge: 0, 
-            icmsRate: 0, ipiRate: 0, 
-            icmsValue: 0,
-            ipiValue: 0,
+            icmsRate: 0, ipiRate: 0, icmsValue: 0, ipiValue: 0,
             total: (qCom * vUnCom),
             cfop: getTagContent(prod, "CFOP") || selectedType?.defaultCfop || "",
-            isService: false,
-            suggestedPrice: null, 
-            priceGroupMargin: 0,
-            acceptedSuggestion: false
+            isService: false, suggestedPrice: null, priceGroupMargin: 0, acceptedSuggestion: false
         });
     }
 
@@ -1282,6 +1296,7 @@ const handleSaveSupplier = async () => {
                                             placeholder="Nome do Produto"
                                         />
                                     </div>
+                                </td>
 
                                     {/* DROPDOWN INLINE (A MÁGICA DA VINCULAÇÃO) */}
                                     {activeRowSearch === item.id && item.productName && !item.productId && (
@@ -1324,8 +1339,24 @@ const handleSaveSupplier = async () => {
                                             )}
                                         </div>
                                     )}
+                                {/* --- A CÉLULA DE UNIDADE QUE FALTAVA --- */}
+                                <td className="p-1 border-r">
+                                    <select 
+                                        className="w-full bg-transparent outline-none text-center font-bold text-xs text-slate-700" 
+                                        value={item.unit || 'UN'} 
+                                        onChange={(e) => handleItemChange(item.id, 'unit', e.target.value)}
+                                    >
+                                        <option value="UN">UN</option>
+                                        <option value="CX">CX</option>
+                                        <option value="KG">KG</option>
+                                        <option value="FD">FD</option>
+                                        <option value="PCT">PCT</option>
+                                        <option value="L">L</option>
+                                        <option value="ML">ML</option>
+                                    </select>
                                 </td>
-                                {/* Item 10: Quantidade */}
+
+                                {/* Item 10: Quantidade (Agora alinhada corretamente!) */}
                                 <td className="p-1 border-r">
                                     <input 
                                         type="number" 
@@ -1334,11 +1365,12 @@ const handleSaveSupplier = async () => {
                                         onChange={(e) => handleItemChange(item.id, 'quantity', e.target.value)}
                                     />
                                 </td>
-                                {/* Item 10: Custo */}
+                                
+                                {/* Item 10: Custo (Agora alinhado corretamente!) */}
                                 <td className="p-1 border-r">
                                     <input 
                                         type="number" step="0.01"
-                                        className="w-full h-full bg-transparent outline-none text-right text-red-600" 
+                                        className="w-full h-full bg-transparent outline-none text-right text-red-600 font-bold" 
                                         value={item.unitPrice} 
                                         onChange={(e) => handleItemChange(item.id, 'unitPrice', e.target.value)}
                                     />

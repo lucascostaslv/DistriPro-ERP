@@ -31,7 +31,6 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
   const [deleteModal, setDeleteModal] = useState(null); // { comanda }
   const [deletePassword, setDeletePassword] = useState('');
 
-  const [showDoses, setShowDoses] = useState(false);
 
   // 3. Adicione a função que processa a dose escolhida no modal
   const handleAddDose = async (doseItem) => {
@@ -63,7 +62,6 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
           await updateDoc(comandaRef, { items: newItems });
           setSelectedComanda(prev => ({ ...prev, items: newItems }));
           showNotification(`Dose adicionada com sucesso!`, 'success');
-          setShowDoses(false); // Fecha o painel após adicionar
       } catch(e) {
           showNotification('Erro ao adicionar dose', 'error');
       }
@@ -404,8 +402,8 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
                           </div>
                       )}
                       <button
-                            onClick={() => setShowDoses(true)}
-                            className="bg-purple-100 text-purple-700 px-4 rounded font-bold hover:bg-purple-200 flex items-center gap-2 border border-purple-200 shadow-sm whitespace-nowrap"
+                            onClick={renderDosePanel}
+                            className="p-3 bg-amber-50 text-amber-600 rounded-xl font-bold flex flex-col items-center justify-center gap-2 hover:bg-amber-100 transition-colors border border-amber-200"
                         >
                             <Wine size={18}/> <span className="hidden md:inline">Doses</span>
                         </button>
@@ -534,7 +532,6 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
               </div>
           </div>
       )}
-      {showDoses && renderDosePanel(() => setShowDoses(false), handleAddDose)}
     </div>
   );
 };
