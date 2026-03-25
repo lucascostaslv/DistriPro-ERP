@@ -29,6 +29,7 @@ import ComandaManager from './ComandaManager';
 import { downloadSmart } from './EntradaNotas/FiscalInvoices';
 import BankAccountsManager from './BankAccountsManager';
 import CashClosingManager from './CashClosingManager';
+import DoseManager from './DoseManager';
 
 import { TenantProvider, useTenant } from './contexts/TenantContext';
 
@@ -717,314 +718,6 @@ const Dashboard = ({ sales, products, bankAccounts = [] }) => {
   );
 };
 
-const BottleCard = ({ bottle, onSell, onDiscard, editingBottle, setEditingBottle, onUpdateField }) => {
-    const [doseQty, setDoseQty] = useState(1);
-    const pct = bottle.maxDoses > 0 ? (bottle.remainingDoses / bottle.maxDoses) * 100 : 0;
-    const barColor = pct > 50 ? 'bg-green-500' : pct > 20 ? 'bg-amber-500' : 'bg-red-500';
-
-    return (
-        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
-            <div className="flex items-start justify-between">
-                <div>
-                    <p className="font-bold text-slate-800 text-sm leading-tight">{bottle.productName}</p>
-                    <p className="text-[10px] text-slate-400">Aberta em {bottle.openedAt?.toDate ? bottle.openedAt.toDate().toLocaleString('pt-BR') : '—'}</p>
-                </div>
-                <button onClick={() => onDiscard(bottle)} className="text-xs text-red-400 hover:text-red-600 border border-red-200 hover:bg-red-50 px-2 py-1 rounded flex items-center gap-1">
-                    <Trash2 size={12}/> Descartar
-                </button>
-            </div>
-
-            <div>
-                <div className="flex justify-between text-xs text-slate-500 mb-1">
-                    {bottle.maxDoses === 0 ? (
-                        <span className="text-red-500 font-bold">⚠️ Configure os volumes abaixo para vender</span>
-                    ) : (
-                        <>
-                            <span>{bottle.remainingDoses} doses restantes</span>
-                            <span>{bottle.maxDoses} máx</span>
-                        </>
-                    )}
-                </div>
-                <div className="w-full bg-slate-200 rounded-full h-2">
-                    <div className={`h-2 rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }}/>
-                </div>
-            </div>
-
-            <div className="grid grid-cols-3 gap-2 pt-1 border-t border-slate-200">
-                {[
-                    { field: 'dosePrice', label: 'Preço (R$)', prefix: 'R$' },
-                    { field: 'bottleVolumeMl', label: 'Vol. Garrafa (ml)', prefix: '' },
-                    { field: 'doseVolumeMl', label: 'Vol. Dose (ml)', prefix: '' },
-                ].map(({ field, label, prefix }) => (
-                    <div key={field}>
-                        <label className="text-[9px] font-bold text-slate-400 uppercase block">{label}</label>
-                        {editingBottle?.id === bottle.id && editingBottle?.field === field ? (
-                            <input
-                                autoFocus
-                                type="number"
-                                className="w-full border border-purple-400 rounded p-1 text-xs font-bold text-center focus:outline-none"
-                                defaultValue={bottle[field]}
-                                onBlur={e => onUpdateField(bottle, field, e.target.value)}
-                                onKeyDown={e => { if (e.key === 'Enter') onUpdateField(bottle, field, e.target.value); if (e.key === 'Escape') setEditingBottle(null); }}
-                            />
-                        ) : (
-                            <button
-                                onClick={() => setEditingBottle({ id: bottle.id, field })}
-                                className="w-full text-xs font-bold text-slate-700 bg-white border border-slate-200 rounded p-1 hover:border-purple-400 hover:text-purple-700 text-center"
-                            >
-                                {prefix}{bottle[field]}
-                            </button>
-                        )}
-                    </div>
-                ))}
-            </div>
-
-            <div className="flex items-center gap-2 pt-1">
-                <div className="flex items-center border rounded overflow-hidden flex-shrink-0">
-                    <button onClick={() => setDoseQty(q => Math.max(1, q - 1))} className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-sm font-bold">−</button>
-                    {/* RESTRIÇÃO DE MAX REMOVIDA DO INPUT */}
-                    <input
-                        type="number" min="1"
-                        value={doseQty}
-                        onChange={e => setDoseQty(Math.max(1, Number(e.target.value)))}
-                        className="w-10 text-center text-sm font-bold border-x p-1 outline-none"
-                    />
-                    {/* RESTRIÇÃO REMOVIDA DO BOTÃO DE MAIS */}
-                    <button onClick={() => setDoseQty(q => q + 1)} className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-sm font-bold">+</button>
-                </div>
-                {/* BOTÃO NÃO FICA MAIS DISABLED POR CAUSA DO ESTOQUE, APENAS SE FALTAR CONFIGURAÇÃO */}
-                <button
-                    onClick={() => onSell(bottle, doseQty)}
-                    disabled={bottle.maxDoses === 0}
-                    className="flex-1 bg-purple-600 text-white py-1.5 rounded-lg text-sm font-bold hover:bg-purple-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-1"
-                >
-                    <ShoppingCart size={14}/> Vender {doseQty} dose{doseQty > 1 ? 's' : ''} · R$ {((bottle.dosePrice || 0) * doseQty).toFixed(2)}
-                </button>
-            </div>
-        </div>
-    );
-};
-
-const DosePanel = ({ products, storeConfig, showNotification, onAddDoseToCart, onClose }) => {
-    const [search, setSearch] = useState('');
-    const [openBottles, setOpenBottles] = useState([]);
-    const [loading, setLoading] = useState(true);
-    const [editingBottle, setEditingBottle] = useState(null); // { id, field, value }
-
-    // Carrega garrafas abertas
-    useEffect(() => {
-        if (!storeConfig?.id) return;
-        const storeId = String(storeConfig.id);
-        const ref = collection(firebase.db, 'artifacts', storeId, 'public', 'data', 'open_bottles');
-        const unsub = onSnapshot(ref, snap => {
-            setOpenBottles(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-            setLoading(false);
-        });
-        return () => unsub();
-    }, [storeConfig]);
-
-    const handleOpenBottle = async (product) => {
-        const bottleVol = parseFloat(product.bottleVolumeMl) || 0;
-        const doseVol = parseFloat(product.doseVolumeMl) || 0;
-        const maxDoses = doseVol > 0 ? Math.floor(bottleVol / doseVol) : 0;
-        
-        // --- BLOQUEIO REMOVIDO: Agora permite abrir a garrafa mesmo sem ter os volumes configurados. ---
-
-        const storeId = String(storeConfig.id);
-        // Desconta 1 unidade do estoque
-        const prodRef = doc(firebase.db, 'artifacts', storeId, 'public', 'data', 'products', product.id);
-        await updateDoc(prodRef, { stock: increment(-1) });
-        // Cria garrafa aberta
-        await addDoc(collection(firebase.db, 'artifacts', storeId, 'public', 'data', 'open_bottles'), {
-            productId: product.id,
-            productName: product.name,
-            dosePrice: parseFloat(product.dosePrice) || 0,
-            bottleVolumeMl: bottleVol,
-            doseVolumeMl: doseVol,
-            maxDoses,
-            remainingDoses: maxDoses,
-            openedAt: serverTimestamp(),
-        });
-        showNotification(`Garrafa de ${product.name} aberta!`, 'success');
-    };
-
-    const handleSellDoses = async (bottle, qty) => {
-        if (qty <= 0) return;
-        
-        // NOVO BLOQUEIO: Não deixa VENDER se os dados da garrafa não foram preenchidos
-        if (bottle.maxDoses === 0 || !bottle.bottleVolumeMl || !bottle.doseVolumeMl) {
-            showNotification('Configure os volumes (Garrafa e Dose) na garrafa aberta antes de vender.', 'error');
-            return;
-        }
-
-        // --- RESTRIÇÃO DE ESTOQUE REMOVIDA TEMPORARIAMENTE ---
-        /*
-        if (qty > bottle.remainingDoses) {
-            showNotification(`Apenas ${bottle.remainingDoses} doses disponíveis nesta garrafa.`, 'error');
-            return;
-        }
-        */
-
-        const storeId = String(storeConfig.id);
-        const bottleRef = doc(firebase.db, 'artifacts', storeId, 'public', 'data', 'open_bottles', bottle.id);
-        const newRemaining = bottle.remainingDoses - qty;
-
-        // Adiciona ao carrinho do PDV
-        onAddDoseToCart({
-            id: bottle.productId,
-            name: `${bottle.productName} (Dose ${bottle.doseVolumeMl}ml)`,
-            price: bottle.dosePrice,
-            cost: 0,
-            qty,
-            isDose: true,
-            bottleId: bottle.id,
-        });
-
-        if (newRemaining <= 0) {
-            // Garrafa vazia — remove e pergunta se abre outra
-            await deleteDoc(bottleRef);
-            showNotification(`Garrafa de ${bottle.productName} esvaziada!`, 'success');
-            const product = products.find(p => p.id === bottle.productId);
-            if (product && window.confirm(`Garrafa de ${bottle.productName} esvaziada! Deseja abrir outra?`)) {
-                await handleOpenBottle(product);
-            }
-        } else {
-            await updateDoc(bottleRef, { remainingDoses: newRemaining });
-        }
-    };
-
-    const handleDiscard = async (bottle) => {
-        if (!window.confirm(`Descartar garrafa de ${bottle.productName} com ${bottle.remainingDoses} doses restantes?`)) return;
-        const storeId = String(storeConfig.id);
-        await deleteDoc(doc(firebase.db, 'artifacts', storeId, 'public', 'data', 'open_bottles', bottle.id));
-        showNotification('Garrafa descartada.', 'success');
-        const product = products.find(p => p.id === bottle.productId);
-        if (product && window.confirm(`Deseja abrir outra garrafa de ${bottle.productName}?`)) {
-            await handleOpenBottle(product);
-        }
-    };
-
-    const handleUpdateBottleField = async (bottle, field, value) => {
-        const storeId = String(storeConfig.id);
-        const bottleRef = doc(firebase.db, 'artifacts', storeId, 'public', 'data', 'open_bottles', bottle.id);
-        const parsed = parseFloat(value) || 0;
-        const update = { [field]: parsed };
-        // Recalcula maxDoses e remainingDoses se volume mudar
-        if (field === 'bottleVolumeMl' || field === 'doseVolumeMl') {
-            const newBottleVol = field === 'bottleVolumeMl' ? parsed : bottle.bottleVolumeMl;
-            const newDoseVol = field === 'doseVolumeMl' ? parsed : bottle.doseVolumeMl;
-            if (newDoseVol > 0) {
-                const newMax = Math.floor(newBottleVol / newDoseVol);
-                const usedDoses = bottle.maxDoses - bottle.remainingDoses;
-                update.maxDoses = newMax;
-                update.remainingDoses = Math.max(0, newMax - usedDoses);
-            }
-        }
-        await updateDoc(bottleRef, update);
-        setEditingBottle(null);
-    };
-
-    const filteredProducts = products.filter(p =>
-        p.name.toLowerCase().includes(search.toLowerCase()) ||
-        String(p.barcode || '').includes(search)
-    );
-
-    return (
-        <div className="fixed inset-0 z-50 flex">
-            {/* Overlay */}
-            <div className="flex-1 bg-black/40" onClick={onClose}/>
-
-            {/* Painel */}
-            <div className="w-[480px] bg-white flex flex-col h-full shadow-2xl">
-                {/* Header */}
-                <div className="bg-purple-700 text-white p-4 flex items-center justify-between flex-shrink-0">
-                    <div className="flex items-center gap-2">
-                        <Wine size={22}/>
-                        <div>
-                            <h2 className="font-bold text-lg leading-tight">Controle de Doses</h2>
-                            <p className="text-purple-200 text-xs">{openBottles.length} garrafa(s) aberta(s)</p>
-                        </div>
-                    </div>
-                    <button onClick={onClose} className="p-2 hover:bg-purple-600 rounded-lg">
-                        <X size={20}/>
-                    </button>
-                </div>
-
-                <div className="flex-1 overflow-y-auto flex flex-col">
-                    {/* Garrafas abertas */}
-                    <div className="p-4 border-b">
-                        <h3 className="text-xs font-bold text-slate-500 uppercase mb-3 flex items-center gap-1">
-                            <span className="w-2 h-2 bg-green-500 rounded-full inline-block"></span>
-                            Garrafas Abertas
-                        </h3>
-
-                        {loading && <p className="text-sm text-slate-400 text-center py-4">Carregando...</p>}
-
-                        {!loading && openBottles.length === 0 && (
-                            <p className="text-sm text-slate-400 text-center py-4 italic">Nenhuma garrafa aberta. Abra uma abaixo.</p>
-                        )}
-
-                        <div className="space-y-3">
-                            {openBottles.map(bottle => (
-                                <BottleCard
-                                    key={bottle.id}
-                                    bottle={bottle}
-                                    onSell={handleSellDoses}
-                                    onDiscard={handleDiscard}
-                                    editingBottle={editingBottle}
-                                    setEditingBottle={setEditingBottle}
-                                    onUpdateField={handleUpdateBottleField}
-                                />
-                            ))}
-                        </div>
-                    </div>
-
-                    {/* Abrir nova garrafa */}
-                    <div className="p-4">
-                        <h3 className="text-xs font-bold text-slate-500 uppercase mb-3">Abrir Nova Garrafa</h3>
-                        <div className="relative mb-3">
-                            <Search className="absolute left-3 top-2.5 text-slate-400" size={16}/>
-                            <input
-                                className="w-full pl-9 pr-4 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-400 outline-none"
-                                placeholder="Buscar produto..."
-                                value={search}
-                                onChange={e => setSearch(e.target.value)}
-                            />
-                        </div>
-                        {search.length > 1 && (
-                            <div className="bg-white border rounded-lg overflow-hidden shadow-sm max-h-60 overflow-y-auto">
-                                {filteredProducts.slice(0, 10).map(p => {
-                                    const maxDoses = p.doseVolumeMl > 0 ? Math.floor((p.bottleVolumeMl || 0) / p.doseVolumeMl) : 0;
-                                    return (
-                                        <div
-                                            key={p.id}
-                                            className="p-3 border-b hover:bg-purple-50 cursor-pointer flex justify-between items-center"
-                                            onClick={() => { handleOpenBottle(p); setSearch(''); }}
-                                        >
-                                            <div>
-                                                <p className="font-bold text-sm text-slate-800">{p.name}</p>
-                                                <p className="text-xs text-slate-400">
-                                                    {maxDoses > 0
-                                                        ? `${maxDoses} doses de ${p.doseVolumeMl}ml · R$ ${(p.dosePrice || 0).toFixed(2)}/dose`
-                                                        : <span className="text-amber-500">⚠ Configure volume e dose no cadastro</span>
-                                                    }
-                                                </p>
-                                            </div>
-                                            <div className="text-right text-xs text-slate-500">
-                                                <p>Estoque: {p.stock || 0}</p>
-                                                <span className="text-purple-600 font-bold text-xs">+ Abrir</span>
-                                            </div>
-                                        </div>
-                                    );
-                                })}
-                            </div>
-                        )}
-                    </div>
-                </div>
-            </div>
-        </div>
-    );
-};
 
 const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct, clients = [], setClients, feeProfiles = [], onNewSale, showNotification, companyInfo, storeConfig}) => {
   const [cart, setCart] = useState([]);
@@ -1161,42 +854,39 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
               onSendToCart={handleReceiveFromComanda}
               onClose={() => setShowComandas(false)}
               renderDosePanel={(onClosePanel, onAddDose) => (
-                  <div className="absolute inset-0 z-[60]">
-                      <DosePanel
-                          products={products}
-                          storeConfig={storeConfig}
-                          showNotification={showNotification}
-                          onAddDoseToCart={onAddDose}
-                          onClose={onClosePanel}
-                      />
-                  </div>
+                <DoseManager
+                    isOpen={true}
+                    onClose={onClosePanel}
+                    products={products}
+                    storeConfig={storeConfig}
+                    showNotification={showNotification}
+                    onAddDoseToCart={onAddDose}
+                />
               )}
           />
       );
   }
 
-  if (showDosePanel) {
-      return (
-          <div className="relative h-full">
-              {/* Mantém o PDV atrás */}
-              <DosePanel
-                  products={products}
-                  storeConfig={storeConfig}
-                  showNotification={showNotification}
-                  onAddDoseToCart={(doseItem) => {
-                      setCart(prev => {
-                          const key = doseItem.bottleId; // chave única por garrafa
-                          const exists = prev.find(i => i.bottleId === key);
-                          if (exists) return prev.map(i => i.bottleId === key ? {...i, qty: i.qty + doseItem.qty} : i);
-                          return [...prev, doseItem];
-                      });
-                      setShowDosePanel(false);
-                  }}
-                  onClose={() => setShowDosePanel(false)}
-              />
-          </div>
-      );
-  }
+    if (showDosePanel) {
+        return (
+            <DoseManager
+                isOpen={showDosePanel}
+                onClose={() => setShowDosePanel(false)}
+                products={products}
+                storeConfig={storeConfig}
+                showNotification={showNotification}
+                onAddDoseToCart={(doseItem) => {
+                    setCart(prev => {
+                        const key = doseItem.bottleId;
+                        const exists = prev.find(i => i.bottleId === key);
+                        if (exists) return prev.map(i => i.bottleId === key ? {...i, qty: i.qty + doseItem.qty} : i);
+                        return [...prev, doseItem];
+                    });
+                    setShowDosePanel(false);
+                }}
+            />
+        );
+    }
 
   const clearCart = () => {
       if(window.confirm("Limpar todo o carrinho?")) {

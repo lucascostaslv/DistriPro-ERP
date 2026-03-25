@@ -31,8 +31,11 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
   const [deleteModal, setDeleteModal] = useState(null); // { comanda }
   const [deletePassword, setDeletePassword] = useState('');
 
+  // NOVO: Estado para controlar a exibição do Modal de Doses dentro das comandas
+  const [isDosePanelOpen, setIsDosePanelOpen] = useState(false);
 
-  // 3. Adicione a função que processa a dose escolhida no modal
+
+  // 3. Função que processa a dose escolhida no modal
   const handleAddDose = async (doseItem) => {
       if (!selectedComanda) return showNotification('Selecione uma comanda primeiro.', 'error');
       
@@ -184,8 +187,7 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
   };
 
   const handleDeleteComanda = async () => {
-      // Verifica senha (aqui você pode colocar uma senha fixa ou validar user admin)
-      // Exemplo: Senha fixa "1234" ou senha do admin logado
+      // Verifica senha
       if(deletePassword !== 'admin123' && deletePassword !== currentUser?.password) { 
           return showNotification('Senha incorreta!', 'error');
       }
@@ -193,9 +195,6 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
       try {
           await deleteDoc(doc(db, 'artifacts', String(storeConfig.id), 'public', 'data', 'tabs', deleteModal.id));
           
-          // Opcional: Logar quem deletou (Auditoria)
-          // await addDoc(collection(db, 'logs'), { event: 'DELETE_TAB', user: currentUser.username, tab: deleteModal });
-
           setDeleteModal(null);
           setDeletePassword('');
           if(selectedComanda?.id === deleteModal.id) setSelectedComanda(null);
@@ -211,24 +210,21 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
       
       const itemsToSend = selectedComanda.items.filter(i => selectedItemsToPay.includes(i.uniqueId));
       
-      // Mapeia para o formato do Carrinho do PDV
-      // Adicionando flags importantes para o PDV saber que veio da comanda
       const cartItems = itemsToSend.map(i => ({
-          id: i.productId, // ID do produto (para estoque)
+          id: i.productId,
           originalId: i.productId,
           name: i.name,
           price: i.price,
           qty: i.quantity || 1,
           bottleId: i.bottleId,
           isDose: i.isDose,
-          // METADADOS DE RASTREIO (Importante para baixa na comanda)
           source: 'tab',
           tabId: selectedComanda.id,
           tabItemId: i.uniqueId 
       }));
 
       onSendToCart(cartItems);
-      onClose(); // Fecha o gerenciador e volta pro PDV
+      onClose();
   };
 
   const toggleSelectAll = () => {
@@ -247,7 +243,6 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
       return products.filter(p => p.name.toLowerCase().includes(term) || p.cbaCode?.includes(term));
   }, [products, productSearch]);
 
-  // --- RENDERIZAÇÃO ---
 
   return (
     <div className="flex h-full bg-slate-100 overflow-hidden">
@@ -341,12 +336,12 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
               {/* BODY: LISTA DE ITENS */}
               <div className="flex-1 overflow-y-auto p-4 bg-slate-50/50">
                   
-                  {/* BARRA DE ADICIONAR PRODUTO */}
+                  {/* BARRA DE ADICIONAR PRODUTO (REFEITA) */}
                   <div className="mb-4 relative">
-                      <div className="flex gap-2">
+                      <div className="flex gap-2 h-10">
                           
-                          {/* Seletor Visual de Quantidade (Igual ao PDV) */}
-                          <div className="flex items-center bg-slate-100 rounded border border-slate-200 h-10 transition-colors focus-within:border-indigo-400">
+                          {/* Seletor Visual de Quantidade */}
+                          <div className="flex items-center bg-slate-100 rounded border border-slate-200 h-full transition-colors focus-within:border-indigo-400">
                               <button 
                                  onClick={() => setAddQty(Math.max(1, addQty - 1))}
                                  className="px-2 h-full text-slate-500 hover:text-indigo-600 hover:bg-slate-200 rounded-l font-bold"
@@ -364,15 +359,14 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
                               ><Plus size={14}/></button>
                           </div>
 
-                          <div className="relative flex-1">
+                          <div className="relative flex-1 h-full">
                               <Search className="absolute left-3 top-2.5 text-slate-400" size={18}/>
                               <input 
-                                  className="w-full pl-10 pr-4 py-2 border rounded shadow-sm focus:ring-2 focus:ring-indigo-500 outline-none" 
+                                  className="w-full h-full pl-10 pr-4 py-2 border rounded shadow-sm focus:ring-2 focus:ring-indigo-500 outline-none" 
                                   placeholder="Ex: 5* e busque (Nome ou Cód)..."
                                   value={productSearch}
                                   onChange={e => {
                                       const val = e.target.value;
-                                      // Mágica do multiplicador
                                       const match = val.match(/^(\d+)[*xX]$/);
                                       if (match) {
                                           setAddQty(parseInt(match[1]));
@@ -383,9 +377,18 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
                                   }}
                               />
                           </div>
+
+                          {/* BOTÃO DOSES (MENOR, ROXO E NA MESMA LINHA) */}
+                          <button
+                              onClick={() => setIsDosePanelOpen(true)}
+                              className="h-full px-3 bg-purple-50 text-purple-700 border border-purple-200 rounded font-bold flex items-center justify-center gap-2 hover:bg-purple-100 transition-colors shadow-sm"
+                              title="Adicionar Doses"
+                          >
+                              <Wine size={16}/> <span className="hidden md:inline text-sm">Doses</span>
+                          </button>
                       </div>
                       
-                      {/* Dropdown de Sugestões (MANTÉM IGUAL) */}
+                      {/* Dropdown de Sugestões */}
                       {productSearch && (
                           <div className="absolute top-full left-0 right-0 bg-white border rounded shadow-xl mt-1 max-h-60 overflow-y-auto z-20">
                               {filteredProducts.map(p => (
@@ -401,12 +404,6 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
                               {filteredProducts.length === 0 && <div className="p-3 text-slate-400 text-sm">Nenhum produto encontrado.</div>}
                           </div>
                       )}
-                      <button
-                            onClick={renderDosePanel}
-                            className="p-3 bg-amber-50 text-amber-600 rounded-xl font-bold flex flex-col items-center justify-center gap-2 hover:bg-amber-100 transition-colors border border-amber-200"
-                        >
-                            <Wine size={18}/> <span className="hidden md:inline">Doses</span>
-                        </button>
                   </div>
 
                   {/* LISTA DE ITENS DA COMANDA */}
@@ -441,12 +438,14 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
                                               : <Square size={20}/>}
                                       </button>
                                       <div>
-                                          <div className="font-bold text-slate-700">{item.name}</div>
+                                          <div className="font-bold text-slate-700 flex items-center gap-2">
+                                              {item.name}
+                                              {item.isDose && <span className="bg-purple-100 text-purple-700 text-[9px] px-1 rounded uppercase">Dose</span>}
+                                          </div>
                                           <div className="text-[10px] text-slate-400">{new Date(item.addedAt).toLocaleTimeString().slice(0,5)} • {item.addedBy || 'sistema'}</div>
                                       </div>
                                   </div>
                                   <div className="flex items-center gap-4">
-                                      {/* Controle Qtd Compacto */}
                                       <div className="flex items-center bg-white border border-slate-200 rounded shadow-sm h-8">
                                           <button onClick={() => handleUpdateQty(item.uniqueId, -1)} className="w-7 h-full flex items-center justify-center text-slate-500 hover:bg-slate-100 hover:text-red-500 transition-colors"><Minus size={14}/></button>
                                           <span className="w-8 text-center font-bold text-sm text-slate-800">{item.quantity || 1}</span>
@@ -532,6 +531,13 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
               </div>
           </div>
       )}
+
+      {/* RENDERIZAÇÃO DO MODAL DE DOSES */}
+      {isDosePanelOpen && renderDosePanel(
+          () => setIsDosePanelOpen(false), 
+          handleAddDose
+      )}
+
     </div>
   );
 };
