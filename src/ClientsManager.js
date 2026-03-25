@@ -4,9 +4,11 @@ import {
   Package, Calendar, X, CheckCircle, 
   Building2, Mail
 } from 'lucide-react';
-import { supabase } from './supabaseClient';
-import { db } from './firebase'; 
-import { collection, query, where, getDocs, orderBy, limit, doc, getDoc } from "firebase/firestore";
+
+// 1. IMPORTAÇÕES MULTI-TENANT
+import { useTenant } from './contexts/TenantContext';
+import { supabase } from './supabaseClient'; // Mantemos para executar Insert/Update/Delete
+import { where, limit } from "firebase/firestore"; // Mantemos APENAS os filtros do Firebase
 
 // --- MÁSCARAS ---
 const masks = {
@@ -17,7 +19,10 @@ const masks = {
   currency: (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0)
 };
 
-const ClientsManager = ({ storeConfig }) => {
+// 2. COMPONENTE (Sem receber storeConfig!)
+const ClientsManager = () => {
+  const { tenantDB } = useTenant(); // O "Cérebro" da nossa arquitetura
+
   const [clients, setClients] = useState([]);
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -37,17 +42,14 @@ const ClientsManager = ({ storeConfig }) => {
 
   useEffect(() => {
     fetchClients();
-  }, [storeConfig]);
+  }, [tenantDB]); // Atualiza se a loja/banco mudar
 
   const fetchClients = async () => {
-    if (!storeConfig?.id) return;
+    if (!tenantDB) return;
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('fiscal_clients')
-        .select('*')
-        .eq('firebase_store_id', String(storeConfig.id))
-        .order('name');
+      // 3. BUSCA SUPABASE (Blindada)
+      const { data, error } = await tenantDB.supabase.query('fiscal_clients').order('name');
       
       if (error) throw error;
       setClients(data || []);
@@ -58,46 +60,37 @@ const ClientsManager = ({ storeConfig }) => {
     }
   };
 
-  // --- FUNÇÃO DE BUSCA INTELIGENTE (CORREÇÃO DE NOMES) ---
   const fetchSupplierInsights = async (supplierId, supplierName) => {
-    if (!storeConfig?.id || !supplierId) return;
+    if (!tenantDB || !supplierId) return;
     setStatsLoading(true);
     setSupplierStats({ invoices: [], products: [] });
     
     try {
-        const storeId = String(storeConfig.id);
-        const invoicesRef = collection(db, 'artifacts', storeId, 'public', 'data', 'invoices');
-        const productsRef = collection(db, 'artifacts', storeId, 'public', 'data', 'products');
-
-        // 1. Buscar Notas Fiscais
-        let snapId = await getDocs(query(invoicesRef, where('entityId', '==', String(supplierId)), limit(50)));
-        let snapName = await getDocs(query(invoicesRef, where('entityName', '==', supplierName), limit(50)));
+        // 4. BUSCA FIREBASE (Usando DAL limpa e abstraída)
+        const invoicesById = await tenantDB.firestore.getAll('invoices', [where('entityId', '==', String(supplierId)), limit(50)]);
+        const invoicesByName = await tenantDB.firestore.getAll('invoices', [where('entityName', '==', supplierName), limit(50)]);
         
         const invoiceMap = new Map();
-        snapId.docs.forEach(d => invoiceMap.set(d.id, { id: d.id, ...d.data() }));
-        snapName.docs.forEach(d => invoiceMap.set(d.id, { id: d.id, ...d.data() }));
+        invoicesById.forEach(d => invoiceMap.set(d.id, d));
+        invoicesByName.forEach(d => invoiceMap.set(d.id, d));
         
         const invoices = Array.from(invoiceMap.values()).sort((a,b) => (b.created_at?.seconds || 0) - (a.created_at?.seconds || 0));
 
-        // 2. Buscar Produtos e CORRIGIR NOMES
         const productsMap = new Map();
 
-        // Helper: busca o nome real do produto no banco de produtos
+        // 5. HELPER FIREBASE (Usando getById da DAL)
         const getRealProductName = async (prodId) => {
             try {
                 if(!prodId) return null;
-                const docRef = doc(productsRef, prodId);
-                const docSnap = await getDoc(docRef);
-                return docSnap.exists() ? docSnap.data().name : null;
+                const docData = await tenantDB.firestore.getById('products', prodId);
+                return docData ? docData.name : null;
             } catch { return null; }
         };
 
-        // Processar itens das notas
         for (const inv of invoices) {
             if (inv.items && Array.isArray(inv.items)) {
                 for (const item of inv.items) {
                     if (item.productId && !productsMap.has(item.productId)) {
-                        // AQUI ESTÁ O TRUQUE: Busca o nome oficial
                         let realName = await getRealProductName(item.productId);
                         
                         productsMap.set(item.productId, {
@@ -122,7 +115,6 @@ const ClientsManager = ({ storeConfig }) => {
     }
   };
 
-  // --- MANIPULADORES ---
   const handleEdit = (client) => {
     setEditingClient(client);
     setModalTab('registration'); 
@@ -171,8 +163,8 @@ const ClientsManager = ({ storeConfig }) => {
       if (formData.isSupplier) tags.push('FORNECEDOR');
       if (!formData.isSupplier) tags.push('CLIENTE'); 
 
+      // 6. INSERÇÃO/ATUALIZAÇÃO SUPABASE (Payload sem firebase_store_id manual)
       const payload = {
-        firebase_store_id: String(storeConfig.id),
         name: formData.name.toUpperCase(),
         type: formData.type,
         tax_id: formData.tax_id.replace(/\D/g, ''),
@@ -192,12 +184,14 @@ const ClientsManager = ({ storeConfig }) => {
         const { error } = await supabase
           .from('fiscal_clients')
           .update(payload)
-          .eq('id', editingClient.id);
+          .eq('id', editingClient.id)
+          .eq('firebase_store_id', tenantDB.storeId); // Garantia de segurança na edição
         if (error) throw error;
       } else {
         const { error } = await supabase
           .from('fiscal_clients')
-          .insert([payload]);
+          // withStoreId injeta a loja automaticamente antes de salvar!
+          .insert([tenantDB.supabase.withStoreId(payload)]);
         if (error) throw error;
       }
 
@@ -210,7 +204,12 @@ const ClientsManager = ({ storeConfig }) => {
 
   const handleDelete = async (id) => {
     if (!window.confirm('Tem certeza?')) return;
-    const { error } = await supabase.from('fiscal_clients').delete().eq('id', id);
+    // 7. DELEÇÃO SUPABASE (Blindada)
+    const { error } = await supabase
+        .from('fiscal_clients')
+        .delete()
+        .eq('id', id)
+        .eq('firebase_store_id', tenantDB.storeId);
     if (!error) fetchClients();
   };
 
@@ -309,7 +308,6 @@ const ClientsManager = ({ storeConfig }) => {
       {/* 4. MODAL COM ABAS */}
       {isModalOpen && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-          {/* AQUI: h-[85vh] garante que todas as abas tenham o mesmo tamanho fixo */}
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl flex flex-col overflow-hidden h-[85vh] animate-in zoom-in-95 duration-200">
             
             {/* Header Modal */}
@@ -333,7 +331,7 @@ const ClientsManager = ({ storeConfig }) => {
             {/* CONTEÚDO SCROLLAVEL (Preenche o espaço restante) */}
             <div className="flex-1 overflow-y-auto p-6 bg-white custom-scrollbar">
                 
-                {/* ABA 1: CADASTRO COMPLETO (Agora com todos os inputs) */}
+                {/* ABA 1: CADASTRO COMPLETO */}
                 {modalTab === 'registration' && (
                     <div className="space-y-5 animate-in fade-in">
                         
@@ -434,7 +432,7 @@ const ClientsManager = ({ storeConfig }) => {
                     </div>
                 )}
 
-                {/* ABA 3: PRODUTOS (COM NOME CORRIGIDO) */}
+                {/* ABA 3: PRODUTOS */}
                 {modalTab === 'products' && (
                     <div className="animate-in fade-in h-full">
                         {statsLoading ? (
@@ -454,7 +452,6 @@ const ClientsManager = ({ storeConfig }) => {
                                                      {prod.source === 'invoice' ? 'Nota Fiscal' : 'Cadastro'}
                                                  </span>
                                              </div>
-                                             {/* NOME EM DESTAQUE */}
                                              <h4 className="font-bold text-slate-800 text-sm truncate" title={prod.name}>
                                                  {prod.name || 'Nome Indisponível'}
                                              </h4>

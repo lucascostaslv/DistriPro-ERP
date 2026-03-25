@@ -1,15 +1,12 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Calendar, Search, CheckCircle, Eye, X, Package, 
-  ChevronLeft, ChevronRight, CalendarDays, RefreshCw, Trash2, Landmark
+  ChevronLeft, ChevronRight, CalendarDays, RefreshCw, Trash2, Landmark, Clock
 } from 'lucide-react';
-import { 
-  collection, query, orderBy, where, onSnapshot, doc, 
-  deleteDoc, getDocs, writeBatch, increment, serverTimestamp, updateDoc 
-} from 'firebase/firestore';
+import { writeBatch, increment, doc, serverTimestamp, orderBy, where } from 'firebase/firestore';
 import { db } from '../firebase'; 
+import { useTenant } from '../contexts/TenantContext'; 
 
-// Utilitários de formatação
 const formatCurrency = (val) => {
     const numberVal = Number(val);
     if (isNaN(numberVal)) return 'R$ 0,00';
@@ -18,7 +15,6 @@ const formatCurrency = (val) => {
 
 const formatDate = (dateStr) => {
   if (!dateStr) return '-';
-  // Tenta tratar ISO date ou YYYY-MM-DD
   try {
       if(dateStr.includes('T')) dateStr = dateStr.split('T')[0];
       const [y, m, d] = dateStr.split('-');
@@ -26,61 +22,50 @@ const formatDate = (dateStr) => {
   } catch (e) { return dateStr; }
 };
 
-const AccountsPayable = ({ products, storeConfig, currentUser }) => { // Aceita storeConfig para garantir o ID
-  // Estados de Dados (Separados para evitar conflitos)
+const AccountsPayable = ({ products }) => { 
+  const { tenantDB, currentUser } = useTenant();
+  
   const [rawInvoices, setRawInvoices] = useState([]);
   const [rawExpenses, setRawExpenses] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // Estados para a conexão bancária
   const [bankAccounts, setBankAccounts] = useState([]);
   const [selectedAccountId, setSelectedAccountId] = useState('');
   const [isPayModalOpen, setIsPayModalOpen] = useState(false);
   const [pendingPayment, setPendingPayment] = useState(null);
   
-  // --- ESTADO DE DATA ---
   const [currentDate, setCurrentDate] = useState(new Date());
   const [showMonthPicker, setShowMonthPicker] = useState(false); 
   
-  // Filtros
   const [selectedCategory, setSelectedCategory] = useState('ALL');
   const [searchTerm, setSearchTerm] = useState('');
-  
-  // Modal Detalhes
   const [detailsModal, setDetailsModal] = useState(null);
 
-  const monthNames = [
-    "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
-    "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
-  ];
+  
 
-  // Computa a string "YYYY-MM" para filtragem
+  const monthNames = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
+
   const selectedMonthStr = useMemo(() => {
     const year = currentDate.getFullYear();
     const month = String(currentDate.getMonth() + 1).padStart(2, '0');
     return `${year}-${month}`;
   }, [currentDate]);
 
-
-
   // Carrega as contas bancárias para o seletor
   useEffect(() => {
-    if (!storeConfig?.id) return;
+    if (!tenantDB) return;
     const fetchAccounts = async () => {
-      const accRef = collection(db, 'artifacts', String(storeConfig.id), 'public', 'data', 'bank_accounts');
-      const snap = await getDocs(accRef);
-      setBankAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      const accs = await tenantDB.firestore.getAll('bank_accounts');
+      setBankAccounts(accs);
     };
     fetchAccounts();
-  }, [storeConfig]);
+  }, [tenantDB, isPayModalOpen]);
 
-  // Função para processar o pagamento no banco e no financeiro
   const handleConfirmPayment = async () => {
     if (!selectedAccountId) return alert("Selecione uma conta para o pagamento.");
     if (!pendingPayment) return;
 
     const { type, id, inst, invoice, expense } = pendingPayment;
-    const storeId = String(storeConfig.id);
     const batch = writeBatch(db);
     const amount = Number(inst?.value || expense?.amount || 0);
     const description = type === 'INVOICE' 
@@ -88,8 +73,7 @@ const AccountsPayable = ({ products, storeConfig, currentUser }) => { // Aceita 
         : `PGTO DESPESA: ${expense.description}`;
 
     try {
-        // 1. Registrar a Saída no Extrato da Conta Bancária
-        const accTxnRef = doc(collection(db, 'artifacts', storeId, 'public', 'data', 'account_transactions'));
+        const accTxnRef = doc(tenantDB.firestore.getRawRef('account_transactions'));
         batch.set(accTxnRef, {
             accountId: selectedAccountId,
             type: 'OUT',
@@ -98,22 +82,20 @@ const AccountsPayable = ({ products, storeConfig, currentUser }) => { // Aceita 
             category: 'Contas a Pagar',
             date: new Date().toISOString(),
             createdAt: serverTimestamp(),
-            userName: currentUser?.username || 'Gerente'
+            userName: currentUser?.name || currentUser?.username || 'Gerente'
         });
 
-        // 2. Atualizar o Saldo da Conta Bancária
-        const accRef = doc(db, 'artifacts', storeId, 'public', 'data', 'bank_accounts', selectedAccountId);
+        const accRef = tenantDB.firestore.getRawRef('bank_accounts', selectedAccountId);
         batch.update(accRef, { currentBalance: increment(-amount) });
 
-        // 3. Atualizar o Status no Financeiro Original
         if (type === 'INVOICE') {
-            const invoiceRef = doc(db, 'artifacts', storeId, 'public', 'data', 'invoices', id);
+            const invoiceRef = tenantDB.firestore.getRawRef('invoices', id);
             const updatedFinancials = invoice.financials.map(f => 
                 f.number === inst.number ? { ...f, status: 'PAGO', paymentDate: new Date().toISOString(), accountId: selectedAccountId } : f
             );
             batch.update(invoiceRef, { financials: updatedFinancials });
         } else {
-            const expenseRef = doc(db, 'artifacts', storeId, 'public', 'data', 'financial_movements', id);
+            const expenseRef = tenantDB.firestore.getRawRef('financial_movements', id);
             batch.update(expenseRef, { status: 'PAGO', accountId: selectedAccountId });
         }
 
@@ -128,7 +110,6 @@ const AccountsPayable = ({ products, storeConfig, currentUser }) => { // Aceita 
     }
   };
 
-  // Controles de Navegação de Data
   const handlePrevMonth = () => setCurrentDate(prev => new Date(prev.getFullYear(), prev.getMonth() - 1, 1));
   const handleNextMonth = () => setCurrentDate(prev => new Date(prev.getFullYear(), prev.getMonth() + 1, 1));
   
@@ -142,60 +123,30 @@ const AccountsPayable = ({ products, storeConfig, currentUser }) => { // Aceita 
     setShowMonthPicker(false);
   };
 
-  // Extração de Categorias
   const categories = useMemo(() => {
     const cats = new Set((products || []).map(p => p.category).filter(Boolean));
     return ['ALL', ...Array.from(cats)];
   }, [products]);
 
-  // --- BUSCA DE DADOS EM TEMPO REAL (BLINDADA) ---
+  // --- BUSCA DE DADOS EM TEMPO REAL BLINDADA ---
   useEffect(() => {
-    // CORREÇÃO CRÍTICA: Forçamos String() no ID da loja.
-    // Se o ID for numérico (ex: 10), o Firebase trava sem essa conversão.
-    const rawId = storeConfig?.id || (typeof window !== 'undefined' ? window.__app_id : null);
-    const appId = rawId ? String(rawId) : null;
-    
-    if (!appId) {
-        console.warn("AccountsPayable: Loja não identificada. Aguardando...");
-        return;
-    }
-
+    if (!tenantDB) return;
     setLoading(true);
 
-    // 1. Listener de Notas Fiscais (Invoices)
-    const qInvoices = query(
-        collection(db, 'artifacts', appId, 'public', 'data', 'invoices'), 
-        orderBy('createdAt', 'desc')
-    );
-    
-    const unsubInvoices = onSnapshot(qInvoices, (snap) => {
-        const data = snap.docs.map(d => ({ id: d.id, source: 'invoice', ...d.data() }));
-        setRawInvoices(data);
+    const unsubInvoices = tenantDB.firestore.subscribe('invoices', (data) => {
+        setRawInvoices(data.map(d => ({ id: d.id, source: 'invoice', ...d })));
         setLoading(false);
-    }, (error) => {
-        console.error("Erro ao sincronizar Invoices:", error);
-        setLoading(false);
-    });
+    }, [orderBy('createdAt', 'desc')]);
 
-    // 2. Listener de Movimentos Financeiros (Expenses)
-    const qExpenses = query(
-        collection(db, 'artifacts', appId, 'public', 'data', 'financial_movements'), 
-        where('type', '==', 'EXPENSE')
-    );
-
-    const unsubExpenses = onSnapshot(qExpenses, (snap) => {
-        const data = snap.docs.map(d => {
-            const item = d.data();
-            
-            // Status Automático
+    const unsubExpenses = tenantDB.firestore.subscribe('financial_movements', (data) => {
+        const mapped = data.map(item => {
             let computedStatus = item.status || 'PENDENTE';
             if (!item.status) {
                  const today = new Date().toISOString().split('T')[0];
                  if (item.date < today) computedStatus = 'ATRASADO';
             }
-
             return {
-                id: d.id,
+                id: item.id,
                 source: 'expense',
                 header: {
                     number: 'DESP',
@@ -213,32 +164,27 @@ const AccountsPayable = ({ products, storeConfig, currentUser }) => { // Aceita 
                 category: item.category
             };
         });
-        setRawExpenses(data);
-    }, (error) => {
-        console.error("Erro ao sincronizar Expenses:", error);
-    });
+        setRawExpenses(mapped);
+    }, [where('type', '==', 'EXPENSE')]);
 
     return () => {
         unsubInvoices();
         unsubExpenses();
     };
-  }, [storeConfig]);
+  }, [tenantDB]);
 
-  // --- AÇÃO DE EXCLUSÃO ---
   const handleDeleteDocument = async (modalData) => {
       const isExpense = modalData.source === 'expense';
       const confirm = window.confirm(`Tem certeza que deseja excluir esta ${isExpense ? 'Despesa' : 'Nota Fiscal'}?\nIsso apagará o registro permanentemente.`);
       if (!confirm) return;
 
-      const rawId = storeConfig?.id || (typeof window !== 'undefined' ? window.__app_id : null);
-      if (!rawId) return;
+      if (!tenantDB) return;
 
       try {
-          // Define a coleção correta baseada na origem do documento
           const collectionName = isExpense ? 'financial_movements' : 'invoices';
-          await deleteDoc(doc(db, 'artifacts', String(rawId), 'public', 'data', collectionName, modalData.id));
+          await tenantDB.firestore.delete(collectionName, modalData.id);
           
-          setDetailsModal(null); // Fecha o modal após a exclusão
+          setDetailsModal(null); 
           alert(`${isExpense ? 'Despesa' : 'Nota'} excluída com sucesso!`);
       } catch (error) {
           console.error("Erro ao excluir documento:", error);
@@ -246,37 +192,20 @@ const AccountsPayable = ({ products, storeConfig, currentUser }) => { // Aceita 
       }
   };
 
-  // Busca as contas bancárias disponíveis
-  useEffect(() => {
-    if (!storeConfig?.id) return;
-    const fetchAccounts = async () => {
-      try {
-        const accRef = collection(db, 'artifacts', String(storeConfig.id), 'public', 'data', 'bank_accounts');
-        const snap = await getDocs(accRef);
-        setBankAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-      } catch (e) { console.error("Erro ao buscar contas:", e); }
-    };
-    fetchAccounts();
-  }, [storeConfig, isPayModalOpen]);
-
-
-  // --- PROCESSAMENTO E UNIFICAÇÃO ---
+  // --- PROCESSAMENTO ---
   const payableItems = useMemo(() => {
-    // Combina as duas fontes
     const allRecords = [...rawInvoices, ...rawExpenses];
     let items = [];
     
     allRecords.forEach(inv => {
-      // Filtro de Categoria (Apenas para notas com produtos categorizados ou despesas categorizadas)
       if (selectedCategory !== 'ALL') {
           if (inv.source === 'invoice') {
-             const hasCategory = inv.items.some(i => {
+             const hasCategory = inv.items?.some(i => {
                 const prod = (products || []).find(p => p.id === i.productId);
                 return prod && prod.category === selectedCategory;
              });
              if (!hasCategory) return;
           } else {
-             // Para despesa manual, verifica a categoria direta
              if (inv.category !== selectedCategory) return;
           }
       }
@@ -285,11 +214,8 @@ const AccountsPayable = ({ products, storeConfig, currentUser }) => { // Aceita 
 
       inv.financials.forEach(inst => {
         if (!inst.dueDate) return;
-
-        // Filtro de Mês (Essencial)
         if (!inst.dueDate.startsWith(selectedMonthStr)) return;
         
-        // Filtro de Texto
         const searchLower = searchTerm.toLowerCase();
         if (searchTerm && 
             !inv.header.entityName.toLowerCase().includes(searchLower) && 
@@ -316,22 +242,109 @@ const AccountsPayable = ({ products, storeConfig, currentUser }) => { // Aceita 
       });
     });
 
-    // Ordenação Final em Memória
     return items.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
   }, [rawInvoices, rawExpenses, selectedMonthStr, selectedCategory, searchTerm, products]);
 
-  // Totais
+  // --- ESTADOS DO AGENDAMENTO AUTOMÁTICO ---
+  const [autoPayModal, setAutoPayModal] = useState(null);
+  const processingAuto = useRef(false);
+
+  // --- ROBÔ DE PAGAMENTO AUTOMÁTICO (Vigia e liquida as contas no dia certo) ---
+  useEffect(() => {
+      const processAutoPays = async () => {
+          if (!tenantDB || payableItems.length === 0 || processingAuto.current) return;
+          
+          const todayStr = new Date().toISOString().split('T')[0];
+          
+          // Filtra quem está agendado para HOJE ou antes, e ainda está pendente
+          const toProcess = payableItems.filter(item => {
+              if (item.status === 'PAGO') return false;
+              if (item.source === 'expense') {
+                  return item.fullInvoice?.isAutoPay && item.fullInvoice?.autoPayDate <= todayStr;
+              } else {
+                  const inst = item.fullInvoice?.financials?.find(f => f.number === item.installmentNum);
+                  return inst?.isAutoPay && inst?.autoPayDate <= todayStr;
+              }
+          });
+
+          if (toProcess.length > 0) {
+              processingAuto.current = true;
+              try {
+                  const batch = writeBatch(db);
+                  
+                  for (const item of toProcess) {
+                      const inst = item.source === 'invoice' ? item.fullInvoice.financials.find(f => f.number === item.installmentNum) : item.fullInvoice;
+                      const accId = inst.autoPayAccount;
+                      const amount = item.value;
+                      if (!accId) continue;
+
+                      const description = `PGTO AUTO: ${item.supplier} ${item.source === 'invoice' ? `(Parc. ${item.installmentNum})` : ''}`;
+
+                      // 1. Extrato bancário
+                      const accTxnRef = doc(tenantDB.firestore.getRawRef('account_transactions'));
+                      batch.set(accTxnRef, {
+                          accountId: accId, type: 'OUT', amount: amount,
+                          description: description, category: 'Contas a Pagar',
+                          date: new Date().toISOString(), createdAt: serverTimestamp(),
+                          userName: 'Sistema Automático'
+                      });
+
+                      // 2. Desconta Saldo
+                      const accRef = tenantDB.firestore.getRawRef('bank_accounts', accId);
+                      batch.update(accRef, { currentBalance: increment(-amount) });
+
+                      // 3. Muda Status da Dívida
+                      if (item.source === 'invoice') {
+                          const invoiceRef = tenantDB.firestore.getRawRef('invoices', item.invoiceId);
+                          const updatedFinancials = item.fullInvoice.financials.map(f => 
+                              f.number === item.installmentNum ? { ...f, status: 'PAGO', paymentDate: new Date().toISOString(), accountId: accId, isAutoPay: false } : f
+                          );
+                          batch.update(invoiceRef, { financials: updatedFinancials });
+                      } else {
+                          const expenseRef = tenantDB.firestore.getRawRef('financial_movements', item.invoiceId);
+                          batch.update(expenseRef, { status: 'PAGO', accountId: accId, isAutoPay: false });
+                      }
+                  }
+                  await batch.commit();
+                  console.log(`${toProcess.length} pagamentos automáticos liquidados com sucesso!`);
+              } catch (e) {
+                  console.error("Erro no AutoPay", e);
+              } finally {
+                  processingAuto.current = false;
+              }
+          }
+      };
+      processAutoPays();
+  }, [payableItems, tenantDB]);
+
+  // --- FUNÇÃO PARA SALVAR O AGENDAMENTO (Acionada no Modal) ---
+  const handleSaveAutoPay = async () => {
+      if (!autoPayModal.accountId || !autoPayModal.date) return alert("Preencha a data e a conta.");
+      
+      const { source, invoiceId, installmentNum, fullInvoice } = autoPayModal.item;
+      const batch = writeBatch(db);
+
+      if (source === 'invoice') {
+          const ref = tenantDB.firestore.getRawRef('invoices', invoiceId);
+          const updatedFinancials = fullInvoice.financials.map(f => 
+              f.number === installmentNum ? { ...f, isAutoPay: true, autoPayDate: autoPayModal.date, autoPayAccount: autoPayModal.accountId } : f
+          );
+          batch.update(ref, { financials: updatedFinancials });
+      } else {
+          const ref = tenantDB.firestore.getRawRef('financial_movements', invoiceId);
+          batch.update(ref, { isAutoPay: true, autoPayDate: autoPayModal.date, autoPayAccount: autoPayModal.accountId });
+      }
+
+      await batch.commit();
+      alert("Pagamento automático agendado com sucesso!");
+      setAutoPayModal(null);
+  };
+
   const totalDueMonth = payableItems.reduce((acc, item) => acc + (item.status === 'PENDENTE' || item.status === 'ATRASADO' ? item.value : 0), 0);
   const totalPaidMonth = payableItems.reduce((acc, item) => acc + (item.status === 'PAGO' ? item.value : 0), 0);
-
-  // Exibir apenas Pendentes/Atrasados na lista (Opcional: Pode querer ver pagos também)
-  // Vou mostrar TUDO para garantir que nada suma, mas você pode descomentar o filtro abaixo
-  const itemsToShow = payableItems; //.filter(item => item.status !== 'PAGO');
-
-  // Dropdown Anos
+  const itemsToShow = payableItems; 
   const years = Array.from({length: 6}, (_, i) => new Date().getFullYear() - 2 + i);
 
-  // Click Outside
   const pickerRef = useRef(null);
   useEffect(() => {
     const handleClickOutside = (event) => {
@@ -482,27 +495,45 @@ const AccountsPayable = ({ products, storeConfig, currentUser }) => { // Aceita 
                                 <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${item.status === 'PAGO' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
                                     {item.status}
                                 </span>
+                                {/* Badge de Automático */}
+                                {(item.source === 'expense' ? item.fullInvoice?.isAutoPay : item.fullInvoice?.financials?.find(f=>f.number===item.installmentNum)?.isAutoPay) && item.status !== 'PAGO' && (
+                                    <span className="mt-1 text-[9px] text-indigo-600 font-bold bg-indigo-50 rounded px-1.5 py-0.5 flex justify-center items-center gap-1 w-fit mx-auto border border-indigo-100">
+                                        <Clock size={10}/> Agendado
+                                    </span>
+                                )}
                             </td>
                             <td className="p-3 text-right">
                                 <div className="flex justify-end gap-1">
                                     {item.status !== 'PAGO' && (
-                                        <button 
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                setPendingPayment({ 
-                                                    type: item.source === 'expense' ? 'EXPENSE' : 'INVOICE', 
-                                                    id: item.invoiceId, 
-                                                    inst: { number: item.installmentNum, value: item.value }, 
-                                                    invoice: item.fullInvoice,
-                                                    expense: item.source === 'expense' ? { description: item.supplier, amount: item.value } : null
-                                                });
-                                                setIsPayModalOpen(true);
-                                            }}
-                                            className="p-1.5 bg-emerald-600 text-white rounded hover:bg-emerald-700 transition-colors shadow-sm"
-                                            title="Pagar agora"
-                                        >
-                                            <CheckCircle size={14}/>
-                                        </button>
+                                        <>
+                                            <button 
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    setAutoPayModal({ item, date: item.dueDate, accountId: '' });
+                                                }}
+                                                className="p-1.5 bg-indigo-50 text-indigo-600 rounded hover:bg-indigo-100 transition-colors shadow-sm"
+                                                title="Agendar Pagamento Automático"
+                                            >
+                                                <Clock size={14}/>
+                                            </button>
+                                            <button 
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    setPendingPayment({ 
+                                                        type: item.source === 'expense' ? 'EXPENSE' : 'INVOICE', 
+                                                        id: item.invoiceId, 
+                                                        inst: { number: item.installmentNum, value: item.value }, 
+                                                        invoice: item.fullInvoice,
+                                                        expense: item.source === 'expense' ? { description: item.supplier, amount: item.value } : null
+                                                    });
+                                                    setIsPayModalOpen(true);
+                                                }}
+                                                className="p-1.5 bg-emerald-600 text-white rounded hover:bg-emerald-700 transition-colors shadow-sm"
+                                                title="Pagar agora (Manual)"
+                                            >
+                                                <CheckCircle size={14}/>
+                                            </button>
+                                        </>
                                     )}
                                     <button onClick={() => setDetailsModal(item.fullInvoice)} className="p-1.5 bg-slate-100 text-slate-600 rounded hover:bg-slate-200">
                                         <Eye size={14}/>
@@ -611,6 +642,45 @@ const AccountsPayable = ({ products, storeConfig, currentUser }) => { // Aceita 
                       <div className="flex justify-end gap-2 pt-2">
                           <button onClick={() => setIsPayModalOpen(false)} className="px-4 py-2 text-sm font-bold text-slate-500">Cancelar</button>
                           <button onClick={handleConfirmPayment} className="px-4 py-2 bg-emerald-600 text-white rounded text-sm font-bold">Confirmar</button>
+                      </div>
+                  </div>
+              </div>
+          </div>
+      )}
+
+      {/* MODAL DE AGENDAMENTO AUTOMÁTICO */}
+      {autoPayModal && (
+          <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+              <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6">
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-2">
+                      <Clock size={20} className="text-indigo-600"/> Agendar Pagamento
+                  </h3>
+                  <p className="text-sm text-slate-500 mb-4">O sistema descontará o valor automaticamente na data programada, sem precisar de aprovação manual.</p>
+                  
+                  <div className="space-y-4">
+                      <div>
+                          <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Data da Efetivação</label>
+                          <input type="date" className="w-full border p-2 rounded text-sm bg-white focus:ring-2 outline-none border-slate-200 focus:ring-indigo-200" 
+                              value={autoPayModal.date} onChange={e => setAutoPayModal({...autoPayModal, date: e.target.value})} 
+                          />
+                      </div>
+                      <div>
+                          <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Conta de Saída</label>
+                          <select className="w-full border p-2 rounded text-sm bg-white focus:ring-2 outline-none border-slate-200 focus:ring-indigo-200"
+                              value={autoPayModal.accountId} onChange={e => setAutoPayModal({...autoPayModal, accountId: e.target.value})}
+                          >
+                              <option value="">-- Escolha a conta --</option>
+                              {bankAccounts.map(acc => (
+                                  <option key={acc.id} value={acc.id}>{acc.name} (Saldo: {formatCurrency(acc.currentBalance)})</option>
+                              ))}
+                          </select>
+                      </div>
+
+                      <div className="flex justify-end gap-2 pt-4">
+                          <button onClick={() => setAutoPayModal(null)} className="px-4 py-2 text-sm font-bold text-slate-500">Cancelar</button>
+                          <button onClick={handleSaveAutoPay} className="px-4 py-2 bg-indigo-600 text-white rounded text-sm font-bold flex items-center gap-2">
+                              <CheckCircle size={16}/> Programar
+                          </button>
                       </div>
                   </div>
               </div>

@@ -5,13 +5,14 @@ import {
   DollarSign, Layers, Calculator, Clock, Share, Copy, Truck, FileText, Calendar, Filter,
   Download, ChevronLeft, ChevronRight, ShoppingCart, Wine
 } from 'lucide-react';
-import { collection, doc, updateDoc, deleteDoc, addDoc, serverTimestamp, increment, query, where, getDocs, writeBatch} from "firebase/firestore";
+import { serverTimestamp, increment, writeBatch} from "firebase/firestore";
 import { db } from './firebase'; 
 import { supabase } from './supabaseClient';
 import PurchaseSuggestion from './PurchaseSuggestion';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { calculateItemTaxes } from './utils/TaxCalculator';
+import { useTenant } from './contexts/TenantContext';
 
 // --- UTILITÁRIOS ---
 const masks = {
@@ -144,6 +145,8 @@ const StockCard = ({ product, onUpdateStock, onEdit, onOpenHistory, getParentNam
 
 // --- COMPONENTE PRINCIPAL ---
 const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig, sales = [], suppliers: globalSuppliers = [] }) => {
+  const { tenantDB } = useTenant();
+
   const [activeTab, setActiveTab] = useState('quick'); 
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -261,11 +264,11 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
         const storeId = String(storeConfig.id);
         
         // Perfis Fiscais
-        const { data: profiles } = await supabase.from('fiscal_tax_profiles').select('*').eq('firebase_store_id', storeId);
+        const { data: profiles } = await tenantDB.supabase.query('fiscal_tax_profiles');
         if (profiles) setTaxProfiles(profiles);
 
         // Fornecedores (Tabela unificada fiscal_clients)
-        const { data: suppliersData } = await supabase.from('fiscal_clients').select('*').eq('firebase_store_id', storeId).order('name');
+        const { data: suppliersData } = await tenantDB.supabase.query('fiscal_clients');
         if (suppliersData) setSuppliers(suppliersData);
     };
     loadAuxData();
@@ -348,7 +351,6 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
               if (!storeConfig?.id) return showNotification("Erro: Loja não identificada.", "error");
               
               const newClientPayload = {
-                  firebase_store_id: String(storeConfig.id),
                   name: supplierNameUpper,
                   type: 'PJ', 
                   tags: ['FORNECEDOR'], // Agora vai funcionar com a nova coluna
@@ -357,10 +359,10 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
               };
 
               const { data, error } = await supabase
-                  .from('fiscal_clients')
-                  .insert([newClientPayload])
-                  .select()
-                  .single();
+                .from('fiscal_clients')
+                .insert([tenantDB.supabase.withStoreId(newClientPayload)]) // Mágica aqui!
+                .select()
+                .single();
 
               if (error) throw error;
 
@@ -462,20 +464,21 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
         let mainDocRef;
         // 1. Salva Principal
         if (currentProduct.id) {
-            await updateDoc(doc(db, 'artifacts', storeId, 'public', 'data', 'products', currentProduct.id), productData);
+            await tenantDB.firestore.update('products', currentProduct.id, productData);
             mainDocRef = { id: currentProduct.id };
             showNotification('Produto atualizado!', 'success');
         } else {
-            const docRef = await addDoc(collection(db, 'artifacts', storeId, 'public', 'data', 'products'), { ...productData, created_at: serverTimestamp() });
-            mainDocRef = docRef;
+            const newId = await tenantDB.firestore.add('products', productData);
+            mainDocRef = { id: newId }; // CORRIGIDO: Era 'docRef' que não existia
             showNotification('Produto criado!', 'success');
         }
 
-        // 2. VÍNCULO REVERSO (Sem alterações aqui)
+        // 2. VÍNCULO REVERSO (Limpando o Firebase)
         if (currentProduct.itemType === 'unit' && currentProduct.linkedPackId) {
-             // ... (código igual ao anterior)
-             const packRef = doc(db, 'artifacts', storeId, 'public', 'data', 'products', currentProduct.linkedPackId);
-             await updateDoc(packRef, { parentId: mainDocRef.id, conversionFactor: Number(currentProduct.packQuantity) || 1 });
+             await tenantDB.firestore.update('products', currentProduct.linkedPackId, { 
+                 parentId: mainDocRef.id, 
+                 conversionFactor: Number(currentProduct.packQuantity) || 1 
+             });
         }
 
         // 3. CRIAÇÃO RÁPIDA (AGORA COMPLETA)
@@ -507,7 +510,7 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                 unit: 'CX',
                 created_at: serverTimestamp()
             };
-            await addDoc(collection(db, 'artifacts', storeId, 'public', 'data', 'products'), packData);
+            await tenantDB.firestore.add('products', packData);
             showNotification('Caixa criada com dados completos!', 'success');
         }
 
@@ -525,7 +528,7 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
   const handleDelete = async (id) => {
       if (window.confirm("Tem certeza que deseja excluir?")) {
           const storeId = String(storeConfig.id);
-          await deleteDoc(doc(db, 'artifacts', storeId, 'public', 'data', 'products', id));
+          await tenantDB.firestore.delete('products', id);
           showNotification("Produto excluído.", "success");
       }
   };
@@ -545,27 +548,22 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
   // Nova função auxiliar para efetivar a mudança (usada pela entrada direta e pelo modal de perda)
   const processStockUpdate = async (product, qtyChange, reason = '') => {
       try {
-          const storeId = String(storeConfig.id);
-          
-          // Lógica Pack vs Unidade
+          // Lógica Pack vs Unidade usando a DAL Limpa!
           if (product.itemType === 'pack' && product.parentId) {
               const factor = product.conversionFactor || product.packQuantity || 1;
-              const parentRef = doc(db, 'artifacts', storeId, 'public', 'data', 'products', product.parentId);
-              await updateDoc(parentRef, { stock: increment(qtyChange * factor) });
+              await tenantDB.firestore.update('products', product.parentId, { stock: increment(qtyChange * factor) });
           } else {
-              const ref = doc(db, 'artifacts', storeId, 'public', 'data', 'products', product.id);
-              await updateDoc(ref, { stock: increment(qtyChange) });
+              await tenantDB.firestore.update('products', product.id, { stock: increment(qtyChange) });
           }
 
-          // Se tiver motivo (Perca), registra nas Vendas E no Financeiro
+          // Se tiver motivo (Perca), registra nas Vendas E no Financeiro usando a DAL
           if (reason) {
               const lossCost = (Number(product.cost) || 0) * Math.abs(qtyChange);
 
-              // 1. Registro em Vendas (Para bater o CMV e DRE no App.js)
-              const saleRef = collection(db, 'artifacts', storeId, 'public', 'data', 'sales');
-              await addDoc(saleRef, {
+              // 1. Registro em Vendas
+              await tenantDB.firestore.add('sales', {
                   date: new Date().toISOString(),
-                  total: 0, // Financeiro de entrada zero
+                  total: 0, 
                   cost: lossCost,
                   items: [{ ...product, qty: Math.abs(qtyChange) }],
                   paymentMethod: 'PERCA',
@@ -575,17 +573,15 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                   clientName: 'AJUSTE ESTOQUE'
               });
 
-              // 2. Registro no Financeiro (Para aparecer no Histórico de Despesas)
-              const finRef = collection(db, 'artifacts', storeId, 'public', 'data', 'financial_movements');
-              await addDoc(finRef, {
+              // 2. Registro no Financeiro
+              await tenantDB.firestore.add('financial_movements', {
                   type: 'EXPENSE',
-                  category: 'Percas e Quebras', // Categoria para identificar fácil
+                  category: 'Percas e Quebras',
                   description: `PERCA ESTOQUE: ${product.name} - ${reason}`,
-                  amount: lossCost, // Valor do prejuízo (Custo x Qtd)
+                  amount: lossCost, 
                   date: new Date().toISOString().split('T')[0],
-                  status: 'PAGO', // Já foi realizado
-                  userId: 'WMS',
-                  createdAt: serverTimestamp()
+                  status: 'PAGO', 
+                  userId: 'WMS'
               });
           }
 
@@ -649,11 +645,12 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
       if (!storeConfig?.id) return;
       try {
           const storeId = String(storeConfig.id);
-          const q = query(collection(db, 'artifacts', storeId, 'public', 'data', 'inventory_audit_templates'));
-          const snap = await getDocs(q);
-          setAuditTemplates(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+          const templates = await tenantDB.firestore.getAll('inventory_audit_templates');
+          setAuditTemplates(templates);
       } catch (error) { console.error("Erro ao carregar templates:", error); }
   };
+
+  
 
   useEffect(() => {
       if (isAuditModalOpen) fetchAuditTemplates();
@@ -672,7 +669,7 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
               created_at: serverTimestamp()
           };
           
-          await addDoc(collection(db, 'artifacts', storeId, 'public', 'data', 'inventory_audit_templates'), templateData);
+          await tenantDB.firestore.add('inventory_audit_templates', templateData);
           setNewTemplateName('');
           fetchAuditTemplates();
           showNotification('Template salvo com sucesso!', 'success');
@@ -992,18 +989,20 @@ const InventoryWMS = ({ products, onProductUpdate, showNotification, storeConfig
                                 if (!saidaJustificativa) return showNotification('Selecione uma justificativa.', 'error');
                                 if (!window.confirm(`Confirma a baixa de ${saidaCart.length} item(ns)?`)) return;
                                 try {
-                                    const storeId = String(storeConfig.id);
                                     const batch = writeBatch(db);
                                     saidaCart.forEach(item => {
-                                        const ref = doc(db, 'artifacts', storeId, 'public', 'data', 'products', item.id);
+                                        // Como o batch é do Firebase, ele precisa da referência CRUA:
+                                        const ref = tenantDB.firestore.getRawRef('products', item.id);
                                         batch.update(ref, { stock: increment(-item.qty) });
                                     });
-                                    await addDoc(collection(db, 'artifacts', storeId, 'public', 'data', 'stock_movements'), {
+                                    
+                                    // Mas o add simples pode usar a DAL:
+                                    await tenantDB.firestore.add('stock_movements', {
                                         type: 'SAIDA_AVULSA',
                                         justificativa: saidaJustificativa,
-                                        items: saidaCart.map(i => ({ id: i.id, name: i.name, qty: i.qty })),
-                                        createdAt: serverTimestamp(),
+                                        items: saidaCart.map(i => ({ id: i.id, name: i.name, qty: i.qty }))
                                     });
+                                    
                                     await batch.commit();
                                     showNotification('Baixa de estoque realizada!', 'success');
                                     setSaidaCart([]);

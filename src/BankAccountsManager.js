@@ -3,12 +3,16 @@ import {
   Building2, Wallet, Plus, ArrowUpRight, ArrowDownRight, 
   Search, CheckCircle, X, Landmark, FileText, Trash2, Settings, Filter, User, ArrowLeftRight
 } from 'lucide-react';
-import { collection, addDoc, updateDoc, doc, deleteDoc, query, where, orderBy, onSnapshot, serverTimestamp, getDoc, setDoc, writeBatch, increment } from 'firebase/firestore';
-import { db } from '../firebase'; // Ajuste o caminho conforme sua estrutura
+import { useTenant } from './contexts/TenantContext'; 
+// Importações limpas do Firebase apenas para as transações atômicas e filtros
+import { writeBatch, increment, doc, setDoc, serverTimestamp, where } from 'firebase/firestore'; 
+import { db } from './firebase'; 
 
 const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
 
-const BankAccountsManager = ({ storeConfig, showNotification }) => {
+const BankAccountsManager = ({ showNotification }) => {
+  const { tenantDB, currentUser } = useTenant();
+
   const [accounts, setAccounts] = useState([]);
   const [selectedAccount, setSelectedAccount] = useState(null);
   const [transactions, setTransactions] = useState([]);
@@ -17,43 +21,37 @@ const BankAccountsManager = ({ storeConfig, showNotification }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [formData, setFormData] = useState({
       name: '',
-      type: 'CHECKING', // CHECKING (Corrente), SAVINGS (Poupança), CASH (Caixa/Gaveta)
+      type: 'CHECKING', 
       initialBalance: ''
   });
 
   // Estados para o Roteamento (Fase B)
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [routingConfig, setRoutingConfig] = useState({
-      dinheiro: '',
-      pix: '',
-      cartao_credito: '',
-      cartao_debito: '',
-      transferencia: ''
+      dinheiro: '', pix: '', cartao_credito: '', cartao_debito: '', transferencia: ''
   });
 
-    const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
-    const [transferData, setTransferData] = useState({ fromAccountId: '', toAccountId: '', amount: '', description: '' });
-    const [isProcessingTransfer, setIsProcessingTransfer] = useState(false);
+  const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
+  const [transferData, setTransferData] = useState({ fromAccountId: '', toAccountId: '', amount: '', description: '' });
+  const [isProcessingTransfer, setIsProcessingTransfer] = useState(false);
 
-  // Carregar Configurações de Roteamento
+  // 1. Carregar Configurações de Roteamento (Usando a DAL)
   useEffect(() => {
-      if (!storeConfig?.id) return;
+      if (!tenantDB) return;
       const loadRouting = async () => {
-          const docRef = doc(db, 'artifacts', String(storeConfig.id), 'public', 'data', 'financial_settings', 'routing');
-          const snap = await getDoc(docRef); // Importe getDoc do firebase/firestore no topo do arquivo!
-          if (snap.exists()) {
-              setRoutingConfig(snap.data());
+          const data = await tenantDB.firestore.getById('financial_settings', 'routing');
+          if (data) {
+              setRoutingConfig(data);
           }
       };
       loadRouting();
-  }, [storeConfig]);
+  }, [tenantDB]);
 
-  // Salvar Configurações de Roteamento
+  // Salvar Configurações de Roteamento (Usando Referência Crua + setDoc para usar o merge)
   const handleSaveRouting = async () => {
       try {
-          const docRef = doc(db, 'artifacts', String(storeConfig.id), 'public', 'data', 'financial_settings', 'routing');
-          // Usamos setDoc com merge para não sobrescrever outras configurações que você possa ter no futuro
-          await setDoc(docRef, routingConfig, { merge: true }); // Importe setDoc do firebase/firestore no topo!
+          const docRef = tenantDB.firestore.getRawRef('financial_settings', 'routing');
+          await setDoc(docRef, routingConfig, { merge: true });
           showNotification('Roteamento de contas salvo com sucesso!', 'success');
           setIsSettingsModalOpen(false);
       } catch (error) {
@@ -61,66 +59,63 @@ const BankAccountsManager = ({ storeConfig, showNotification }) => {
       }
   };
 
-  // 1. Carregar Contas (Realtime)
+  // 2. Carregar Contas (Realtime via DAL)
   useEffect(() => {
-      if (!storeConfig?.id) return;
-      const storeId = String(storeConfig.id);
-      const accountsRef = collection(db, 'artifacts', storeId, 'public', 'data', 'bank_accounts');
-      
-      const unsubscribe = onSnapshot(accountsRef, (snap) => {
-          const data = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-          // Ordena alfabeticamente
-          setAccounts(data.sort((a, b) => a.name.localeCompare(b.name)));
+      if (!tenantDB) return;
+      const unsubscribe = tenantDB.firestore.subscribe('bank_accounts', (dados) => {
+          setAccounts(dados);
       });
-
       return () => unsubscribe();
-  }, [storeConfig]);
+  }, [tenantDB]);
 
-  // 2. Carregar Extrato (Transactions) quando uma conta é selecionada
+  // 3. Carregar Extrato (Transactions) QUANDO UMA CONTA É SELECIONADA
   useEffect(() => {
-      if (!storeConfig?.id || !selectedAccount) return;
-      const storeId = String(storeConfig.id);
+      if (!tenantDB || !selectedAccount) {
+          setTransactions([]);
+          return;
+      }
       
-      const transRef = collection(db, 'artifacts', storeId, 'public', 'data', 'account_transactions');
-      const q = query(transRef, where('accountId', '==', selectedAccount.id), orderBy('createdAt', 'desc'));
+      const unsubscribe = tenantDB.firestore.subscribe(
+          'account_transactions', 
+          (dados) => {
+              // Ordena localmente (mais recentes primeiro)
+              const sorted = dados.sort((a,b) => new Date(b.date || b.createdAt) - new Date(a.date || a.createdAt));
+              setTransactions(sorted);
+          },
+          [where('accountId', '==', selectedAccount.id)] // O filtro mágico!
+      );
       
-      const unsubscribe = onSnapshot(q, (snap) => {
-          setTransactions(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-      });
-
       return () => unsubscribe();
-  }, [storeConfig, selectedAccount]);
+  }, [tenantDB, selectedAccount]);
 
-  // 3. Salvar Nova Conta
+  // 4. Salvar Nova Conta
   const handleSaveAccount = async () => {
       if (!formData.name.trim()) return showNotification('O nome da conta é obrigatório.', 'error');
       
       try {
-          const storeId = String(storeConfig.id);
           const initialVal = Number(formData.initialBalance) || 0;
 
-          // Cria a conta
           const newAccount = {
               name: formData.name.toUpperCase(),
               type: formData.type,
               initialBalance: initialVal,
               currentBalance: initialVal,
-              status: 'ACTIVE',
-              createdAt: serverTimestamp()
+              status: 'ACTIVE'
+              // createdAt é injetado automaticamente pelo add da DAL
           };
 
-          const docRef = await addDoc(collection(db, 'artifacts', storeId, 'public', 'data', 'bank_accounts'), newAccount);
+          const newAccountId = await tenantDB.firestore.add('bank_accounts', newAccount);
 
-          // Se tiver saldo inicial, já cria a primeira movimentação no extrato
+          // Se tiver saldo inicial, cria a movimentação inicial no EXTRATO
           if (initialVal > 0) {
-              await addDoc(collection(db, 'artifacts', storeId, 'public', 'data', 'account_transactions'), {
-                  accountId: docRef.id,
+              await tenantDB.firestore.add('account_transactions', {
+                  accountId: newAccountId,
                   type: 'IN',
                   amount: initialVal,
                   description: 'SALDO INICIAL',
                   category: 'Abertura de Conta',
                   date: new Date().toISOString(),
-                  createdAt: serverTimestamp()
+                  userName: currentUser?.name || 'Sistema'
               });
           }
 
@@ -133,91 +128,105 @@ const BankAccountsManager = ({ storeConfig, showNotification }) => {
       }
   };
 
-  // Estados para Filtro do Extrato
+  // 5. Função de Transferência usando Batch e Refs da DAL
+  const handleTransfer = async () => {
+      if (isProcessingTransfer) return;
+      const { fromAccountId, toAccountId, amount, description } = transferData;
+
+      if (!fromAccountId || !toAccountId || !amount) 
+          return showNotification('Preencha todos os campos obrigatórios.', 'error');
+      if (fromAccountId === toAccountId) 
+          return showNotification('As contas de origem e destino devem ser diferentes.', 'error');
+
+      const amountNum = Number(amount);
+      if (isNaN(amountNum) || amountNum <= 0) 
+          return showNotification('Valor inválido.', 'error');
+
+      setIsProcessingTransfer(true);
+      try {
+          const batch = writeBatch(db);
+          const now = new Date().toISOString();
+
+          // Pega as referências seguras pela DAL
+          const fromRef = tenantDB.firestore.getRawRef('bank_accounts', fromAccountId);
+          const toRef   = tenantDB.firestore.getRawRef('bank_accounts', toAccountId);
+
+          batch.update(fromRef, { currentBalance: increment(-amountNum) });
+          batch.update(toRef,   { currentBalance: increment(amountNum)  });
+
+          const fromAccount = accounts.find(a => a.id === fromAccountId);
+          const toAccount   = accounts.find(a => a.id === toAccountId);
+          
+          // Referência da coleção para gerar novos IDs
+          const txnCollectionRef = tenantDB.firestore.getRawRef('account_transactions');
+
+          const txnOutRef = doc(txnCollectionRef);
+          batch.set(txnOutRef, {
+              accountId: fromAccountId,
+              type: 'OUT',
+              amount: amountNum,
+              description: description || `TRANSFERÊNCIA PARA ${toAccount?.name}`,
+              category: 'Transferência',
+              relatedAccountId: toAccountId,
+              date: now,
+              createdAt: serverTimestamp(),
+              userName: currentUser?.name || 'Sistema'
+          });
+
+          const txnInRef = doc(txnCollectionRef);
+          batch.set(txnInRef, {
+              accountId: toAccountId,
+              type: 'IN',
+              amount: amountNum,
+              description: description || `TRANSFERÊNCIA DE ${fromAccount?.name}`,
+              category: 'Transferência',
+              relatedAccountId: fromAccountId,
+              date: now,
+              createdAt: serverTimestamp(),
+              userName: currentUser?.name || 'Sistema'
+          });
+
+          await batch.commit();
+          showNotification('Transferência realizada com sucesso!', 'success');
+          setIsTransferModalOpen(false);
+          setTransferData({ fromAccountId: '', toAccountId: '', amount: '', description: '' });
+      } catch (error) {
+          console.error(error);
+          showNotification('Erro ao realizar transferência.', 'error');
+      } finally {
+          setIsProcessingTransfer(false);
+      }
+  };
+
+  // --- INÍCIO DOS FILTROS ATUALIZADOS ---
   const [operatorFilter, setOperatorFilter] = useState('');
-  
-  // Extrai lista única de operadores que já movimentaram essa conta
+  const [dateFilter, setDateFilter] = useState({ start: '', end: '' }); // <-- NOVO ESTADO DE DATA
+
   const uniqueOperators = [...new Set(transactions.map(t => t.userName).filter(Boolean))];
+  
+  const filteredTransactions = transactions.filter(t => {
+      let passOp = operatorFilter ? t.userName === operatorFilter : true;
+      let passStart = true;
+      let passEnd = true;
+      
+      // Padroniza a data para comparar
+      const tDateObj = t.date ? new Date(t.date) : (t.createdAt?.seconds ? new Date(t.createdAt.seconds * 1000) : new Date());
+      const tDateStr = tDateObj.toISOString().split('T')[0];
 
-  // Filtra as transações e calcula o somatório
-  const filteredTransactions = transactions.filter(t => 
-      operatorFilter ? t.userName === operatorFilter : true
-  );
+      if (dateFilter.start) passStart = tDateStr >= dateFilter.start;
+      if (dateFilter.end) passEnd = tDateStr <= dateFilter.end;
 
-  const filteredTotal = filteredTransactions.reduce((acc, curr) => {
-      return acc + (curr.type === 'IN' ? curr.amount : -curr.amount);
-  }, 0);
+      return passOp && passStart && passEnd;
+  });
+
+  const filteredTotal = filteredTransactions.reduce((acc, curr) => acc + (curr.type === 'IN' ? curr.amount : -curr.amount), 0);
+  // --- FIM DOS FILTROS ---
 
   const getAccountIcon = (type) => {
       if (type === 'CASH') return <Wallet size={24} className="text-emerald-600"/>;
       if (type === 'SAVINGS') return <Landmark size={24} className="text-blue-600"/>;
       return <Building2 size={24} className="text-indigo-600"/>;
   };
-
-  const handleTransfer = async () => {
-    if (isProcessingTransfer) return;
-    const { fromAccountId, toAccountId, amount, description } = transferData;
-
-    if (!fromAccountId || !toAccountId || !amount) 
-        return showNotification('Preencha todos os campos obrigatórios.', 'error');
-    if (fromAccountId === toAccountId) 
-        return showNotification('As contas de origem e destino devem ser diferentes.', 'error');
-
-    const amountNum = Number(amount);
-    if (isNaN(amountNum) || amountNum <= 0) 
-        return showNotification('Valor inválido.', 'error');
-
-    setIsProcessingTransfer(true);
-    try {
-        const storeId = String(storeConfig.id);
-        const batch = writeBatch(db);
-        const now = new Date().toISOString();
-
-        const fromRef = doc(db, 'artifacts', storeId, 'public', 'data', 'bank_accounts', fromAccountId);
-        const toRef   = doc(db, 'artifacts', storeId, 'public', 'data', 'bank_accounts', toAccountId);
-
-        batch.update(fromRef, { currentBalance: increment(-amountNum) });
-        batch.update(toRef,   { currentBalance: increment(amountNum)  });
-
-        const fromAccount = accounts.find(a => a.id === fromAccountId);
-        const toAccount   = accounts.find(a => a.id === toAccountId);
-        const txnRef      = collection(db, 'artifacts', storeId, 'public', 'data', 'account_transactions');
-
-        const txnOutRef = doc(txnRef);
-        batch.set(txnOutRef, {
-            accountId: fromAccountId,
-            type: 'OUT',
-            amount: amountNum,
-            description: description || `TRANSFERÊNCIA PARA ${toAccount?.name}`,
-            category: 'Transferência',
-            relatedAccountId: toAccountId,
-            date: now,
-            createdAt: serverTimestamp()
-        });
-
-        const txnInRef = doc(txnRef);
-        batch.set(txnInRef, {
-            accountId: toAccountId,
-            type: 'IN',
-            amount: amountNum,
-            description: description || `TRANSFERÊNCIA DE ${fromAccount?.name}`,
-            category: 'Transferência',
-            relatedAccountId: fromAccountId,
-            date: now,
-            createdAt: serverTimestamp()
-        });
-
-        await batch.commit();
-        showNotification('Transferência realizada com sucesso!', 'success');
-        setIsTransferModalOpen(false);
-        setTransferData({ fromAccountId: '', toAccountId: '', amount: '', description: '' });
-    } catch (error) {
-        console.error(error);
-        showNotification('Erro ao realizar transferência.', 'error');
-    } finally {
-        setIsProcessingTransfer(false);
-    }
-};
 
   return (
     <div className="flex gap-4 h-full animate-in fade-in">
@@ -235,7 +244,7 @@ const BankAccountsManager = ({ storeConfig, showNotification }) => {
                             className="bg-slate-100 text-slate-600 p-2 rounded hover:bg-slate-200 transition-colors"
                             title="Configurar Roteamento"
                         >
-                            <Settings size={18}/> {/* Importe o ícone Settings do lucide-react */}
+                            <Settings size={18}/> 
                         </button>
                         <button 
                             onClick={() => setIsModalOpen(true)}
@@ -310,30 +319,43 @@ const BankAccountsManager = ({ storeConfig, showNotification }) => {
                             </div>
                         </div>
 
-                        {/* Barra de Filtros */}
-                        <div className="flex justify-between items-center bg-white p-2 border rounded-lg shadow-sm">
-                            <div className="flex items-center gap-2">
-                                <Filter size={16} className="text-slate-400"/>
-                                <span className="text-xs font-bold text-slate-600 uppercase">Filtrar por Operador:</span>
-                                <select 
-                                    className="border rounded text-sm px-2 py-1 outline-none focus:border-indigo-500 bg-slate-50"
-                                    value={operatorFilter}
-                                    onChange={(e) => setOperatorFilter(e.target.value)}
-                                >
-                                    <option value="">Todos os Operadores</option>
-                                    {uniqueOperators.map(op => (
-                                        <option key={op} value={op}>{op}</option>
-                                    ))}
-                                </select>
+                        {/* Barra de Filtros Melhorada */}
+                        <div className="flex flex-col md:flex-row justify-between items-center bg-white p-3 border rounded-lg shadow-sm gap-3">
+                            <div className="flex flex-wrap items-center gap-3">
+                                <div className="flex items-center gap-2">
+                                    <Filter size={16} className="text-slate-400"/>
+                                    <span className="text-xs font-bold text-slate-600 uppercase">Período:</span>
+                                    <input type="date" className="border rounded text-sm px-2 py-1 bg-slate-50 outline-none focus:border-indigo-500" value={dateFilter.start} onChange={e => setDateFilter({...dateFilter, start: e.target.value})} />
+                                    <span className="text-xs text-slate-400">até</span>
+                                    <input type="date" className="border rounded text-sm px-2 py-1 bg-slate-50 outline-none focus:border-indigo-500" value={dateFilter.end} onChange={e => setDateFilter({...dateFilter, end: e.target.value})} />
+                                </div>
+
+                                <div className="flex items-center gap-2 border-l pl-3">
+                                    <span className="text-xs font-bold text-slate-600 uppercase">Operador:</span>
+                                    <select 
+                                        className="border rounded text-sm px-2 py-1 outline-none focus:border-indigo-500 bg-slate-50"
+                                        value={operatorFilter}
+                                        onChange={(e) => setOperatorFilter(e.target.value)}
+                                    >
+                                        <option value="">Todos</option>
+                                        {uniqueOperators.map(op => <option key={op} value={op}>{op}</option>)}
+                                    </select>
+                                </div>
                             </div>
                             
                             {/* Somatório do Filtro */}
-                            {operatorFilter && (
-                                <div className="text-sm">
-                                    <span className="text-slate-500">Total do operador: </span>
+                            {(operatorFilter || dateFilter.start || dateFilter.end) && (
+                                <div className="text-sm bg-indigo-50 px-3 py-1.5 rounded-full border border-indigo-100 flex items-center">
+                                    <span className="text-slate-500 text-xs mr-2">Total do filtro: </span>
                                     <span className={`font-bold ${filteredTotal >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                                         {formatCurrency(filteredTotal)}
                                     </span>
+                                    <button 
+                                        onClick={() => { setOperatorFilter(''); setDateFilter({start: '', end: ''}); }} 
+                                        className="ml-3 text-[10px] bg-indigo-100 text-indigo-500 px-2 py-0.5 rounded hover:bg-indigo-200 font-bold uppercase transition-colors"
+                                    >
+                                        Limpar
+                                    </button>
                                 </div>
                             )}
                         </div>
@@ -395,8 +417,6 @@ const BankAccountsManager = ({ storeConfig, showNotification }) => {
                             </tbody>
                         </table>
                     </div>
-
-                    
                 </>
             ) : (
                 <div className="flex-1 flex flex-col items-center justify-center text-slate-400">
@@ -406,7 +426,7 @@ const BankAccountsManager = ({ storeConfig, showNotification }) => {
             )}
         </div>
 
-        {/* MODAL DE NOVA CONTA */}
+        {/* MODAIS (NOVA CONTA, ROTEAMENTO E TRANSFERÊNCIA) */}
         {isModalOpen && (
             <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
                 <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
@@ -474,7 +494,6 @@ const BankAccountsManager = ({ storeConfig, showNotification }) => {
             </div>
         )}
 
-    {/* MODAL DE ROTEAMENTO (FASE B) */}
         {isSettingsModalOpen && (
             <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
                 <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
@@ -524,7 +543,6 @@ const BankAccountsManager = ({ storeConfig, showNotification }) => {
             </div>
         )}
 
-        {/* MODAL DE TRANSFERÊNCIA */}
         {isTransferModalOpen && (
             <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
                 <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">

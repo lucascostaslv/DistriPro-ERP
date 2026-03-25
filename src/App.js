@@ -27,8 +27,10 @@ import { buildNFePayload } from './utils/NFeBuilder';
 import { NFeService } from './utils/NFeService';
 import ComandaManager from './ComandaManager';
 import { downloadSmart } from './EntradaNotas/FiscalInvoices';
+import BankAccountsManager from './BankAccountsManager';
+import CashClosingManager from './CashClosingManager';
 
-import { TenantProvider } from './contexts/TenantContext';
+import { TenantProvider, useTenant } from './contexts/TenantContext';
 
 function Root() {
   return (
@@ -2734,6 +2736,7 @@ const Finance = ({ sales, transactions, feeProfiles, setFeeProfiles, transaction
         <button onClick={() => setActiveTab('report')} className={`px-4 py-2 text-sm font-medium rounded whitespace-nowrap ${activeTab === 'report' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Relatório Mensal</button>
         <button onClick={() => setActiveTab('settings')} className={`px-4 py-2 text-sm font-medium rounded whitespace-nowrap ${activeTab === 'settings' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Config. Taxas</button>
         <button onClick={() => setActiveTab('history')} className={`px-4 py-2 text-sm font-medium rounded whitespace-nowrap ${activeTab === 'history' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Histórico Fechamentos</button>
+        <button onClick={() => setActiveTab('bank')} className={`px-4 py-2 text-sm font-medium rounded whitespace-nowrap ${activeTab === 'bank' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Contas Bancárias</button>
       </div>
 
       {/* ABA 1: FECHAMENTO + HISTÓRICO (MODIFICADO) */}
@@ -2754,6 +2757,32 @@ const Finance = ({ sales, transactions, feeProfiles, setFeeProfiles, transaction
                 categories={transactionCategories} 
             />
         </div>
+      )}
+      {/* MÓDULO FINANCEIRO UNIFICADO */}
+      {(activeTab === 'bank' || activeTab === 'cash_conciliation') && (
+          <div className="h-full flex flex-col">
+              {/* Sub-Abas do Financeiro */}
+              <div className="bg-white border-b px-6 flex gap-6 mb-4 shrink-0 shadow-sm">
+                  <button 
+                      onClick={() => setActiveTab('bank')} 
+                      className={`py-3 text-sm font-bold border-b-2 transition-colors flex items-center gap-2 ${activeTab === 'bank' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+                  >
+                      <Landmark size={16}/> Contas Bancárias
+                  </button>
+                  <button 
+                      onClick={() => setActiveTab('cash_conciliation')}
+                      className={`py-3 text-sm font-bold border-b-2 transition-colors flex items-center gap-2 ${activeTab === 'closure' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+                  >
+                      <Lock size={16}/> Fechamento de Caixa
+                  </button>
+              </div>
+
+              {/* Renderização Condicional */}
+              <div className="flex-1 overflow-y-auto px-6">
+                  {activeTab === 'bank' && <BankAccountsManager showNotification={showNotification} />}
+                  {activeTab === 'cash_conciliation' && <CashClosingManager showNotification={showNotification} />}
+              </div>
+          </div>
       )}
       {activeTab === 'settings' && <FinanceSettings feeProfiles={feeProfiles} setFeeProfiles={setFeeProfiles} showNotification={showNotification} />}
       
@@ -3623,7 +3652,9 @@ const usePersistedState = (key, initialValue) => {
   return [state, setState];
 };
 
-const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
+const StoreApp = ({ onLogout, updateStore }) => {
+  const { currentStore: store, currentUser } = useTenant();
+
   const [activeModule, setActiveModule] = useState('pdv');
   const [notification, setNotification] = useState(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -4503,19 +4534,17 @@ const StoreApp = ({ store, onLogout, updateStore, currentUser }) => {
 
 const App = () => {
   const [loginMode, setLoginMode] = useState('none'); // 'none' | 'user' | 'superadmin'
-  const [currentStore, setCurrentStore] = useState(null);
   const [notification, setNotification] = useState(null);
-  const [currentUser, setCurrentUser] = useState(null);
-  //const [isLoading, setIsLoading] = useState(true);
 
-  // ALTERAÇÃO 2: Efeito para verificar e restaurar sessão ao iniciar
+  // NOVO: Usando o Contexto em vez de useState local!
+  const { currentStore, setCurrentStore, currentUser, setCurrentUser } = useTenant();
+
   useEffect(() => {
     const restoreSession = async () => {
       const savedSession = localStorage.getItem('distripro_session');
       
       if (savedSession) {
         try {
-          // Recuperamos também o 'user' salvo
           const { storeConfig, mode, timestamp, user } = JSON.parse(savedSession);
           const now = new Date().getTime();
           const twelveHours = 12 * 60 * 60 * 1000; 
@@ -4524,7 +4553,7 @@ const App = () => {
             if (mode === 'user') {
                const storeData = await firebase.fetchStoreData(storeConfig);
                setCurrentStore(storeData);
-               setCurrentUser(user || { role: 'admin' }); // Recupera usuário
+               setCurrentUser(user || { role: 'admin' });
                setLoginMode('user');
             } else if (mode === 'superadmin') {
                setLoginMode('superadmin');
@@ -4539,25 +4568,23 @@ const App = () => {
       }
     };
     restoreSession();
-  }, []);
+  }, [setCurrentStore, setCurrentUser]); // Dependências atualizadas
 
-  // Login Atualizado
   const handleUserLogin = async (storeConfig, user) => {
     try {
       const storeData = await firebase.fetchStoreData(storeConfig);
       setCurrentStore(storeData);
       
-      // Define o usuário atual (se não vier role, assume admin por compatibilidade)
       const userWithRole = { ...user, role: user.role || 'admin' };
       setCurrentUser(userWithRole);
       
-      window.__app_id = String(storeData.id);
+      window.__app_id = String(storeData.id); // Mantido por retrocompatibilidade temporária
       setLoginMode('user');
 
       localStorage.setItem('distripro_session', JSON.stringify({
         storeConfig: storeConfig,
         mode: 'user',
-        user: userWithRole, // Salva usuário na sessão
+        user: userWithRole,
         timestamp: new Date().getTime()
       }));
 
@@ -4573,12 +4600,22 @@ const App = () => {
   const handleLogout = () => {
     setLoginMode('none');
     setCurrentStore(null);
+    setCurrentUser(null);
+    localStorage.removeItem('distripro_session'); // Limpando a sessão no logout
   };
 
-  const updateCurrentStore = async (updatedStore) => { if (!updatedStore || !updatedStore.id) {
+  const updateCurrentStore = async (updatedStore) => { 
+      if (!updatedStore || !updatedStore.id) {
         console.warn("Tentativa de salvar loja sem ID ignorada.");
         return;
-    } try { setCurrentStore(updatedStore); await firebase.updateStoreData(updatedStore); } catch (error) { showNotification('Falha ao sincronizar dados. Verifique a conexão.', 'error'); } };
+      } 
+      try { 
+          setCurrentStore(updatedStore); 
+          await firebase.updateStoreData(updatedStore); 
+      } catch (error) { 
+          showNotification('Falha ao sincronizar dados. Verifique a conexão.', 'error'); 
+      } 
+  };
 
   if (loginMode === 'none') return <LoginScreen onLogin={handleUserLogin} onSuperAdminLogin={handleSuperAdminLogin} showNotification={showNotification} />;
   if (loginMode === 'superadmin') return <SuperAdminDashboard onLogout={handleLogout} showNotification={showNotification} />;
@@ -4587,8 +4624,7 @@ const App = () => {
     <>
       {loginMode === 'user' && (
         <StoreApp 
-            store={currentStore} 
-            currentUser={currentUser} // <--- PASSANDO O USUÁRIO
+            // O StoreApp agora é super limpo, não precisa mais do store nem do currentUser como props!
             onLogout={handleLogout} 
             updateStore={updateCurrentStore} 
         />
