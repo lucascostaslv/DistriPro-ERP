@@ -587,8 +587,8 @@ const handleSaveSupplier = async () => {
   const safeFloat = (val) => {
       if (typeof val === 'number') return val;
       if (!val) return 0;
-      // Remove tudo que não é número, vírgula ou traço. Troca vírgula por ponto.
-      const clean = String(val).replace(/[^\d,-]/g, '').replace(',', '.');
+      // Permite números, vírgulas, PONTOS e traços. Depois troca vírgula por ponto.
+      const clean = String(val).replace(/[^\d,.-]/g, '').replace(',', '.');
       return parseFloat(clean) || 0;
   };
 
