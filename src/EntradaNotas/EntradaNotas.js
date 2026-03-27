@@ -587,8 +587,8 @@ const handleSaveSupplier = async () => {
   const safeFloat = (val) => {
       if (typeof val === 'number') return val;
       if (!val) return 0;
-      // Permite números, vírgulas, PONTOS e traços. Depois troca vírgula por ponto.
-      const clean = String(val).replace(/[^\d,.-]/g, '').replace(',', '.');
+      // Remove tudo que não é número, vírgula ou traço. Troca vírgula por ponto.
+      const clean = String(val).replace(/[^\d,-]/g, '').replace(',', '.');
       return parseFloat(clean) || 0;
   };
 
@@ -945,24 +945,24 @@ const handleSaveSupplier = async () => {
           for (const item of items) {
               let targetId = item.productId;
 
-              // --- REDE DE SEGURANÇA ---
-              // Se o item não tem ID vinculado (comum ao adicionar manual ou XML novo),
-              // tenta encontrar um produto existente pelo NOME ou CÓDIGO DE BARRAS.
-              if (!targetId) {
-                  // 'products' deve ser a lista de produtos que você carregou no useEffect
-                  const match = products.find(p => 
-                      p.name.toUpperCase() === item.description.toUpperCase() || 
-                      (item.code && (p.barcode === item.code || p.sku === item.code))
-                  );
-                  
-                  if (match) {
-                      targetId = match.id;
-                      console.log(`Recuperado: Item "${item.description}" vinculado automaticamente ao ID ${targetId}`);
-                  } else {
-                      console.warn(`PULADO: Item "${item.description}" não tem vínculo e não foi encontrado no cadastro.`);
-                      continue; // Pula este item para não quebrar o batch
-                  }
-              }
+                // --- REDE DE SEGURANÇA ---
+                if (!targetId) {
+                    const match = products.find(p => 
+                        // Usa productName e previne erro caso venha vazio
+                        (p.name || '').toUpperCase() === (item.productName || '').toUpperCase() || 
+                        // Usa systemSku ou barcode para a busca
+                        (item.systemSku && (p.barcode === item.systemSku || p.cbaCode === item.systemSku)) ||
+                        (item.barcode && (p.barcode === item.barcode || p.cbaCode === item.barcode))
+                    );
+                    
+                    if (match) {
+                        targetId = match.id;
+                        console.log(`Recuperado: Item "${item.productName}" vinculado automaticamente ao ID ${targetId}`);
+                    } else {
+                        console.warn(`PULADO: Item "${item.productName}" não tem vínculo e não foi encontrado no cadastro.`);
+                        continue; 
+                    }
+                }
 
               const productRef = doc(db, 'artifacts', storeId, 'public', 'data', 'products', targetId);
               
