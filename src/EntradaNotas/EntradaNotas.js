@@ -39,6 +39,7 @@ import {
   signInWithCustomToken
 } from 'firebase/auth';
 import { supabase } from '../supabaseClient';
+import { useTenant } from '../contexts/TenantContext';
 
 // --- CONFIGURAÇÃO FIREBASE (Fallback) ---
 const globalAppId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
@@ -82,6 +83,7 @@ const DenseSelect = (props) => (
 
 // --- APP PRINCIPAL ---
 export default function EntradaNotas({ storeConfig, onClose, products: globalProducts }) {
+  const { tenantDB } = useTenant();
   const [user, setUser] = useState(null);
   const [currentStep, setCurrentStep] = useState(1); 
   const [loading, setLoading] = useState(false);
@@ -887,6 +889,7 @@ const handleSaveSupplier = async () => {
   }, [financialConfig, launchPaid, totals, currentStep]);
 
   // --- FUNÇÃO REAL DE SALVAMENTO COM INTELIGÊNCIA DE FORNECEDOR ---
+  // --- FUNÇÃO REAL DE SALVAMENTO COM INTELIGÊNCIA DE FORNECEDOR E TENANT ---
   const handleSave = async () => {
       // 1. Validações Básicas
       if (!headerData.entityId && !headerData.entityName) return alert("Informe o Fornecedor no cabeçalho.");
@@ -896,19 +899,19 @@ const handleSaveSupplier = async () => {
 
       try {
           const batch = writeBatch(db);
-          const storeId = currentAppId; // Garante que pegou o ID da loja
-          
-          // Data para registros
           const entryDate = headerData.entryDate || new Date().toISOString().split('T')[0];
 
-          // 2. Salvar a Capa da Nota (Invoices)
-          const invoiceRef = doc(collection(db, 'artifacts', storeId, 'public', 'data', 'invoices'));
+          // 2. Salvar a Capa da Nota (Invoices) usando TenantDB
+          // Pega a referência da coleção já filtrada para a loja atual
+          const invoiceColRef = tenantDB.firestore.getRawRef('invoices');
+          const invoiceRef = doc(invoiceColRef); // Gera um ID único automático
+          
           const invoicePayload = {
               ...headerData,
               items: items, // Salva cópia dos itens na nota para auditoria
               totalValue: totals.totalNote,
               status: 'CONCLUIDA',
-              type: 'ENTRADA', // Importante para diferenciar de vendas
+              type: 'ENTRADA', 
               created_at: serverTimestamp()
           };
           batch.set(invoiceRef, invoicePayload);
@@ -916,19 +919,17 @@ const handleSaveSupplier = async () => {
           // 3. Gerar Parcelas no Financeiro (Accounts Payable)
           if (installments.length > 0 && selectedType?.financialAction === 'PAGAR') {
               installments.forEach(inst => {
-                  const billRef = doc(collection(db, 'artifacts', storeId, 'public', 'data', 'financial_movements'));
+                  const billColRef = tenantDB.firestore.getRawRef('financial_movements');
+                  const billRef = doc(billColRef);
                   batch.set(billRef, {
                       type: 'EXPENSE', 
                       description: `Nota ${headerData.number} - ${headerData.entityName} (${inst.number}/${installments.length})`,
-                      
-                      // CORREÇÃO 2: O Financeiro usa 'amount' e 'date'. Usamos o safeFloat para blindar contra NaN.
                       amount: safeFloat(inst.value), 
-                      value: safeFloat(inst.value), // Mantido por precaução
-                      date: entryDate, // Essencial para os filtros de data funcionarem
-                      
+                      value: safeFloat(inst.value), 
+                      date: entryDate, 
                       dueDate: inst.dueDate,
                       status: inst.status || 'PENDENTE',
-                      category: 'Revenda', // Ideal para o DRE identificar que é compra de mercadoria
+                      category: 'Revenda', 
                       paymentMethod: financialConfig.paymentMethod,
                       supplierId: headerData.entityId, 
                       supplierName: headerData.entityName,
@@ -939,41 +940,57 @@ const handleSaveSupplier = async () => {
               });
           }
 
-          // 2. ATUALIZAR ESTOQUE (Com Rede de Segurança)
+          // 4. ATUALIZAR ESTOQUE E CADASTRAR NOVOS ITENS
           console.log("--- INICIANDO ATUALIZAÇÃO DE ESTOQUE ---");
           
           for (const item of items) {
               let targetId = item.productId;
 
-                // --- REDE DE SEGURANÇA ---
+                // --- REDE DE SEGURANÇA (Cria o produto se não existir) ---
                 if (!targetId) {
                     const match = products.find(p => 
-                        // Usa productName e previne erro caso venha vazio
                         (p.name || '').toUpperCase() === (item.productName || '').toUpperCase() || 
-                        // Usa systemSku ou barcode para a busca
                         (item.systemSku && (p.barcode === item.systemSku || p.cbaCode === item.systemSku)) ||
                         (item.barcode && (p.barcode === item.barcode || p.cbaCode === item.barcode))
                     );
                     
                     if (match) {
                         targetId = match.id;
-                        console.log(`Recuperado: Item "${item.productName}" vinculado automaticamente ao ID ${targetId}`);
+                        console.log(`Recuperado: Item "${item.productName}" vinculado automaticamente.`);
                     } else {
-                        console.warn(`PULADO: Item "${item.productName}" não tem vínculo e não foi encontrado no cadastro.`);
-                        continue; 
+                        console.log(`CRIANDO: Item "${item.productName}" sendo cadastrado automaticamente.`);
+                        
+                        // Cria referência para um novo produto no TenantDB
+                        const newProductColRef = tenantDB.firestore.getRawRef('products');
+                        const newProductRef = doc(newProductColRef);
+                        targetId = newProductRef.id;
+
+                        const newProductData = {
+                            cbaCode: item.systemSku || item.barcode || `AUTO-${targetId.substring(0,6)}`,
+                            barcode: item.barcode || item.systemSku || '',
+                            name: (item.productName || 'PRODUTO SEM NOME').toUpperCase(),
+                            unit: item.unit || 'UN',
+                            cost: Number(item.unitPrice) || 0,
+                            costPrice: Number(item.unitPrice) || 0,
+                            price: Number(item.sellingPrice) || 0,
+                            profitMargin: Number(item.margin) || 30,
+                            wholesalePrice: Number(item.wholesalePrice) || 0,
+                            stock: 0, // Será incrementado no batch.update logo abaixo
+                            isPack: false,
+                            createdAt: serverTimestamp()
+                        };
+                        batch.set(newProductRef, newProductData);
                     }
                 }
 
-              const productRef = doc(db, 'artifacts', storeId, 'public', 'data', 'products', targetId);
-              
-              // Leitura para atualizar histórico (Fase 2)
-              const productSnap = await getDoc(productRef);
+              // Pega a referência exata do documento do produto usando TenantDB
+              const productRef = tenantDB.firestore.getRawRef('products', targetId);
+              const productSnap = await getDoc(productRef); // Usamos getDoc normal, pois já temos a referência correta
               
               if (productSnap.exists()) {
                   const productData = productSnap.data();
                   const currentHistory = Array.isArray(productData.suppliersHistory) ? productData.suppliersHistory : [];
 
-                  // Atualiza histórico do fornecedor
                   const supplierNameUpper = headerData.entityName ? headerData.entityName.toUpperCase().trim() : 'FORNECEDOR DESCONHECIDO';
                   const supplierIndex = currentHistory.findIndex(s => s.supplierName.toUpperCase() === supplierNameUpper);
                   
@@ -996,33 +1013,18 @@ const handleSaveSupplier = async () => {
 
                     batch.update(productRef, {
                         stock: increment(Number(item.quantity)), 
-                        cost: Number(item.unitPrice), // Custo SEMPRE atualiza
+                        cost: Number(item.unitPrice), 
                         last_purchase: entryDate,
                         suppliersHistory: updatedHistory,
-                        
-                        // LÓGICA DE TRAVA:
-                        // Só atualiza o preço no banco se:
-                        // 1. O checkbox "Atualizar Preço" estiver MARCADO
-                        // 2. E o preço for válido (> 0)
-                        ...(autoUpdatePrice && currentPriceInTable > 0 ? { 
-                            price: currentPriceInTable 
-                        } : {}) 
+                        ...(autoUpdatePrice && currentPriceInTable > 0 ? { price: currentPriceInTable } : {}) 
                     });
 
+                    // Lógica cascata para caixa fechada (Pack)
                     if (productData.itemType === 'pack' && productData.parentId && productData.conversionFactor) {
-    
-                        // Calcula quantas unidades isso representa (Ex: 40 caixas * 6 = 240 unidades)
                         const qtyToAdd = Number(item.quantity) * Number(productData.conversionFactor);
-                        
-                        // Referência ao produto PAI (Unidade)
-                        const unitRef = doc(db, 'artifacts', storeId, 'public', 'data', 'products', productData.parentId);
-                        
-                        // Soma ao estoque do pai
-                        batch.update(unitRef, {
-                            stock: increment(qtyToAdd)
-                        });
-                        
-                        console.log(`[CASCATA] Estoque Unitário Atualizado: +${qtyToAdd} un (Origem: ${item.quantity} cx * ${productData.conversionFactor})`);
+                        const unitRef = tenantDB.firestore.getRawRef('products', productData.parentId);
+                        batch.update(unitRef, { stock: increment(qtyToAdd) });
+                        console.log(`[CASCATA] Estoque Unitário Atualizado: +${qtyToAdd} un`);
                     }
               }
           }
