@@ -3,45 +3,62 @@
 const BASE_URL = '/services'; 
 
 export const NFeService = {
-    getHeaders: (token) => ({
+    getHeaders: (token, userToken = null) => ({
         'Content-Type': 'application/json',
-        'Token': token.trim()
+        'Token': token.trim(),
+        ...(userToken ? { 'UserToken': userToken.trim() } : {})
     }),
 
-    async request(endpoint, payload) {
+    async request(endpoint, payload, explicitToken = null, userToken = null) {
         const cleanEndpoint = endpoint.startsWith('/') ? endpoint.substring(1) : endpoint;
         const url = `${BASE_URL}/${cleanEndpoint}`;
         
-        // Logs removidos conforme solicitado para limpar o console
+        const tokenToUse = explicitToken || payload.Token || payload.token;
+        
+        const bodyPayload = { ...payload };
+        delete bodyPayload.Token;
+        delete bodyPayload.token;
 
         const response = await fetch(url, {
             method: 'POST',
-            headers: this.getHeaders(payload.Token || payload.token),
-            body: JSON.stringify(payload)
+            headers: this.getHeaders(tokenToUse, userToken),
+            body: JSON.stringify(bodyPayload)
         });
 
         const responseText = await response.text();
-        let responseJson;
+        
+        // LOG 2: A resposta BRUTA exata da API
+        console.log(`[DEBUG NFeService] 📥 Resposta Bruta de /${cleanEndpoint}:`, responseText);
 
+        let responseJson;
         try {
             responseJson = JSON.parse(responseText);
         } catch (e) {
+            console.error(`[DEBUG NFeService] ❌ Falha ao converter para JSON. Status HTTP: ${response.status}`);
             throw new Error(`Erro HTTP ${response.status}: Resposta não é JSON válido.`);
         }
 
         if (!response.ok) {
+            console.error(`[DEBUG NFeService] ❌ API retornou erro HTTP ${response.status}:`, responseJson);
             throw new Error(responseJson.Mensagem || responseJson.Error || `Erro API: ${response.status}`);
         }
 
         return responseJson;
     },
 
-    async updateCertificate(token, password, base64Content) {
+    async verifyCertificate(token, userToken, password, base64Content, interno = false) {
+        return this.request('empresa/VerificarCertificado', {
+            "Senha": password,
+            "Base64File": base64Content || "",
+            "Interno": interno
+        }, token, userToken);
+    },
+
+    async updateCertificate(token, userToken, password, base64Content) {
         return this.request('empresa/AlterarCertificado', {
-            "Token": token, 
             "Senha": password,
             "Base64File": base64Content
-        });
+        }, token, userToken);
     },
 
     async preview(payload) {

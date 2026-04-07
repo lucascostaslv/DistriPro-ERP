@@ -13,6 +13,7 @@ import {
   Loader2, Send, Utensils, Wine, Landmark
 } from 'lucide-react';
 import { collection, query, where, getDocs, setDoc, doc, updateDoc, getDoc, onSnapshot, increment, writeBatch, serverTimestamp, addDoc, deleteDoc} from "firebase/firestore";
+import forge from 'node-forge';
 import logo from './img/LOGO-MAQUINA-PNG.png';
 import logoWhite from './img/logo-maquina-texto-branco.png';
 import * as firebase from './firebase';
@@ -2754,6 +2755,11 @@ const masks = {
 };
 
 const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeConfig, setStoreConfig, showNotification }) => {
+  const { tenantDB } = useTenant(); 
+
+  const [showCertPassword, setShowCertPassword] = useState(false);
+  const [certStatusInfo, setCertStatusInfo] = useState(null);
+
   const [activeTab, setActiveTab] = useState('general');
   const [newProfile, setNewProfile] = useState({ name: '', origin: '0', cst_nfe: '102', cst_pis_cofins: '49', cfop: '5102' });
   const [taxProfiles, setTaxProfiles] = useState([]);
@@ -2761,6 +2767,7 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
   // ESTADOS USUÁRIOS
   const [newUser, setNewUser] = useState({ username: '', password: '', role: 'cashier', can_sell_without_stock: false });
   const [storeUsers, setStoreUsers] = useState([]); 
+
 
   const [editingUserId, setEditingUserId] = useState(null);
 
@@ -2827,24 +2834,24 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
 
         try {
             // Empresa e Perfis (Supabase)
-            const { data: companyData } = await supabase.from('fiscal_emitters').select('*').eq('firebase_store_id', storeIdStr).single();
+            const { data: companyData } = await tenantDB.supabase.query('fiscal_emitters').single();
             if (companyData) {
                 setFormData({
                     name: companyData.x_nome, cnpj: companyData.cnpj, ie: companyData.ie, crt: String(companyData.crt), cnae: companyData.cnae,
                     address: { zip: companyData.cep, street: companyData.x_lgr, number: companyData.nro, complement: companyData.xcpl, neighborhood: companyData.xbairro, city: companyData.xmun, state: companyData.uf, ibgeCode: companyData.cmun }
                 });
             }
-            const { data: profiles } = await supabase.from('fiscal_tax_profiles').select('*').eq('firebase_store_id', storeIdStr);
+            const { data: profiles } = await tenantDB.supabase.query('fiscal_tax_profiles');
             if (profiles) setTaxProfiles(profiles);
 
-            const { data: certSettings } = await supabase.from('fiscal_settings').select('*').eq('firebase_store_id', storeIdStr).single();
+            const { data: certSettings } = await tenantDB.supabase.query('fiscal_settings').single();
             if (certSettings) {
                 setCertData({ 
                     password: certSettings.cert_password || '', 
                     api_token: certSettings.api_token || '', 
                     environment: certSettings.environment || 'HOMOLOG', 
                     fileName: certSettings.cert_base64 ? 'Certificado Salvo' : '', 
-                    base64: '',
+                    base64: certSettings.cert_base64 || '',
                     csc_id: certSettings.csc_id || '',       
                     csc_token: certSettings.csc_token || ''  
                 });
@@ -2852,7 +2859,7 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
         } catch (err) { console.error(err); }
     };
     loadData();
-  }, [storeConfig]);
+  }, [storeConfig, tenantDB]);
 
   // --- LOGICA CATEGORIAS ---
   const handleAddCategory = async () => {
@@ -2917,26 +2924,63 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
   };
 
   // 2. SALVAR CERTIFICADO
-  const handleSaveCertSettings = async () => {
-    try {
-        const storeIdStr = String(storeConfig.id);
-        const { error } = await supabase.from('fiscal_settings').upsert({
-            firebase_store_id: storeIdStr,
-            cert_password: certData.password,
-            api_token: certData.api_token,
-            environment: certData.environment,
-            csc_id: certData.csc_id,
-            csc_token: certData.csc_token,
-            ...(certData.base64 ? { cert_base64: certData.base64 } : {}) 
-        }, { onConflict: 'firebase_store_id' });
+    const handleSaveCertSettings = async () => {
+        try {
+            if (certData.base64) {
+                // Envia para a API da BrasilNFe
+                await NFeService.updateCertificate(certData.api_token, certData.password, certData.base64);
+            }
 
-        if (error) throw error;
-        showNotification('Configurações salvas!', 'success');
-    } catch (e) { 
-        console.error(e);
-        showNotification('Erro ao salvar certificado.', 'error'); 
-    }
-  };
+            // Prepara o payload injetando o store_id automaticamente via Contexto
+            const payload = tenantDB.supabase.withStoreId({
+                cert_password: certData.password,
+                api_token: certData.api_token,
+                environment: certData.environment,
+                csc_id: certData.csc_id,
+                csc_token: certData.csc_token,
+                ...(certData.base64 ? { cert_base64: certData.base64 } : {}) 
+            });
+
+            const { error } = await supabase.from('fiscal_settings').upsert(payload, { onConflict: 'firebase_store_id' });
+            if (error) throw error;
+
+            setCertData(prev => ({...prev, base64: ''}));
+            showNotification('Configurações salvas com sucesso!', 'success');
+        } catch (e) { showNotification(`Erro: ${e.message}`, 'error'); }
+    };
+
+  // ✅ INSIRA ESTE BLOCO NO LUGAR DA FUNÇÃO ANTIGA:
+  
+  // Efeito que tenta decodificar o certificado localmente sempre que a base64 ou a senha mudarem
+  useEffect(() => {
+    const verifyLocalCert = () => {
+        // Se ainda não carregou do banco ou não tem senha, não faz nada
+        if (!certData.base64 || !certData.password) return;
+
+        try {
+            const der = forge.util.decode64(certData.base64);
+            const asn1 = forge.asn1.fromDer(der);
+            const p12 = forge.pkcs12.pkcs12FromAsn1(asn1, false, certData.password);
+            const bags = p12.getBags({ bagType: forge.pki.oids.certBag });
+            const certBag = bags[forge.pki.oids.certBag]?.[0];
+            
+            if (certBag && certBag.cert) {
+                const cert = certBag.cert;
+                setCertStatusInfo({
+                    Expirado: new Date() > cert.validity.notAfter,
+                    DtExpiracao: cert.validity.notAfter,
+                    Subject: cert.subject.attributes.find(a => a.shortName === 'CN')?.value || 'Empresa Identificada',
+                    status: 1
+                });
+            }
+        } catch (error) {
+            // Se falhar (ex: senha errada no banco), mostramos o erro visualmente
+            setCertStatusInfo({ Expirado: true, Error: 'Não foi possível ler o certificado salvo.', status: 0 });
+        }
+    };
+
+    verifyLocalCert();
+    }, [certData.base64, certData.password]); // Monitora os dados do banco/estado
 
   // 3. PERFIS TRIBUTÁRIOS (Adicionar e Remover)
   const handleAddProfile = async () => {
@@ -3296,23 +3340,102 @@ const SettingsManager = ({ users, setUsers, companyInfo, setCompanyInfo, storeCo
 
        {activeTab === 'certificate' && (
          <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
-             <h3 className="font-bold mb-4">Certificado Digital & API</h3>
-             {/* ... (Código do certificado igual) ... */}
+             <h3 className="font-bold mb-4">Certificado Digital & Integração</h3>
+             
+             {/* FEEDBACK VISUAL DE STATUS */}
+             {certStatusInfo && (
+                 <div className={`mb-6 p-4 rounded-lg border ${certStatusInfo.Expirado ? 'bg-red-50 border-red-200 text-red-800' : 'bg-emerald-50 border-emerald-200 text-emerald-800'} animate-in slide-in-from-top-2`}>
+                     <h4 className="font-bold flex items-center gap-2 text-base">
+                         {certStatusInfo.Expirado ? <AlertTriangle size={20}/> : <CheckCircle size={20}/>}
+                         {certStatusInfo.Expirado ? 'Certificado Expirado ou Inválido!' : 'Certificado Válido e Ativo!'}
+                     </h4>
+                     <div className="mt-3 text-sm grid grid-cols-1 md:grid-cols-2 gap-3 bg-white/50 p-3 rounded">
+                         <p><strong>Vencimento:</strong> <span className={certStatusInfo.Expirado ? 'text-red-600 font-bold' : ''}>
+                            {certStatusInfo.DtExpiracao ? new Date(certStatusInfo.DtExpiracao).toLocaleDateString('pt-BR') : 'Desconhecido'}
+                         </span></p>
+                         <p><strong>Status:</strong> {certStatusInfo.status === 1 ? '1 (Operacional)' : certStatusInfo.status}</p>
+                     </div>
+                     {certStatusInfo.Error && (
+                        <p className="mt-3 text-sm text-red-600 font-bold bg-white/60 p-2 rounded border border-red-100">
+                            Erro Retornado: {certStatusInfo.Error}
+                        </p>
+                     )}
+                 </div>
+             )}
+
              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                 <div><label className="text-xs font-bold">Token API BrasilNFe</label><input className="w-full border p-2" type="password" value={certData.api_token} onChange={e => setCertData({...certData, api_token: e.target.value})} /></div>
-                 <div><label className="text-xs font-bold">Ambiente</label><select className="w-full border p-2" value={certData.environment} onChange={e => setCertData({...certData, environment: e.target.value})}><option value="HOMOLOG">Homologação (Teste)</option><option value="PRODUCAO">Produção</option></select></div>
-                 <div><label className="text-xs font-bold">Arquivo PFX</label><input type="file" className="w-full text-xs" accept=".pfx" onChange={(e) => { const file = e.target.files[0]; if(file) { const reader = new FileReader(); reader.onload = (evt) => setCertData(prev => ({...prev, base64: evt.target.result.split(',')[1], fileName: file.name})); reader.readAsDataURL(file); } }} /><span className="text-xs text-green-600">{certData.fileName}</span></div>
-                 <div><label className="text-xs font-bold">Senha do Certificado</label><input className="w-full border p-2" type="password" value={certData.password} onChange={e => setCertData({...certData, password: e.target.value})} /></div>
-                 <div className="mt-6 pt-6 border-t border-slate-100">
-                    <h4 className="font-bold text-sm text-indigo-600 border-b pb-2 mb-4 flex items-center gap-2"><FileText size={16}/> 3. Configuração NFC-e (Cupom Fiscal)</h4>
-                    <div className="grid grid-cols-1 md:grid-cols-12 gap-4 bg-indigo-50 p-4 rounded border border-indigo-100">
-                        <div className="md:col-span-3"><label className="block text-xs font-bold text-indigo-900 mb-1">ID do CSC</label><input className="w-full border p-2 rounded text-sm placeholder-indigo-300" value={certData.csc_id} onChange={e => setCertData({...certData, csc_id: e.target.value})} placeholder="Ex: 000001"/></div>
-                        <div className="md:col-span-9"><label className="block text-xs font-bold text-indigo-900 mb-1">Código CSC (Token)</label><input className="w-full border p-2 rounded text-sm placeholder-indigo-300" value={certData.csc_token} onChange={e => setCertData({...certData, csc_token: e.target.value})} placeholder="Ex: 1A2B3C..."/></div>
-                        <div className="md:col-span-12"><p className="text-[10px] text-indigo-700">* Obrigatório para emitir NFC-e. Obtenha estes códigos no portal da SEFAZ do seu estado (Ambiente Homologação).</p></div>
+                 {/* O Token da API foi inteiramente removido do formulário do lojista */}
+                 
+                 <div>
+                     <label className="text-xs font-bold text-slate-700">Ambiente de Emissão</label>
+                     <select className="w-full border p-2.5 rounded bg-slate-50 text-sm font-bold" value={certData.environment} onChange={e => setCertData({...certData, environment: e.target.value})}>
+                         <option value="HOMOLOG">Homologação (Teste)</option>
+                         <option value="PRODUCAO">Produção</option>
+                     </select>
+                 </div>
+
+                 <div>
+                     <label className="text-xs font-bold text-slate-700">Arquivo do Certificado (.pfx)</label>
+                     <input type="file" className="w-full text-xs border p-2 rounded cursor-pointer" accept=".pfx,.p12" onChange={(e) => { 
+                         const file = e.target.files[0]; 
+                         if(file) { 
+                             const reader = new FileReader(); 
+                             reader.onload = (evt) => setCertData(prev => ({...prev, base64: evt.target.result.split(',')[1], fileName: file.name})); 
+                             reader.readAsDataURL(file); 
+                         } 
+                     }} />
+                     <span className="text-xs text-emerald-600 font-bold block mt-1">{certData.fileName}</span>
+                 </div>
+
+                 <div>
+                     <label className="text-xs font-bold text-slate-700">Senha do Certificado</label>
+                     <div className="relative">
+                         <input 
+                            className="w-full border p-2.5 rounded pr-10 text-sm" 
+                            type={showCertPassword ? "text" : "password"} 
+                            value={certData.password} 
+                            onChange={e => setCertData({...certData, password: e.target.value})} 
+                         />
+                         <button 
+                            type="button"
+                            onClick={() => setShowCertPassword(!showCertPassword)}
+                            className="absolute right-3 top-3 text-slate-400 hover:text-indigo-600 transition-colors"
+                            title={showCertPassword ? "Ocultar senha" : "Mostrar senha"}
+                         >
+                             <Eye size={18} />
+                         </button>
+                     </div>
+                 </div>
+
+                 <div className="md:col-span-2 flex flex-col md:flex-row justify-end gap-3 mt-4 border-b border-slate-100 pb-6">
+       
+                     <button 
+                         onClick={handleSaveCertSettings} 
+                         className="bg-slate-900 text-white px-6 py-2.5 rounded font-bold hover:bg-slate-800 transition-colors flex items-center justify-center gap-2 shadow-sm"
+                     >
+                         <Save size={16}/> Enviar e Salvar 
+                     </button>
+                 </div>
+
+                 <div className="md:col-span-2 mt-2">
+                    <h4 className="font-bold text-sm text-indigo-700 mb-3 flex items-center gap-2">
+                        <FileText size={16}/> Configuração NFC-e (Cupom Fiscal)
+                    </h4>
+                    <div className="grid grid-cols-1 md:grid-cols-12 gap-4 bg-indigo-50/50 p-4 rounded border border-indigo-100">
+                        <div className="md:col-span-3">
+                            <label className="block text-xs font-bold text-indigo-900 mb-1">ID do CSC</label>
+                            <input className="w-full border p-2 rounded text-sm placeholder-indigo-300" value={certData.csc_id} onChange={e => setCertData({...certData, csc_id: e.target.value})} placeholder="Ex: 000001"/>
+                        </div>
+                        <div className="md:col-span-9">
+                            <label className="block text-xs font-bold text-indigo-900 mb-1">Código CSC (Token)</label>
+                            <input className="w-full border p-2 rounded text-sm placeholder-indigo-300" value={certData.csc_token} onChange={e => setCertData({...certData, csc_token: e.target.value})} placeholder="Ex: 1A2B3C..."/>
+                        </div>
+                        <div className="md:col-span-12">
+                            <p className="text-[10px] text-indigo-600 font-medium">* Obrigatório para emitir NFC-e. Obtenha estes códigos no portal da SEFAZ do seu estado (No Ambiente correspondente).</p>
+                        </div>
                     </div>
-                </div>
+                 </div>
              </div>
-             <button onClick={handleSaveCertSettings} className="mt-4 bg-indigo-600 text-white px-4 py-2 rounded font-bold">Salvar Configuração</button>
          </div>
        )}
     </div>
@@ -3672,6 +3795,65 @@ const StoreApp = ({ onLogout, updateStore }) => {
        } catch (e) { console.error(e); }
     };
     const timer = setTimeout(() => { if(store) checkBillNotifications(); }, 2000);
+    return () => clearTimeout(timer);
+  }, [store, showNotification]);
+
+  // --- VERIFICAÇÃO DIÁRIA DO CERTIFICADO DIGITAL ---
+  useEffect(() => {
+    const checkCertExpiration = async () => {
+        if (!store || !store.id) return;
+        
+        const todayStr = new Date().toISOString().split('T')[0];
+        const storageKey = `last_cert_check_${store.id}`;
+        const lastCheck = localStorage.getItem(storageKey);
+
+        // Se já verificou/avisou hoje, interrompe (não enche a tela do usuário toda hora)
+        if (lastCheck === todayStr) return; 
+
+        try {
+            // Busca o certificado no Supabase (já adaptando para o padrão que estamos usando)
+            const { data: certSettings } = await supabase
+                .from('fiscal_settings')
+                .select('cert_base64, cert_password')
+                .eq('firebase_store_id', String(store.id))
+                .single();
+
+            if (certSettings && certSettings.cert_base64 && certSettings.cert_password) {
+                // Decodifica usando o node-forge
+                const der = forge.util.decode64(certSettings.cert_base64);
+                const asn1 = forge.asn1.fromDer(der);
+                const p12 = forge.pkcs12.pkcs12FromAsn1(asn1, false, certSettings.cert_password);
+                const bags = p12.getBags({ bagType: forge.pki.oids.certBag });
+                const certBag = bags[forge.pki.oids.certBag]?.[0];
+
+                if (certBag && certBag.cert) {
+                    const expirationDate = certBag.cert.validity.notAfter;
+                    const today = new Date();
+                    
+                    // Calcula a diferença em dias
+                    const diffTime = expirationDate - today;
+                    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+                    if (diffDays <= 7 && diffDays > 0) {
+                        showNotification(`⚠️ Atenção: Seu Certificado Digital vence em ${diffDays} dia(s)!`, 'warning');
+                        localStorage.setItem(storageKey, todayStr);
+                    } else if (diffDays <= 0) {
+                        showNotification(`🚨 URGENTE: Seu Certificado Digital VENCEU! Emissão bloqueada.`, 'error');
+                        localStorage.setItem(storageKey, todayStr);
+                    } else {
+                        // Se está tudo bem, marca que checou hoje para não ler o arquivo de novo
+                        localStorage.setItem(storageKey, todayStr);
+                    }
+                }
+            }
+        } catch (err) {
+            console.error("Erro ao verificar validade do certificado na inicialização:", err);
+            // Em caso de erro na decodificação, não travamos o sistema, apenas ignoramos.
+        }
+    };
+
+    // Colocamos um delay de 3.5 segundos para o aviso não atropelar outras notificações iniciais
+    const timer = setTimeout(checkCertExpiration, 3500);
     return () => clearTimeout(timer);
   }, [store, showNotification]);
   
