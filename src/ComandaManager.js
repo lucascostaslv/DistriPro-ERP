@@ -34,6 +34,57 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
   // NOVO: Estado para controlar a exibição do Modal de Doses dentro das comandas
   const [isDosePanelOpen, setIsDosePanelOpen] = useState(false);
 
+  const searchInputRef = React.useRef(null);
+  const [selectedSearchIndex, setSelectedSearchIndex] = useState(-1);
+
+  // Reseta índice quando a busca muda
+  useEffect(() => {
+      setSelectedSearchIndex(-1);
+  }, [productSearch]);
+
+  // Listener para F9 e F12
+  useEffect(() => {
+      const handleGlobalKeyDown = (e) => {
+          const isTyping = e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable;
+          
+          if (e.key === 'F9' && !isTyping) {
+              e.preventDefault();
+              setIsDosePanelOpen(prev => !prev);
+          }
+          // Localize o handleGlobalKeyDown dentro do ComandaManager.js
+            if (e.key === 'F12') {
+                e.preventDefault();
+                
+                if (document.activeElement === searchInputRef.current) {
+                    searchInputRef.current.blur();
+                    setProductSearch(''); // Opcional: limpa o texto ao sair
+                } else {
+                    searchInputRef.current?.focus();
+                }
+            }
+      };
+
+      window.addEventListener('keydown', handleGlobalKeyDown);
+      return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, []);
+
+  const handleSearchKeyDown = (e) => {
+      if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          setSelectedSearchIndex(prev => Math.min(prev + 1, filteredProducts.length - 1));
+      } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          setSelectedSearchIndex(prev => Math.max(prev - 1, -1));
+      } else if (e.key === 'Enter') {
+          e.preventDefault();
+          if (selectedSearchIndex >= 0 && filteredProducts[selectedSearchIndex]) {
+              handleAddItem(filteredProducts[selectedSearchIndex]);
+          } else if (filteredProducts.length === 1) {
+              handleAddItem(filteredProducts[0]);
+          }
+      }
+  };
+
 
   // 3. Função que processa a dose escolhida no modal
   const handleAddDose = async (doseItem) => {
@@ -365,6 +416,7 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
                                   className="w-full h-full pl-10 pr-4 py-2 border rounded shadow-sm focus:ring-2 focus:ring-indigo-500 outline-none" 
                                   placeholder="Ex: 5* e busque (Nome ou Cód)..."
                                   value={productSearch}
+                                  onKeyDown={handleSearchKeyDown}
                                   onChange={e => {
                                       const val = e.target.value;
                                       const match = val.match(/^(\d+)[*xX]$/);
@@ -391,16 +443,17 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
                       {/* Dropdown de Sugestões */}
                       {productSearch && (
                           <div className="absolute top-full left-0 right-0 bg-white border rounded shadow-xl mt-1 max-h-60 overflow-y-auto z-20">
-                              {filteredProducts.map(p => (
-                                  <div 
-                                      key={p.id} 
-                                      className="p-3 border-b hover:bg-indigo-50 cursor-pointer flex justify-between"
-                                      onClick={() => handleAddItem(p)}
-                                  >
-                                      <span className="font-bold text-slate-700">{p.name}</span>
-                                      <span className="text-indigo-600 font-bold">{formatCurrency(p.price)}</span>
-                                  </div>
-                              ))}
+                            {filteredProducts.map((p, index) => (
+                                <div 
+                                    key={p.id} 
+                                    // Adicione a classe de cor condicional:
+                                    className={`p-3 border-b hover:bg-indigo-50 cursor-pointer flex justify-between ${selectedSearchIndex === index ? 'bg-indigo-100 ring-2 ring-indigo-400' : ''}`}
+                                    onClick={() => handleAddItem(p)}
+                                >
+                                    <span className="font-bold text-slate-700">{p.name}</span>
+                                    <span className="text-indigo-600 font-bold">{formatCurrency(p.price)}</span>
+                                </div>
+                            ))}
                               {filteredProducts.length === 0 && <div className="p-3 text-slate-400 text-sm">Nenhum produto encontrado.</div>}
                           </div>
                       )}

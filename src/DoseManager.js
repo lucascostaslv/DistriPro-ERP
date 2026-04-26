@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Wine, X, Search, Trash2, ShoppingCart, AlertTriangle } from 'lucide-react';
 import { collection, onSnapshot, doc, updateDoc, increment, addDoc, serverTimestamp, deleteDoc } from "firebase/firestore";
 import { db } from './firebase'; // Ajuste o caminho de importação se necessário
@@ -111,6 +111,35 @@ const DoseManager = ({ isOpen, onClose, products, storeConfig, showNotification,
     const [openBottles, setOpenBottles] = useState([]);
     const [loading, setLoading] = useState(true);
     const [editingBottle, setEditingBottle] = useState(null);
+
+    // Novos estados para navegação por teclado
+    const [selectedProductIndex, setSelectedProductIndex] = useState(-1);
+    const searchInputRef = useRef(null);
+
+    // Reseta o índice sempre que a pesquisa mudar
+    useEffect(() => {
+        setSelectedProductIndex(-1);
+    }, [search]);
+
+    useEffect(() => {
+        const handleKeyDown = (e) => {
+            if (!isOpen) return;
+
+            // F12: Alternar foco na busca (Toggle)
+            if (e.key === 'F12') {
+                e.preventDefault();
+                if (document.activeElement === searchInputRef.current) {
+                    searchInputRef.current.blur();
+                    setSearch('');
+                } else {
+                    searchInputRef.current?.focus();
+                }
+            }
+        };
+
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [isOpen]);
 
     // Carrega garrafas abertas do Tenant
     useEffect(() => {
@@ -253,6 +282,7 @@ const DoseManager = ({ isOpen, onClose, products, storeConfig, showNotification,
                     <div className="relative max-w-2xl mx-auto">
                         <Search className="absolute left-4 top-3 text-slate-400" size={20}/>
                         <input
+                            ref={searchInputRef}
                             autoFocus
                             className="w-full pl-12 pr-4 py-3 bg-slate-100 border-transparent rounded-xl text-sm font-medium focus:bg-white focus:border-purple-400 focus:ring-4 focus:ring-purple-100 transition-all outline-none"
                             placeholder="Buscar garrafa aberta ou produto no estoque para abrir..."
@@ -314,9 +344,9 @@ const DoseManager = ({ isOpen, onClose, products, storeConfig, showNotification,
                                         <p className="text-sm text-slate-400 italic">Nenhum produto correspondente no estoque.</p>
                                     ) : (
                                         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
-                                            {productsToOpen.slice(0, 10).map(p => {
+                                            {productsToOpen.slice(0, 10).map((p, index) => {
                                                 const maxDoses = p.doseVolumeMl > 0 ? Math.floor((p.bottleVolumeMl || 0) / p.doseVolumeMl) : 0;
-                                                const hasOpen = openBottles.some(ob => ob.productId === p.id); // Verifica se já tem aberta
+                                                const hasOpen = openBottles.some(ob => ob.productId === p.id);
 
                                                 return (
                                                     <div key={p.id} className="p-4 border-b border-slate-100 last:border-0 hover:bg-purple-50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors">

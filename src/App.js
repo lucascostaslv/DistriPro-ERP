@@ -31,6 +31,7 @@ import { downloadSmart } from './EntradaNotas/FiscalInvoices';
 import BankAccountsManager from './BankAccountsManager';
 import CashClosingManager from './CashClosingManager';
 import DoseManager from './DoseManager';
+import { CaixaService } from './CaixaService';
 
 import { TenantProvider, useTenant } from './contexts/TenantContext';
 
@@ -720,7 +721,9 @@ const Dashboard = ({ sales, products, bankAccounts = [] }) => {
 };
 
 
-const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct, clients = [], setClients, feeProfiles = [], onNewSale, showNotification, companyInfo, storeConfig}) => {
+const PDV = ({products = [], groups = [], sales=[], onUpdateProduct, clients = [], setClients, feeProfiles = [], onNewSale, showNotification, companyInfo}) => {
+  const { currentStore: storeConfig, currentUser, tenantDB } = useTenant();
+
   const [cart, setCart] = useState([]);
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('');
@@ -748,6 +751,12 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
   const [lossReason, setLossReason] = useState('');
   const [showHistory, setShowHistory] = useState(false);
 
+  // Estados da Sessão de Caixa (Etapa 4)
+  const [caixaSession, setCaixaSession] = useState(null);
+  const [aberturaCaixaModalOpen, setAberturaCaixaModalOpen] = useState(false);
+  const [fechamentoCaixaModalOpen, setFechamentoCaixaModalOpen] = useState(false);
+  const [fundoTrocoInput, setFundoTrocoInput] = useState('');
+
   // Estados de Edição
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState(null);
@@ -762,6 +771,20 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
 
   const [addQty, setAddQty] = useState(1);
 
+  // NOVO: Estados para navegação por teclado
+  const [selectedSearchIndex, setSelectedSearchIndex] = useState(-1);
+  const [selectedCartIndex, setSelectedCartIndex] = useState(-1);
+
+  // Reseta a seleção da busca sempre que o termo mudar
+  useEffect(() => {
+      setSelectedSearchIndex(-1);
+  }, [searchTerm]);
+  
+  // Reseta a seleção do carrinho se ele esvaziar
+  useEffect(() => {
+      if (cart.length === 0) setSelectedCartIndex(-1);
+  }, [cart.length]);
+
   useEffect(() => {
     const fetchProfiles = async () => {
       if (!storeConfig?.id) return;
@@ -773,6 +796,101 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
     };
     fetchProfiles();
   }, [storeConfig]);
+
+  useEffect(() => {
+      const loadSession = async () => {
+          if (currentUser && tenantDB) {
+              const session = await CaixaService.checkOpenSession(tenantDB, currentUser.id);
+              setCaixaSession(session);
+              // Se não tiver sessão, obriga a abrir o modal de abertura
+              if (!session) {
+                  setAberturaCaixaModalOpen(true);
+              }
+          }
+      };
+      loadSession();
+  }, [currentUser, tenantDB]);
+
+  // --- CONTROLE DE ATALHOS GLOBAIS ---
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      const isTyping = e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable;
+
+      // 1. Bloqueia atalhos nativos do navegador (F1-F12)
+      if (e.key.match(/^F([1-9]|1[0-2])$/)) {
+        e.preventDefault();
+      }
+
+      // 2. Se o Painel de Comandas estiver aberto:
+      if (showComandas) {
+          if (e.key === 'F8' && !isTyping) setShowComandas(false);
+          return; 
+      }
+
+      // 3. Se o Painel de Doses estiver aberto:
+      if (showDosePanel) {
+          if (e.key === 'F9' && !isTyping) setShowDosePanel(false);
+          return;
+      }
+
+      // 4. Mapeamento normal do PDV
+      const actions = {
+        'F1': () => handlePaymentInit('Dinheiro'),
+        'F2': () => handlePaymentInit('Pix'),
+        'F3': () => handlePaymentInit('Débito'),
+        'F4': () => handlePaymentInit('Crédito'),
+        'F5': () => handlePaymentInit('Fiado'),
+        'F6': () => handlePaymentInit('PERCA'),
+        'F7': () => setSangriaModalOpen(true),
+        'F8': () => setShowComandas(true),
+        'F9': () => setShowDosePanel(true),
+        'F10': () => setAberturaCaixaModalOpen(true),
+        'F11': () => setFechamentoCaixaModalOpen(true),
+        'F12': () => {
+          // Verifica se o campo de busca já é o elemento ativo no navegador
+          if (document.activeElement === searchInputRef.current) {
+              searchInputRef.current.blur(); // Tira o foco
+              setShowSearchResults(false);   // Esconde os resultados
+          } else {
+              setSearchTerm('');             // Limpa a busca anterior
+              searchInputRef.current?.focus(); // Foca no campo
+          }
+        }
+      };
+
+      if (actions[e.key] && (!isTyping || e.key === 'F10' || e.key === 'F11' || e.key === 'F12')) {
+        actions[e.key]();
+      }
+
+      if (e.key === 'Enter' && paymentModalOpen && modalStep === 'confirm') {
+        confirmSale();
+      }
+
+      // 5. NAVEGAÇÃO DO CARRINHO (Setas)
+      // Só funciona se não estiver digitando, se o modal de pagamento estiver fechado e se houver itens
+      if (!isTyping && !paymentModalOpen && cart.length > 0 && !showSearchResults) {
+          if (e.key === 'ArrowDown') {
+              e.preventDefault();
+              setSelectedCartIndex(prev => Math.min(prev + 1, cart.length - 1));
+          } else if (e.key === 'ArrowUp') {
+              e.preventDefault();
+              setSelectedCartIndex(prev => Math.max(prev - 1, 0));
+          } else if (e.key === 'ArrowRight' && selectedCartIndex >= 0) {
+              e.preventDefault();
+              updateQty(cart[selectedCartIndex].id, 1);
+          } else if (e.key === 'ArrowLeft' && selectedCartIndex >= 0) {
+              e.preventDefault();
+              updateQty(cart[selectedCartIndex].id, -1);
+          } else if (e.key === 'Delete' && selectedCartIndex >= 0) {
+              e.preventDefault();
+              removeItem(cart[selectedCartIndex].id);
+          }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [cart, paymentModalOpen, modalStep, showComandas, showDosePanel, selectedCartIndex, showSearchResults]);
 
   // Foca na barra de pesquisa ao abrir
   useEffect(() => {
@@ -821,8 +939,24 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
 
   // Ao pressionar ENTER na busca
   const handleSearchSubmit = (e) => {
-      if (e.key === 'Enter') {
-          // 1. Se tiver um código exato, adiciona direto
+      if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          setSelectedSearchIndex(prev => Math.min(prev + 1, filteredSearchProducts.length - 1));
+      } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          setSelectedSearchIndex(prev => Math.max(prev - 1, -1));
+      } else if (e.key === 'Enter') {
+          e.preventDefault();
+          
+          // 1. Se o usuário navegou com as setas e deu Enter
+          if (selectedSearchIndex >= 0 && filteredSearchProducts[selectedSearchIndex]) {
+              addToCart(filteredSearchProducts[selectedSearchIndex]);
+              setSearchTerm('');
+              setShowSearchResults(false);
+              return;
+          }
+          
+          // 2. Se tiver um código exato, adiciona direto
           const exactMatch = products.find(p => p.cbaCode === searchTerm || p.barcode === searchTerm || (p.extraBarcodes && p.extraBarcodes.includes(searchTerm)));
           if (exactMatch) {
               addToCart(exactMatch);
@@ -830,7 +964,8 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
               setShowSearchResults(false);
               return;
           }
-          // 2. Se tiver apenas 1 resultado no filtro, adiciona ele
+          
+          // 3. Se tiver apenas 1 resultado no filtro, adiciona ele
           if (filteredSearchProducts.length === 1) {
               addToCart(filteredSearchProducts[0]);
               setSearchTerm('');
@@ -914,6 +1049,12 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
   };
 
   const addToCart = (product, customQty = null) => {
+    if (!caixaSession) {
+        showNotification('Você precisa ABRIR O CAIXA (F10) antes de vender!', 'error');
+        setAberturaCaixaModalOpen(true);
+        return;
+    }
+
     // Usa a quantidade passada por parâmetro ou a do estado visual
     const qtyToAdd = customQty !== null ? customQty : addQty;
     
@@ -1007,17 +1148,15 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
         const batch = writeBatch(firebase.db);
 
         // 1. Usa a collection 'financial_movements' que já alimenta o Transactions
-        const finRef = doc(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'financial_movements'));
-        batch.set(finRef, {
-            type: 'EXPENSE', 
-            category: 'SANGRIA', // Categoria chave para filtrar depois
-            description: `SANGRIA: ${sangriaData.reason}`,
+        if (!caixaSession) throw new Error("Nenhum caixa aberto para realizar sangria.");
+
+        // Usa o CaixaService refatorado para salvar a movimentação atrelada ao operador
+        await CaixaService.addMovement(tenantDB, caixaSession.id, {
+            type: 'EXPENSE',
+            category: 'SANGRIA',
+            paymentMethod: 'DINHEIRO', // Sangria normalmente é em dinheiro físico
             amount: amountNum,
-            date: new Date().toISOString().split('T')[0],
-            createdAt: serverTimestamp(),
-            userId: currentUser?.id,
-            userName: currentUser?.username || 'Caixa',
-            isSangria: true
+            reason: `SANGRIA: ${sangriaData.reason}`,
         });
 
         // =================================================================
@@ -1262,14 +1401,15 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
 
         {/* Dropdown de Resultados (Item mais compacto) */}
         {showSearchResults && filteredSearchProducts.length > 0 && (
-            <div className="absolute top-full left-0 right-0 mt-1 bg-white rounded-lg shadow-xl border border-slate-200 overflow-hidden animate-in slide-in-from-top-2">
-                {filteredSearchProducts.map(p => {
+            <div className="absolute top-full left-0 right-0 mt-1 bg-white rounded-lg shadow-xl border border-slate-200 overflow-hidden animate-in slide-in-from-top-2 z-50">
+                {/* CORREÇÃO AQUI: Passando (p, index) na função map */}
+                {filteredSearchProducts.map((p, index) => {
                     const displayStock = getDisplayStock(p, products);
                     return (
                         <div 
                             key={p.id} 
                             onClick={() => { addToCart(p); setSearchTerm(''); setShowSearchResults(false); searchInputRef.current.focus(); }}
-                            className="p-2 px-3 border-b border-slate-50 last:border-0 hover:bg-indigo-50 cursor-pointer flex justify-between items-center group"
+                            className={`p-2 px-3 border-b border-slate-50 last:border-0 hover:bg-indigo-50 cursor-pointer flex justify-between items-center group ${selectedSearchIndex === index ? 'bg-indigo-100 ring-2 ring-indigo-400' : ''}`}
                         >
                             <div>
                                 <div className="font-bold text-slate-700 text-sm group-hover:text-indigo-700">{p.name}</div>
@@ -1339,7 +1479,7 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
             ) : (
                 cart.map((item, idx) => {
                     return (
-                        <div key={idx} className={`flex items-center gap-3 p-2 rounded-lg border ${item.isWholesale ? 'bg-emerald-50 border-emerald-100' : 'bg-white border-slate-100 hover:bg-slate-50'}`}>
+                        <div key={idx} className={`flex items-center gap-3 p-2 rounded-lg border transition-all ${selectedCartIndex === idx ? 'ring-2 ring-indigo-500 shadow-md transform scale-[1.01] z-10' : ''} ${item.isWholesale ? 'bg-emerald-50 border-emerald-100' : 'bg-white border-slate-100 hover:bg-slate-50'}`}>
                             {/* Checkbox Compacto */}
                             <div className="pl-1">
                                 <input 
@@ -1570,6 +1710,61 @@ const PDV = ({products = [], groups = [], sales=[], currentUser, onUpdateProduct
               </button>
           </div>
       </Modal>
+      {/* MODAL DE ABERTURA DE CAIXA (F10) */}
+      <Modal isOpen={aberturaCaixaModalOpen} onClose={() => { if(caixaSession) setAberturaCaixaModalOpen(false) }} title="Abertura de Caixa (Sessão)">
+          <div className="space-y-4">
+              <div className="bg-indigo-50 border border-indigo-200 p-3 rounded text-indigo-800 text-sm">
+                  <AlertTriangle size={16} className="inline mr-2"/>
+                  Você está abrindo o caixa para o operador: <strong>{currentUser?.username}</strong>
+              </div>
+              <div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1">Fundo de Troco (R$ Inicial da Gaveta)</label>
+                  <input type="number" step="0.01" className="w-full border p-3 rounded text-lg font-bold text-slate-800" placeholder="0.00" value={fundoTrocoInput} onChange={e => setFundoTrocoInput(e.target.value)} autoFocus/>
+              </div>
+              <button 
+                onClick={async () => {
+                    if (!fundoTrocoInput) return showNotification('Insira o valor do fundo de troco.', 'error');
+                    try {
+                        const newSession = await CaixaService.openSession(tenantDB, currentUser.id, currentUser.username, fundoTrocoInput);
+                        setCaixaSession(newSession);
+                        setAberturaCaixaModalOpen(false);
+                        showNotification('Caixa aberto com sucesso! Boas vendas.', 'success');
+                    } catch (e) { showNotification('Erro ao abrir o caixa.', 'error'); }
+                }}
+                className="w-full py-3 rounded font-bold mt-2 text-white bg-emerald-600 hover:bg-emerald-700 transition-colors"
+              >
+                Confirmar Abertura
+              </button>
+          </div>
+      </Modal>
+
+      {/* MODAL DE FECHAMENTO DE CAIXA (F11) */}
+      <Modal isOpen={fechamentoCaixaModalOpen} onClose={() => setFechamentoCaixaModalOpen(false)} title="Encerrar Sessão do Caixa">
+          <div className="space-y-4 text-center">
+              <Lock size={48} className="mx-auto text-slate-400 mb-2" />
+              <h3 className="font-bold text-lg text-slate-800">Deseja realmente encerrar este caixa?</h3>
+              <p className="text-sm text-slate-500">Ao encerrar, o sistema consolidará todas as suas vendas e sangrias para a conferência gerencial. Você será deslogado ou impedido de vender até nova abertura.</p>
+              
+              <div className="grid grid-cols-2 gap-3 mt-4">
+                  <button onClick={() => setFechamentoCaixaModalOpen(false)} className="py-3 border border-slate-300 rounded font-bold text-slate-600 hover:bg-slate-50">Cancelar</button>
+                  <button 
+                    onClick={async () => {
+                        try {
+                            // Aqui você consolida e fecha. Posteriormente, o CashClosingManager lerá os caixas com status 'fechado'.
+                            await CaixaService.closeSession(tenantDB, caixaSession.id, { saldoTeorico: totalCart /* Substituir por cálculos de apuração reais depois */ });
+                            setCaixaSession(null);
+                            setFechamentoCaixaModalOpen(false);
+                            showNotification('Sessão encerrada. Relatório enviado à gerência.', 'success');
+                        } catch (e) { showNotification('Erro ao fechar caixa.', 'error'); }
+                    }} 
+                    className="py-3 bg-red-600 text-white rounded font-bold hover:bg-red-700 shadow-lg"
+                  >
+                    Sim, Encerrar
+                  </button>
+              </div>
+          </div>
+      </Modal>
+
     </div>
   );
 };
@@ -3466,7 +3661,7 @@ const usePersistedState = (key, initialValue) => {
 };
 
 const StoreApp = ({ onLogout, updateStore }) => {
-  const { currentStore: store, currentUser } = useTenant();
+  const { currentStore: store, currentUser, tenantDB } = useTenant();
 
   const [activeModule, setActiveModule] = useState('pdv');
   const [notification, setNotification] = useState(null);
@@ -3618,7 +3813,39 @@ const StoreApp = ({ onLogout, updateStore }) => {
   const handleNewSale = async (sale) => {
     try {
         const appId = String(store.id);
+        const { data: nfeConfig } = await tenantDB.supabase.query('fiscal_settings').single();
+
         const batch = writeBatch(firebase.db);
+        // Verificação de Contingência (Etapa 2)
+        // Tenta pegar a data do nfeConfig ou faz o fallback para o store
+        const certDateString = nfeConfig?.cert_date || store?.certDate; 
+        const isExpired = certDateString ? new Date(certDateString) < new Date() : false;
+
+        if (isExpired) {
+            const saleRef = tenantDB.firestore.getRawRef('sales', String(sale.id));
+            await updateDoc(saleRef, {
+                nfeStatus: 'CONTINGÊNCIA',
+                nfeMessage: 'Venda realizada com certificado expirado.'
+            });
+            
+            showNotification('Certificado expirado. Imprimindo Cupom Não Fiscal.', 'warning');
+            printReceipt(sale, store.companyInfo);
+            setIsEmitting(false);
+            return; // Interrompe o envio para a API BrasilNFe
+        }
+        
+        if (isExpired) {
+            const saleRef = tenantDB.firestore.getRawRef('sales', String(sale.id));
+            await updateDoc(saleRef, {
+                nfeStatus: 'CONTINGÊNCIA',
+                nfeMessage: 'Venda realizada com certificado expirado.'
+            });
+            
+            showNotification('Certificado expirado. Imprimindo Cupom Não Fiscal.', 'warning');
+            printReceipt(sale, store.companyInfo);
+            setIsEmitting(false);
+            return; // Interrompe o envio para a API BrasilNFe
+        }
         
         // 1. Salva a venda
         const saleRef = doc(collection(firebase.db, 'artifacts', appId, 'public', 'data', 'sales'));

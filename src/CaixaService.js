@@ -1,53 +1,49 @@
-import { tenantDAL } from './firebase'; // Ajuste o caminho se necessário
+import { where } from 'firebase/firestore'; // <-- Importação necessária
 
 export const CaixaService = {
-    // 1. Verifica se o usuário tem um caixa aberto
-    checkOpenSession: async (appId, userId) => {
-        // Usamos o getAll do tenantDAL passando as constraints (filtros)
-        const sessions = await tenantDAL.getAll(appId, 'caixa_sessoes', [
-            { field: 'userId', op: '==', value: userId },
-            { field: 'status', op: '==', value: 'aberto' }
+    // Busca se existe um caixa aberto para o usuário atual
+    checkOpenSession: async (tenantDB, userId) => {
+        // Agora usamos a função where() nativa do Firebase para construir os filtros
+        const sessions = await tenantDB.firestore.getAll('caixa_sessoes', [
+            where('userId', '==', userId),
+            where('status', '==', 'aberto')
         ]);
-        
         return sessions.length > 0 ? sessions[0] : null;
     },
 
-    // 2. Busca totais do dia anterior
-    getPreviousDayTotals: async (appId) => {
-        // Retornando mock por enquanto. 
-        // No futuro, faremos um tenantDAL.getAll nas vendas filtrando pela data.
-        return { dinheiro: 0, cartao: 0, pix: 0 }; 
-    },
-
-    // 3. Abre um novo caixa
-    openSession: async (appId, userId, userName, initialBalance) => {
-        const previousDayTotals = await CaixaService.getPreviousDayTotals(appId);
-        
+    // Inicia uma nova sessão (Fundo de Troco)
+    openSession: async (tenantDB, userId, userName, initialBalance) => {
         const newSession = {
             userId,
             userName,
             status: 'aberto',
-            // O tenantDAL.add já adiciona o createdAt (serverTimestamp) automaticamente
             initialBalance: Number(initialBalance),
-            previousDayTotals
+            openedAt: new Date().toISOString()
         };
-        
-        // Usa o método add do tenantDAL
-        const sessionId = await tenantDAL.add(appId, 'caixa_sessoes', newSession);
-        return sessionId;
+        return await tenantDB.firestore.add('caixa_sessoes', newSession);
     },
 
-    // 4. Registra uma movimentação (venda, entrada ou retirada/sangria)
-    addMovement: async (appId, sessionId, data) => {
+    // Fecha a sessão atual
+    closeSession: async (tenantDB, sessionId, closingData) => {
+        const payload = {
+            status: 'fechado',
+            closedAt: new Date().toISOString(),
+            ...closingData // Recebe saldos apurados, perdas, etc.
+        };
+        return await tenantDB.firestore.update('caixa_sessoes', sessionId, payload);
+    },
+
+    // Atrela sangrias e movimentações à sessão do operador logado
+    addMovement: async (tenantDB, sessionId, data) => {
         const newMovement = {
             sessionId,
-            type: data.type, // 'entrada' ou 'retirada'
-            paymentMethod: data.paymentMethod, // 'dinheiro', 'cartao', 'pix', etc.
+            type: data.type, 
+            category: data.category || 'GERAL',
+            paymentMethod: data.paymentMethod,
             amount: Number(data.amount),
             reason: data.reason || '',
-            authorizedBy: data.authorizedBy || null // Para controle de permissão da sangria
+            createdAt: new Date().toISOString()
         };
-        
-        await tenantDAL.add(appId, 'caixa_movimentacoes', newMovement);
+        return await tenantDB.firestore.add('caixa_movimentacoes', newMovement);
     }
 };
