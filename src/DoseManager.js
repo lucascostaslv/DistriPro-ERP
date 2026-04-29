@@ -1,16 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Wine, X, Search, Trash2, ShoppingCart, AlertTriangle } from 'lucide-react';
 import { collection, onSnapshot, doc, updateDoc, increment, addDoc, serverTimestamp, deleteDoc } from "firebase/firestore";
-import { db } from './firebase'; // Ajuste o caminho de importação se necessário
+import { db } from './firebase';
 
-// --- COMPONENTE DO CARD DA GARRAFA (AGORA QUADRADO/BLOCO) ---
-const BottleCard = ({ bottle, onSell, onDiscard, editingBottle, setEditingBottle, onUpdateField }) => {
+// --- COMPONENTE DO CARD DA GARRAFA ---
+const BottleCard = ({ bottle, onSell, onDiscard, editingBottle, setEditingBottle, onUpdateField, isSelected, isEditingQty, keyboardQty }) => {
     const [doseQty, setDoseQty] = useState(1);
     const pct = bottle.maxDoses > 0 ? (bottle.remainingDoses / bottle.maxDoses) * 100 : 0;
     const barColor = pct > 50 ? 'bg-green-500' : pct > 20 ? 'bg-amber-500' : 'bg-red-500';
 
+    const currentQty = (isSelected && isEditingQty) ? keyboardQty : doseQty;
+    const borderClass = isSelected 
+        ? (isEditingQty ? 'ring-4 ring-amber-400 border-amber-500 bg-amber-50 transform scale-[1.02] z-10' : 'ring-4 ring-purple-400 border-purple-500 transform scale-[1.02] z-10') 
+        : 'border-purple-100 hover:shadow-md';
+
     return (
-        <div className="bg-white border border-purple-100 rounded-xl p-4 shadow-sm hover:shadow-md transition-shadow flex flex-col h-full relative overflow-hidden group">
+        <div className={`bg-white border rounded-xl p-4 shadow-sm transition-all flex flex-col h-full relative overflow-hidden group ${borderClass}`}>
             {/* Faixa superior de cor */}
             <div className="absolute top-0 left-0 w-full h-1 bg-purple-500"></div>
 
@@ -48,7 +53,7 @@ const BottleCard = ({ bottle, onSell, onDiscard, editingBottle, setEditingBottle
                 </div>
             </div>
 
-            {/* Inputs de Configuração em Grid Quadrado */}
+            {/* Inputs de Configuração */}
             <div className="grid grid-cols-2 gap-2 mb-auto border-t border-slate-100 pt-3">
                 {[
                     { field: 'dosePrice', label: 'Preço/Dose', prefix: 'R$ ' },
@@ -69,7 +74,7 @@ const BottleCard = ({ bottle, onSell, onDiscard, editingBottle, setEditingBottle
                         ) : (
                             <button
                                 onClick={() => setEditingBottle({ id: bottle.id, field })}
-                                className="w-full text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg p-1.5 hover:border-purple-400 hover:bg-purple-50 hover:text-purple-700 transition-colors text-center truncate"
+                                className="w-full text-xs font-bold text-slate-700 bg-white border border-slate-200 rounded-lg p-1.5 hover:border-purple-400 hover:bg-purple-50 hover:text-purple-700 transition-colors text-center truncate"
                             >
                                 {prefix}{bottle[field] || '0'} {suffix}
                             </button>
@@ -81,24 +86,31 @@ const BottleCard = ({ bottle, onSell, onDiscard, editingBottle, setEditingBottle
             {/* Ação de Venda */}
             <div className="pt-3 mt-3 border-t border-slate-100">
                 <div className="flex items-center gap-2">
-                    <div className="flex items-center bg-slate-100 border border-slate-200 rounded-lg h-9 overflow-hidden flex-shrink-0">
+                    <div className={`flex items-center bg-white border rounded-lg h-9 overflow-hidden flex-shrink-0 transition-colors ${isSelected && isEditingQty ? 'border-amber-400 ring-2 ring-amber-200' : 'border-slate-200'}`}>
                         <button onClick={() => setDoseQty(q => Math.max(1, q - 1))} className="w-8 h-full text-slate-500 hover:bg-slate-200 font-bold transition-colors">−</button>
                         <input
                             type="number" min="1"
-                            value={doseQty}
+                            value={currentQty}
                             onChange={e => setDoseQty(Math.max(1, Number(e.target.value)))}
-                            className="w-8 h-full text-center text-sm font-bold bg-transparent outline-none appearance-none"
+                            readOnly={isSelected && isEditingQty}
+                            className={`w-8 h-full text-center text-sm font-bold bg-transparent outline-none appearance-none ${isSelected && isEditingQty ? 'text-amber-700' : ''}`}
                         />
                         <button onClick={() => setDoseQty(q => q + 1)} className="w-8 h-full text-slate-500 hover:bg-slate-200 font-bold transition-colors">+</button>
                     </div>
                     
                     <button
-                        onClick={() => onSell(bottle, doseQty)}
+                        onClick={() => onSell(bottle, currentQty)}
                         disabled={bottle.maxDoses === 0}
-                        className="flex-1 bg-purple-600 text-white h-9 rounded-lg text-xs font-bold hover:bg-purple-700 disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed flex items-center justify-center gap-1.5 transition-all shadow-sm active:scale-95"
+                        className={`flex-1 h-9 rounded-lg text-xs font-bold disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed flex items-center justify-center gap-1.5 transition-all shadow-sm active:scale-95 ${isSelected && isEditingQty ? 'bg-amber-600 text-white hover:bg-amber-700' : 'bg-purple-600 text-white hover:bg-purple-700'}`}
                     >
-                        <ShoppingCart size={14}/> Vender R$ {((bottle.dosePrice || 0) * doseQty).toFixed(2)}
+                        <ShoppingCart size={14}/> {isSelected && isEditingQty ? 'Confirmar' : 'Vender'} R$ {((bottle.dosePrice || 0) * currentQty).toFixed(2)}
                     </button>
+                </div>
+                
+                {/* Instruções Dinâmicas p/ Teclado */}
+                <div className="h-4 mt-2 text-[9px] text-center text-slate-400 transition-opacity">
+                    {isSelected && !isEditingQty && <span>Aperte <b>Shift+Enter</b> para alterar a Qtd</span>}
+                    {isSelected && isEditingQty && <span className="text-amber-600 font-bold">Use as <b>Setas</b>. <b>Enter</b> para vender.</span>}
                 </div>
             </div>
         </div>
@@ -112,20 +124,30 @@ const DoseManager = ({ isOpen, onClose, products, storeConfig, showNotification,
     const [loading, setLoading] = useState(true);
     const [editingBottle, setEditingBottle] = useState(null);
 
-    // Novos estados para navegação por teclado
-    const [selectedProductIndex, setSelectedProductIndex] = useState(-1);
+    // Navegação por teclado global do DoseManager
+    const [selectedIndex, setSelectedIndex] = useState(-1);
+    const [isEditingQty, setIsEditingQty] = useState(false);
+    const [keyboardQty, setKeyboardQty] = useState(1);
     const searchInputRef = useRef(null);
 
-    // Reseta o índice sempre que a pesquisa mudar
+    const filteredOpenBottles = openBottles.filter(b => b.productName.toLowerCase().includes(search.toLowerCase()));
+    const productsToOpen = products.filter(p => 
+        p.itemType !== 'pack' && 
+        (p.name.toLowerCase().includes(search.toLowerCase()) || String(p.barcode || '').includes(search))
+    );
+
+    // Reseta navegação quando a busca muda
     useEffect(() => {
-        setSelectedProductIndex(-1);
+        setSelectedIndex(-1);
+        setIsEditingQty(false);
     }, [search]);
 
+    // Listener de Navegação (Setas e Enter)
     useEffect(() => {
         const handleKeyDown = (e) => {
             if (!isOpen) return;
 
-            // F12: Alternar foco na busca (Toggle)
+            // F12 Toggle Busca
             if (e.key === 'F12') {
                 e.preventDefault();
                 if (document.activeElement === searchInputRef.current) {
@@ -134,14 +156,74 @@ const DoseManager = ({ isOpen, onClose, products, storeConfig, showNotification,
                 } else {
                     searchInputRef.current?.focus();
                 }
+                return;
+            }
+
+            // Ignorar navegação se focado em outro input numérico (exceto a barra de pesquisa)
+            if (e.target.tagName === 'INPUT' && e.target !== searchInputRef.current) return;
+
+            const totalOpen = filteredOpenBottles.length;
+            const totalSearch = productsToOpen.length;
+            const totalItems = totalOpen + totalSearch;
+
+            if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+                // Deixa as setas funcionarem livremente dentro do input de busca (esquerda/direita)
+                if (document.activeElement === searchInputRef.current && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+                    return; 
+                }
+                e.preventDefault();
+            }
+
+            if (totalItems === 0) return;
+
+            if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+                if (isEditingQty) {
+                    setKeyboardQty(q => q + 1);
+                } else {
+                    setSelectedIndex(prev => (prev + 1 >= totalItems ? prev : prev + 1));
+                }
+            } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+                if (isEditingQty) {
+                    setKeyboardQty(q => Math.max(1, q - 1));
+                } else {
+                    setSelectedIndex(prev => Math.max(prev - 1, 0));
+                }
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                // 1. Shift+Enter nas garrafas ABERTAS
+                if (e.shiftKey && selectedIndex >= 0 && selectedIndex < totalOpen) {
+                    setIsEditingQty(true);
+                    setKeyboardQty(1);
+                } 
+                // 2. Enter no modo de EDIÇÃO de qtd
+                else if (isEditingQty && selectedIndex >= 0 && selectedIndex < totalOpen) {
+                    handleSellDoses(filteredOpenBottles[selectedIndex], keyboardQty);
+                    setIsEditingQty(false);
+                } 
+                // 3. Enter NORMAL (Navegação Padrão)
+                else if (!isEditingQty) {
+                    if (selectedIndex >= 0 && selectedIndex < totalOpen) {
+                        // Enter direto = Vende 1 dose automaticamente (opcional) ou você pode exigir Shift+Enter. 
+                        // Configuramos para vender 1 direto para manter a agilidade caso não queira alterar a qtd.
+                        handleSellDoses(filteredOpenBottles[selectedIndex], 1);
+                    } else if (selectedIndex >= totalOpen && selectedIndex < totalItems) {
+                        handleOpenBottle(productsToOpen[selectedIndex - totalOpen]);
+                    }
+                }
+            } else if (e.key === 'Escape') {
+                if (isEditingQty) {
+                    setIsEditingQty(false);
+                } else {
+                    onClose();
+                }
             }
         };
 
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [isOpen]);
+    }, [isOpen, filteredOpenBottles, productsToOpen, selectedIndex, isEditingQty, keyboardQty]);
 
-    // Carrega garrafas abertas do Tenant
+    // Carrega garrafas abertas
     useEffect(() => {
         if (!isOpen || !storeConfig?.id) return;
         const storeId = String(storeConfig.id);
@@ -178,9 +260,8 @@ const DoseManager = ({ isOpen, onClose, products, storeConfig, showNotification,
                 openedAt: serverTimestamp(),
             });
             showNotification(`Garrafa de ${product.name} aberta!`, 'success');
-            setSearch(''); // Limpa a busca após abrir
+            setSearch(''); 
         } catch (error) {
-            console.error(error);
             showNotification('Erro ao abrir garrafa.', 'error');
         }
     };
@@ -248,20 +329,10 @@ const DoseManager = ({ isOpen, onClose, products, storeConfig, showNotification,
         setEditingBottle(null);
     };
 
-    // LÓGICA DE PESQUISA UNIFICADA
-    const filteredOpenBottles = openBottles.filter(b => b.productName.toLowerCase().includes(search.toLowerCase()));
-    
-    // Filtra produtos do estoque que não são caixas
-    const productsToOpen = products.filter(p => 
-        p.itemType !== 'pack' && 
-        (p.name.toLowerCase().includes(search.toLowerCase()) || String(p.barcode || '').includes(search))
-    );
-
     return (
         <div className="fixed inset-0 z-[70] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-200">
             <div className="bg-slate-50 w-full max-w-5xl h-[90vh] rounded-2xl shadow-2xl flex flex-col overflow-hidden">
                 
-                {/* HEADER ROXINHO */}
                 <div className="bg-purple-700 text-white p-5 flex items-center justify-between flex-shrink-0">
                     <div className="flex items-center gap-3">
                         <div className="p-2 bg-purple-600 rounded-lg shadow-inner">
@@ -277,7 +348,6 @@ const DoseManager = ({ isOpen, onClose, products, storeConfig, showNotification,
                     </button>
                 </div>
 
-                {/* BARRA DE PESQUISA CENTRAL */}
                 <div className="bg-white border-b border-slate-200 p-4 flex-shrink-0 shadow-sm z-10">
                     <div className="relative max-w-2xl mx-auto">
                         <Search className="absolute left-4 top-3 text-slate-400" size={20}/>
@@ -285,14 +355,13 @@ const DoseManager = ({ isOpen, onClose, products, storeConfig, showNotification,
                             ref={searchInputRef}
                             autoFocus
                             className="w-full pl-12 pr-4 py-3 bg-slate-100 border-transparent rounded-xl text-sm font-medium focus:bg-white focus:border-purple-400 focus:ring-4 focus:ring-purple-100 transition-all outline-none"
-                            placeholder="Buscar garrafa aberta ou produto no estoque para abrir..."
+                            placeholder="Buscar garrafa aberta ou produto para abrir... [F12]"
                             value={search}
                             onChange={e => setSearch(e.target.value)}
                         />
                     </div>
                 </div>
 
-                {/* ÁREA DE ROLAGEM PRINCIPAL */}
                 <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
                     
                     {loading ? (
@@ -300,7 +369,6 @@ const DoseManager = ({ isOpen, onClose, products, storeConfig, showNotification,
                     ) : (
                         <div className="space-y-8">
                             
-                            {/* SESSÃO 1: GARRAFAS ABERTAS (Grid de Quadrados) */}
                             {(search === '' || filteredOpenBottles.length > 0) && (
                                 <section>
                                     <h3 className="text-xs font-bold text-slate-500 uppercase mb-4 flex items-center gap-2">
@@ -316,10 +384,13 @@ const DoseManager = ({ isOpen, onClose, products, storeConfig, showNotification,
                                         </div>
                                     ) : (
                                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                                            {filteredOpenBottles.map(bottle => (
+                                            {filteredOpenBottles.map((bottle, index) => (
                                                 <BottleCard
                                                     key={bottle.id}
                                                     bottle={bottle}
+                                                    isSelected={selectedIndex === index}
+                                                    isEditingQty={isEditingQty}
+                                                    keyboardQty={keyboardQty}
                                                     onSell={handleSellDoses}
                                                     onDiscard={handleDiscard}
                                                     editingBottle={editingBottle}
@@ -332,7 +403,6 @@ const DoseManager = ({ isOpen, onClose, products, storeConfig, showNotification,
                                 </section>
                             )}
 
-                            {/* SESSÃO 2: ABRIR NOVA GARRAFA (Aparece ao pesquisar) */}
                             {search.length > 1 && (
                                 <section className="pt-4 border-t border-slate-200">
                                     <h3 className="text-xs font-bold text-slate-500 uppercase mb-4 flex items-center gap-2">
@@ -347,9 +417,14 @@ const DoseManager = ({ isOpen, onClose, products, storeConfig, showNotification,
                                             {productsToOpen.slice(0, 10).map((p, index) => {
                                                 const maxDoses = p.doseVolumeMl > 0 ? Math.floor((p.bottleVolumeMl || 0) / p.doseVolumeMl) : 0;
                                                 const hasOpen = openBottles.some(ob => ob.productId === p.id);
+                                                // O Índice das pesquisadas começa onde terminam as abertas
+                                                const isSelected = selectedIndex === (filteredOpenBottles.length + index);
 
                                                 return (
-                                                    <div key={p.id} className="p-4 border-b border-slate-100 last:border-0 hover:bg-purple-50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors">
+                                                    <div 
+                                                        key={p.id} 
+                                                        className={`p-4 border-b border-slate-100 last:border-0 hover:bg-purple-50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors ${isSelected ? 'bg-purple-100 ring-2 ring-purple-400 z-10 relative' : ''}`}
+                                                    >
                                                         <div>
                                                             <div className="flex items-center gap-2">
                                                                 <p className="font-bold text-slate-800">{p.name}</p>
@@ -376,9 +451,9 @@ const DoseManager = ({ isOpen, onClose, products, storeConfig, showNotification,
                                                             <button 
                                                                 onClick={() => handleOpenBottle(p)} 
                                                                 disabled={p.stock <= 0}
-                                                                className="bg-purple-100 text-purple-700 px-4 py-2 rounded-lg font-bold text-xs hover:bg-purple-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                                                                className={`px-4 py-2 rounded-lg font-bold text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap ${isSelected ? 'bg-purple-600 text-white' : 'bg-purple-100 text-purple-700 hover:bg-purple-200'}`}
                                                             >
-                                                                + Abrir Garrafa
+                                                                {isSelected ? 'Enter para Abrir' : '+ Abrir Garrafa'}
                                                             </button>
                                                         </div>
                                                     </div>

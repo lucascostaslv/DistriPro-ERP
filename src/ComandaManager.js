@@ -414,7 +414,7 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
                               <Search className="absolute left-3 top-2.5 text-slate-400" size={18}/>
                               <input 
                                   className="w-full h-full pl-10 pr-4 py-2 border rounded shadow-sm focus:ring-2 focus:ring-indigo-500 outline-none" 
-                                  placeholder="Ex: 5* e busque (Nome ou Cód)..."
+                                  placeholder="Ex: 5* e busque (Nome ou Cód)...F[12]"
                                   value={productSearch}
                                   onKeyDown={handleSearchKeyDown}
                                   onChange={e => {
@@ -434,7 +434,7 @@ const ComandaManager = ({ storeConfig, products, onSendToCart, currentUser, show
                           <button
                               onClick={() => setIsDosePanelOpen(true)}
                               className="h-full px-3 bg-purple-50 text-purple-700 border border-purple-200 rounded font-bold flex items-center justify-center gap-2 hover:bg-purple-100 transition-colors shadow-sm"
-                              title="Adicionar Doses"
+                              title="Adicionar Doses [F9]"
                           >
                               <Wine size={16}/> <span className="hidden md:inline text-sm">Doses</span>
                           </button>

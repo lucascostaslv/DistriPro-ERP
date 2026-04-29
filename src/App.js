@@ -1374,7 +1374,7 @@ const PDV = ({products = [], groups = [], sales=[], onUpdateProduct, clients = [
             <input 
                 ref={searchInputRef}
                 className="flex-1 h-9 text-base outline-none bg-transparent placeholder:text-slate-300 font-medium"
-                placeholder="Ex: 5* e bipe o código..."
+                placeholder="Ex: 5* e bipe o código...F[12]"
                 value={searchTerm}
                 onChange={(e) => { 
                     const val = e.target.value;
@@ -1452,13 +1452,13 @@ const PDV = ({products = [], groups = [], sales=[], onUpdateProduct, clients = [
 
             <div className="flex items-center gap-1">
                 <button onClick={() => setShowComandas(true)} className="bg-white border border-indigo-200 text-indigo-700 px-3 py-1.5 rounded-md font-bold hover:bg-indigo-50 flex items-center gap-1.5 text-xs shadow-sm">
-                    <Utensils size={14}/> Comandas
+                    <Utensils size={14}/> Comandas [F8]
                 </button>
                 <button 
                     onClick={() => setShowDosePanel(true)} 
                     className="bg-white border border-purple-200 text-purple-700 px-3 py-1.5 rounded-md font-bold hover:bg-purple-50 flex items-center gap-1.5 text-xs shadow-sm"
                 >
-                    <Wine size={14}/> Doses
+                    <Wine size={14}/> Doses [F9]
                 </button>
                 <button onClick={() => setShowHistory(true)} className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors" title="Histórico">
                     <Clock size={18}/>
@@ -1547,6 +1547,7 @@ const PDV = ({products = [], groups = [], sales=[], onUpdateProduct, clients = [
         </div>
 
         {/* Footer Totais e Pagamento (Botões Menores) */}
+        {/* Footer Totais e Pagamento (Botões Menores) */}
         <div className="bg-slate-50 border-t p-3 z-20 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
             <div className="flex justify-between items-end mb-3 px-1">
                 <div>
@@ -1561,19 +1562,19 @@ const PDV = ({products = [], groups = [], sales=[], onUpdateProduct, clients = [
 
             {/* Grid de Botões Menores (py-2.5 e text-sm) */}
             <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
-                <button onClick={() => handlePaymentInit('Dinheiro')} className="bg-emerald-600 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-emerald-700 shadow-sm transition-all border-b-2 border-emerald-800 active:border-b-0 active:translate-y-[2px]">Dinheiro</button>
-                <button onClick={() => handlePaymentInit('Pix')} className="bg-slate-800 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-slate-900 shadow-sm transition-all border-b-2 border-slate-950 active:border-b-0 active:translate-y-[2px]">Pix</button>
-                <button onClick={() => handlePaymentInit('Débito')} className="bg-blue-600 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-blue-700 shadow-sm transition-all border-b-2 border-blue-800 active:border-b-0 active:translate-y-[2px]">Débito</button>
-                <button onClick={() => handlePaymentInit('Crédito')} className="bg-indigo-600 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-indigo-700 shadow-sm transition-all border-b-2 border-indigo-800 active:border-b-0 active:translate-y-[2px]">Crédito</button>
-                <button onClick={() => handlePaymentInit('Fiado')} className="md:col-span-2 bg-amber-500 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-amber-600 shadow-sm transition-all flex justify-center items-center gap-2 border-b-2 border-amber-700 active:border-b-0 active:translate-y-[2px]"><UserPlus size={16}/> Fiado / Prazo</button>
+                <button onClick={() => handlePaymentInit('Dinheiro')} className="bg-emerald-600 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-emerald-700 shadow-sm transition-all border-b-2 border-emerald-800 active:border-b-0 active:translate-y-[2px]">Dinheiro [F1]</button>
+                <button onClick={() => handlePaymentInit('Pix')} className="bg-slate-800 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-slate-900 shadow-sm transition-all border-b-2 border-slate-950 active:border-b-0 active:translate-y-[2px]">Pix [F2]</button>
+                <button onClick={() => handlePaymentInit('Débito')} className="bg-blue-600 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-blue-700 shadow-sm transition-all border-b-2 border-blue-800 active:border-b-0 active:translate-y-[2px]">Débito [F3]</button>
+                <button onClick={() => handlePaymentInit('Crédito')} className="bg-indigo-600 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-indigo-700 shadow-sm transition-all border-b-2 border-indigo-800 active:border-b-0 active:translate-y-[2px]">Crédito [F4]</button>
+                <button onClick={() => handlePaymentInit('Fiado')} className="md:col-span-2 bg-amber-500 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-amber-600 shadow-sm transition-all flex justify-center items-center gap-2 border-b-2 border-amber-700 active:border-b-0 active:translate-y-[2px]"><UserPlus size={16}/> Fiado / Prazo [F5]</button>
             </div>
             
             <div className="flex justify-center mt-2 gap-4">
                  <button onClick={() => handlePaymentInit('PERCA')} className="text-[10px] text-red-400 font-bold hover:text-red-600 flex items-center gap-1 px-3 py-1 rounded hover:bg-red-50">
-                     <AlertTriangle size={10}/> Registrar Perca
+                     <AlertTriangle size={10}/> Registrar Perca [F6]
                  </button>
                  <button onClick={() => setSangriaModalOpen(true)} className="text-[10px] text-orange-500 font-bold hover:text-orange-700 flex items-center gap-1 px-3 py-1 rounded hover:bg-orange-50">
-                     <LogOut size={10} className="rotate-180"/> Sangria de Caixa
+                     <LogOut size={10} className="rotate-180"/> Sangria de Caixa [F7]
                  </button>
              </div>
         </div>
