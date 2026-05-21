@@ -1,12 +1,10 @@
-import { where } from 'firebase/firestore'; // <-- Importação necessária
-
 export const CaixaService = {
     // Busca se existe um caixa aberto para o usuário atual
     checkOpenSession: async (tenantDB, userId) => {
-        // Agora usamos a função where() nativa do Firebase para construir os filtros
+        // Usamos o where encapsulado no utilitário da nossa DAL!
         const sessions = await tenantDB.firestore.getAll('caixa_sessoes', [
-            where('userId', '==', userId),
-            where('status', '==', 'aberto')
+            tenantDB.firestore.utils.where('userId', '==', userId),
+            tenantDB.firestore.utils.where('status', '==', 'aberto')
         ]);
         return sessions.length > 0 ? sessions[0] : null;
     },

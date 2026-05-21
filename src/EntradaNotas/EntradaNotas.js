@@ -1,4 +1,4 @@
-import { db, auth } from '../firebase';
+import { auth } from '../firebase';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Save, 
@@ -19,30 +19,15 @@ import {
   Search,
   Calculator
 } from 'lucide-react';
-import { 
-  collection, 
-  doc, 
-  writeBatch, 
-  serverTimestamp,
-  query,
-  where,
-  getDocs,
-  limit,
-  addDoc,
-  increment,
-  orderBy, startAt, endAt,
-  getDoc
-} from 'firebase/firestore';
+
 import { 
   signInAnonymously, 
   onAuthStateChanged,
   signInWithCustomToken
 } from 'firebase/auth';
-import { supabase } from '../supabaseClient';
 import { useTenant } from '../contexts/TenantContext';
 
 // --- CONFIGURAÇÃO FIREBASE (Fallback) ---
-const globalAppId = typeof window.__app_id !== 'undefined' ? String(window.__app_id) : 'default-app';
 const initialAuthToken = typeof window.__initial_auth_token !== 'undefined' ? window.__initial_auth_token : undefined;
 
 // --- UTILITÁRIOS ---
@@ -106,10 +91,6 @@ export default function EntradaNotas({ storeConfig, onClose, products: globalPro
     const [suppliers, setSuppliers] = useState([]);
 
     const [activeRowSearch, setActiveRowSearch] = useState(null);
-    
-  
-  // Determina o ID da Loja corretamente (Prioridade: Prop > Global)
-  const currentAppId = storeConfig?.id ? String(storeConfig.id) : globalAppId;
   
   // Estado de Produtos Localconst [products, setProducts] = useState(appProducts || INITIAL_PRODUCTS);
   const [products, setProducts] = useState(globalProducts || []);
@@ -125,17 +106,12 @@ export default function EntradaNotas({ storeConfig, onClose, products: globalPro
         if (globalProducts && globalProducts.length > 0) {
             setProducts(globalProducts);
         } else {
-            const prodRef = collection(db, 'artifacts', storeId, 'public', 'data', 'products');
-            const prodSnap = await getDocs(query(prodRef, limit(1000)));
-            setProducts(prodSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+            const prodList = await tenantDB.firestore.getAll('products', [tenantDB.firestore.utils.limit(1000)]);
+            setProducts(prodList);
         }
 
         // Carregar Fornecedores (Mantém igual)
-        const { data: supData } = await supabase
-            .from('fiscal_clients')
-            .select('*')
-            .eq('firebase_store_id', storeId)
-            .contains('tags', ['FORNECEDOR']);
+        const { data: supData } = await tenantDB.supabase.query('fiscal_clients').contains('tags', ['FORNECEDOR']);
         setSuppliers(supData || []);
     };
     fetchData();
@@ -145,9 +121,7 @@ export default function EntradaNotas({ storeConfig, onClose, products: globalPro
     const fetchProductsForSearch = async () => {
         // Se já tiver products via props, use props.products, senão busca do banco
         try {
-           const q = query(collection(db, 'artifacts', globalAppId, 'public', 'data', 'products'), limit(1000));
-           const snapshot = await getDocs(q);
-           const prodList = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+           const prodList = await tenantDB.firestore.getAll('products', [tenantDB.firestore.utils.limit(1000)]);
            setDatabaseProducts(prodList);
         } catch (error) {
            console.error("Erro ao carregar produtos para busca:", error);
@@ -232,50 +206,32 @@ export default function EntradaNotas({ storeConfig, onClose, products: globalPro
 
   const handleQuickCreateChild = async () => {
       if (!newChildForm.name) return alert('Nome do produto unitário é obrigatório');
-      
       try {
           const code = newChildForm.code || 'GEN-UNIT-' + Date.now();
-          
-          // Cria o objeto do produto
           const newProd = {
             name: newChildForm.name.toUpperCase(),
-            cbaCode: code,
-            barcode: code,
-            unit: 'UN',
-            
-            // NOVOS CAMPOS SENDO SALVOS:
+            cbaCode: code, barcode: code, unit: 'UN',
             cost: parseFloat(String(newChildForm.cost).replace(',', '.')) || 0,
             costPrice: parseFloat(String(newChildForm.cost).replace(',', '.')) || 0,
             price: parseFloat(String(newChildForm.price).replace(',', '.')) || 0,
             wholesalePrice: parseFloat(String(newChildForm.wholesalePrice).replace(',', '.')) || 0,
             profitMargin: parseFloat(String(newChildForm.margin).replace(',', '.')) || 0,
-            
-            stock: 0,
-            isPack: false,
-            createdAt: serverTimestamp()
+            stock: 0, isPack: false, 
+            createdAt: tenantDB.firestore.utils.serverTimestamp() // ✨
         };
 
-          // Salva no Firebase (coleção de produtos)
-          const docRef = await addDoc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'products'), newProd);
+          const newDocId = await tenantDB.firestore.add('products', newProd); // ✨
+          const createdItem = { ...newProd, id: newDocId };
           
-          // Atualiza lista local para aparecer imediatamente
-          const createdItem = { ...newProd, id: docRef.id };
           setProducts(prev => [...prev, createdItem]);
-          
-          // Já seleciona ele no item que você estava editando
           setItems(prev => prev.map(i => i.id === packConfigModal.itemId ? { 
-              ...i, 
-              childId: createdItem.id, 
-              childName: createdItem.name 
+              ...i, childId: createdItem.id, childName: createdItem.name 
           } : i));
 
-          // Reseta a modal para o modo de seleção
           setIsCreatingChild(false);
           setNewChildForm({ name: '', code: '' });
           alert('Item unitário criado e selecionado!');
-
       } catch (e) {
-          console.error(e);
           alert('Erro ao criar: ' + e.message);
       }
   };
@@ -293,10 +249,7 @@ export default function EntradaNotas({ storeConfig, onClose, products: globalPro
       }
 
       try {
-          const { data, error } = await supabase
-              .from('fiscal_clients')
-              .select('*')
-              .eq('firebase_store_id', String(storeConfig.id))
+          const { data, error } = await tenantDB.supabase.query('fiscal_clients')
               .ilike('name', `%${term}%`)
               .limit(5);
 
@@ -341,41 +294,23 @@ const handleSaveSupplier = async () => {
     if (!supplierForm.name || !supplierForm.tax_id) return alert('Nome e Documento obrigatórios');
     try {
         const payload = {
-            firebase_store_id: String(storeConfig.id),
-            name: supplierForm.name.toUpperCase(),
-            type: 'PJ', // Fornecedor geralmente é PJ
-            tax_id: supplierForm.tax_id.replace(/\D/g, ''),
-            ie_indicator: '1', // Contribuinte
-            ie: supplierForm.ie.replace(/\D/g, ''),
-            email: supplierForm.email,
-            phone: supplierForm.phone,
-            zip_code: supplierForm.address.zip.replace(/\D/g, ''),
-            street: supplierForm.address.street,
-            number: supplierForm.address.number,
-            neighborhood: supplierForm.address.neighborhood,
-            city: supplierForm.address.city,
-            state: supplierForm.address.state,
-            ibge_code: supplierForm.address.ibge_code
+            name: supplierForm.name.toUpperCase(), type: 'PJ',
+            tax_id: supplierForm.tax_id.replace(/\D/g, ''), ie_indicator: '1',
+            ie: supplierForm.ie.replace(/\D/g, ''), email: supplierForm.email, phone: supplierForm.phone,
+            zip_code: supplierForm.address.zip.replace(/\D/g, ''), street: supplierForm.address.street,
+            number: supplierForm.address.number, neighborhood: supplierForm.address.neighborhood,
+            city: supplierForm.address.city, state: supplierForm.address.state, ibge_code: supplierForm.address.ibge_code
         };
 
-        const { error } = await supabase.from('fiscal_clients').insert(payload);
+        const { error } = await tenantDB.supabase.insert('fiscal_clients', payload); // ✨
         if (error) throw error;
 
-        // Atualiza o cabeçalho da nota com o novo fornecedor
-        setHeaderData(prev => ({ 
-            ...prev, 
-            entityName: supplierForm.name.toUpperCase(), 
-            entityDoc: supplierForm.tax_id 
-        }));
-        
+        setHeaderData(prev => ({ ...prev, entityName: supplierForm.name.toUpperCase(), entityDoc: supplierForm.tax_id }));
         setIsSupplierModalOpen(false);
-        // Limpa form...
         setSupplierForm({ name: '', tax_id: '', ie: '', email: '', phone: '', address: { zip: '', street: '', number: '', neighborhood: '', city: '', state: '', ibge_code: '' } });
         alert('Fornecedor cadastrado com sucesso!');
-    } catch (e) {
-        alert('Erro ao salvar: ' + e.message);
-    }
-};
+    } catch (e) { alert('Erro ao salvar: ' + e.message); }
+  };
 
 // --- ESTADOS E LÓGICA DE BUSCA MANUAL ---
   const [prodSearchModalOpen, setProdSearchModalOpen] = useState(false);
@@ -393,28 +328,20 @@ const handleSaveSupplier = async () => {
       
       setIsSearchingProd(true);
       try {
+          const { utils } = tenantDB.firestore;
           const results = [];
-          // REFERÊNCIA RESTRITA À LOJA ATUAL
-          const productsRef = collection(db, 'artifacts', currentAppId, 'public', 'data', 'products');
 
-          // 1. Tenta buscar por Código Exato (Barras ou Interno)
-          const qCode = query(productsRef, where('cbaCode', '==', term), limit(5));
-          const snapCode = await getDocs(qCode);
-          snapCode.forEach(doc => results.push({ id: doc.id, ...doc.data() }));
+          // 1. Busca por Código 
+          const snapCode = await tenantDB.firestore.getAll('products', [utils.where('cbaCode', '==', term), utils.limit(5)]);
+          snapCode.forEach(doc => results.push(doc));
 
-          // 2. Se não achou código, busca por Nome (Case Insensitive simulado via startAt/endAt)
-          // Nota: O ideal é salvar um campo 'name_upper' no banco, mas aqui tentamos com o 'name' direto
+          // 2. Busca por Nome (Case Insensitive)
           if (results.length === 0) {
               const termUpper = term.toUpperCase();
-              const qName = query(
-                  productsRef, 
-                  orderBy('name'), 
-                  startAt(termUpper), 
-                  endAt(termUpper + '\uf8ff'),
-                  limit(20)
-              );
-              const snapName = await getDocs(qName);
-              snapName.forEach(doc => results.push({ id: doc.id, ...doc.data() }));
+              const snapName = await tenantDB.firestore.getAll('products', [
+                  utils.orderBy('name'), utils.startAt(termUpper), utils.endAt(termUpper + '\uf8ff'), utils.limit(20)
+              ]);
+              snapName.forEach(doc => results.push(doc));
           }
 
           // Remove duplicados (caso exista) e define estado
@@ -436,23 +363,16 @@ const handleSaveSupplier = async () => {
   };
 
   const confirmAddProduct = (product = null) => {
-      // Gera ID compatível com o sistema (Firestore) para novos itens ou usa o existente
-      const newIdRef = doc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'products'));
-      
+      const newIdRef = tenantDB.firestore.generateId('products'); // ✨
       setItems([...items, {
-          id: Math.random().toString(36).substr(2, 9), // ID visual da linha
-          productId: product ? product.id : newIdRef.id, // ID REAL DO BANCO
+          id: Math.random().toString(36).substr(2, 9),
+          productId: product ? product.id : newIdRef,
           systemSku: product ? (product.cbaCode || product.barcode) : '',
-          barcode: product ? product.barcode : '',
-          productName: product ? product.name : '',
-          unit: product ? (product.unit || 'UN') : 'UN',
-          quantity: 1,
-          unitPrice: product ? (Number(product.cost) || 0) : 0,
-          margin: product ? (Number(product.profitMargin) || 30) : 30,
-          sellingPrice: product ? (Number(product.price) || 0) : 0,
-          wholesalePrice: product ? (Number(product.wholesalePrice) || 0) : 0,
-          total: product ? (Number(product.cost) || 0) : 0,
-          isNew: !product // Se veio do banco, não é novo. Se for null, é novo.
+          barcode: product ? product.barcode : '', productName: product ? product.name : '',
+          unit: product ? (product.unit || 'UN') : 'UN', quantity: 1,
+          unitPrice: product ? (Number(product.cost) || 0) : 0, margin: product ? (Number(product.profitMargin) || 30) : 30,
+          sellingPrice: product ? (Number(product.price) || 0) : 0, wholesalePrice: product ? (Number(product.wholesalePrice) || 0) : 0,
+          total: product ? (Number(product.cost) || 0) : 0, isNew: !product
       }]);
       setProdSearchModalOpen(false);
   };
@@ -754,14 +674,13 @@ const handleSaveSupplier = async () => {
 
   const getOrCreateSupplier = async (cnpj, name) => {
      if(!auth.currentUser) return { name, id: 'ERR' };
-     const q = query(collection(db, 'artifacts', currentAppId, 'public', 'data', 'suppliers'), where('cnpj', '==', cnpj), limit(1));
-     const snap = await getDocs(q);
-     if(!snap.empty) return { name: snap.docs[0].data().name, id: snap.docs[0].data().code };
+     const { utils } = tenantDB.firestore;
+     
+     const snap = await tenantDB.firestore.getAll('suppliers', [utils.where('cnpj', '==', cnpj), utils.limit(1)]); // ✨
+     if(snap.length > 0) return { name: snap[0].name, id: snap[0].code };
      
      const newCode = Date.now().toString().slice(-4);
-     await addDoc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'suppliers'), {
-         name, cnpj, code: newCode, autoCreated: true, createdBy: auth.currentUser.uid
-     });
+     await tenantDB.firestore.add('suppliers', { name, cnpj, code: newCode, autoCreated: true, createdBy: auth.currentUser.uid }); // ✨
      return { name, id: newCode };
   };
 
@@ -798,37 +717,20 @@ const handleSaveSupplier = async () => {
 
   const handleQuickCreate = async (item) => {
       const codeToUse = item.systemSku || item.xmlProductCode;
-      
-      if (!codeToUse) {
-          alert("O item precisa ter um código para ser cadastrado.");
-          return;
-      }
+      if (!codeToUse) return alert("O item precisa ter um código para ser cadastrado.");
 
       const newProduct = {
-          cbaCode: codeToUse,
-          name: item.xmlProductName || 'Novo Produto',
-          unit: item.unit,
-          cost: Number(item.unitPrice) || 0,
-          price: (Number(item.unitPrice) || 0) * 1.5, 
-          stock: 0, 
-          createdAt: serverTimestamp()
+          cbaCode: codeToUse, name: item.xmlProductName || 'Novo Produto', unit: item.unit,
+          cost: Number(item.unitPrice) || 0, price: (Number(item.unitPrice) || 0) * 1.5, stock: 0, 
+          createdAt: tenantDB.firestore.utils.serverTimestamp() // ✨
       };
 
       try {
-          // Usa currentAppId aqui também
-          const docRef = await addDoc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'products'), newProduct);
-          const createdProduct = { ...newProduct, id: docRef.id };
+          const newDocId = await tenantDB.firestore.add('products', newProduct); // ✨
+          const createdProduct = { ...newProduct, id: newDocId };
           setProducts(prev => [...prev, createdProduct]);
-          setItems(prev => prev.map(i => i.id === item.id ? {
-              ...i,
-              productId: createdProduct.id,
-              systemSku: createdProduct.cbaCode,
-              productName: createdProduct.name
-          } : i));
-      } catch (error) {
-          console.error("Erro ao cadastrar produto rápido:", error);
-          alert("Erro ao criar produto: " + error.message);
-      }
+          setItems(prev => prev.map(i => i.id === item.id ? { ...i, productId: createdProduct.id, systemSku: createdProduct.cbaCode, productName: createdProduct.name } : i));
+      } catch (error) { alert("Erro ao criar produto: " + error.message); }
   };
 
   const generateFinancials = () => {
@@ -889,156 +791,96 @@ const handleSaveSupplier = async () => {
   }, [financialConfig, launchPaid, totals, currentStep]);
 
   // --- FUNÇÃO REAL DE SALVAMENTO COM INTELIGÊNCIA DE FORNECEDOR ---
-  // --- FUNÇÃO REAL DE SALVAMENTO COM INTELIGÊNCIA DE FORNECEDOR E TENANT ---
   const handleSave = async () => {
-      // 1. Validações Básicas
       if (!headerData.entityId && !headerData.entityName) return alert("Informe o Fornecedor no cabeçalho.");
       if (items.length === 0) return alert("A nota não tem itens.");
-      
       setLoading(true);
 
       try {
-          const batch = writeBatch(db);
+          const batch = tenantDB.firestore.batch(); // ✨ Inicia o Batch Limpo
+          const utils = tenantDB.firestore.utils;
           const entryDate = headerData.entryDate || new Date().toISOString().split('T')[0];
 
-          // 2. Salvar a Capa da Nota (Invoices) usando TenantDB
-          // Pega a referência da coleção já filtrada para a loja atual
-          const invoiceColRef = tenantDB.firestore.getRawRef('invoices');
-          const invoiceRef = doc(invoiceColRef); // Gera um ID único automático
-          
-          const invoicePayload = {
-              ...headerData,
-              items: items, // Salva cópia dos itens na nota para auditoria
-              totalValue: totals.totalNote,
-              status: 'CONCLUIDA',
-              type: 'ENTRADA', 
-              created_at: serverTimestamp()
-          };
-          batch.set(invoiceRef, invoicePayload);
+          // 2. Salvar Capa
+          const invoiceId = tenantDB.firestore.generateId('invoices');
+          batch.set('invoices', invoiceId, {
+              ...headerData, items: items, totalValue: totals.totalNote, status: 'CONCLUIDA', type: 'ENTRADA', 
+              created_at: utils.serverTimestamp()
+          });
 
-          // 3. Gerar Parcelas no Financeiro (Accounts Payable)
+          // 3. Gerar Parcelas
           if (installments.length > 0 && selectedType?.financialAction === 'PAGAR') {
               installments.forEach(inst => {
-                  const billColRef = tenantDB.firestore.getRawRef('financial_movements');
-                  const billRef = doc(billColRef);
-                  batch.set(billRef, {
-                      type: 'EXPENSE', 
-                      description: `Nota ${headerData.number} - ${headerData.entityName} (${inst.number}/${installments.length})`,
-                      amount: safeFloat(inst.value), 
-                      value: safeFloat(inst.value), 
-                      date: entryDate, 
-                      dueDate: inst.dueDate,
-                      status: inst.status || 'PENDENTE',
-                      category: 'Revenda', 
-                      paymentMethod: financialConfig.paymentMethod,
-                      supplierId: headerData.entityId, 
-                      supplierName: headerData.entityName,
-                      invoiceId: invoiceRef.id, 
-                      createdAt: serverTimestamp(),
-                      created_at: serverTimestamp()
+                  const billId = tenantDB.firestore.generateId('financial_movements');
+                  batch.set('financial_movements', billId, {
+                      type: 'EXPENSE', description: `Nota ${headerData.number} - ${headerData.entityName} (${inst.number}/${installments.length})`,
+                      amount: safeFloat(inst.value), value: safeFloat(inst.value), date: entryDate, dueDate: inst.dueDate,
+                      status: inst.status || 'PENDENTE', category: 'Revenda', paymentMethod: financialConfig.paymentMethod,
+                      supplierId: headerData.entityId, supplierName: headerData.entityName, invoiceId: invoiceId, 
+                      createdAt: utils.serverTimestamp(), created_at: utils.serverTimestamp()
                   });
               });
           }
 
-          // 4. ATUALIZAR ESTOQUE E CADASTRAR NOVOS ITENS
           console.log("--- INICIANDO ATUALIZAÇÃO DE ESTOQUE ---");
           
           for (const item of items) {
               let targetId = item.productId;
 
-                // --- REDE DE SEGURANÇA (Cria o produto se não existir) ---
-                if (!targetId) {
-                    const match = products.find(p => 
-                        (p.name || '').toUpperCase() === (item.productName || '').toUpperCase() || 
-                        (item.systemSku && (p.barcode === item.systemSku || p.cbaCode === item.systemSku)) ||
-                        (item.barcode && (p.barcode === item.barcode || p.cbaCode === item.barcode))
-                    );
-                    
-                    if (match) {
-                        targetId = match.id;
-                        console.log(`Recuperado: Item "${item.productName}" vinculado automaticamente.`);
-                    } else {
-                        console.log(`CRIANDO: Item "${item.productName}" sendo cadastrado automaticamente.`);
-                        
-                        // Cria referência para um novo produto no TenantDB
-                        const newProductColRef = tenantDB.firestore.getRawRef('products');
-                        const newProductRef = doc(newProductColRef);
-                        targetId = newProductRef.id;
+              // Criar produto se não existir
+              if (!targetId) {
+                  const match = products.find(p => 
+                      (p.name || '').toUpperCase() === (item.productName || '').toUpperCase() || 
+                      (item.systemSku && (p.barcode === item.systemSku || p.cbaCode === item.systemSku)) ||
+                      (item.barcode && (p.barcode === item.barcode || p.cbaCode === item.barcode))
+                  );
+                  
+                  if (match) targetId = match.id;
+                  else {
+                      targetId = tenantDB.firestore.generateId('products');
+                      batch.set('products', targetId, {
+                          cbaCode: item.systemSku || item.barcode || `AUTO-${targetId.substring(0,6)}`, barcode: item.barcode || item.systemSku || '',
+                          name: (item.productName || 'PRODUTO SEM NOME').toUpperCase(), unit: item.unit || 'UN',
+                          cost: Number(item.unitPrice) || 0, costPrice: Number(item.unitPrice) || 0, price: Number(item.sellingPrice) || 0,
+                          profitMargin: Number(item.margin) || 30, wholesalePrice: Number(item.wholesalePrice) || 0,
+                          stock: 0, isPack: false, createdAt: utils.serverTimestamp()
+                      });
+                  }
+              }
 
-                        const newProductData = {
-                            cbaCode: item.systemSku || item.barcode || `AUTO-${targetId.substring(0,6)}`,
-                            barcode: item.barcode || item.systemSku || '',
-                            name: (item.productName || 'PRODUTO SEM NOME').toUpperCase(),
-                            unit: item.unit || 'UN',
-                            cost: Number(item.unitPrice) || 0,
-                            costPrice: Number(item.unitPrice) || 0,
-                            price: Number(item.sellingPrice) || 0,
-                            profitMargin: Number(item.margin) || 30,
-                            wholesalePrice: Number(item.wholesalePrice) || 0,
-                            stock: 0, // Será incrementado no batch.update logo abaixo
-                            isPack: false,
-                            createdAt: serverTimestamp()
-                        };
-                        batch.set(newProductRef, newProductData);
-                    }
-                }
-
-              // Pega a referência exata do documento do produto usando TenantDB
-              const productRef = tenantDB.firestore.getRawRef('products', targetId);
-              const productSnap = await getDoc(productRef); // Usamos getDoc normal, pois já temos a referência correta
+              // Atualiza estoque e cascata
+              const productData = await tenantDB.firestore.getById('products', targetId);
               
-              if (productSnap.exists()) {
-                  const productData = productSnap.data();
+              if (productData) {
                   const currentHistory = Array.isArray(productData.suppliersHistory) ? productData.suppliersHistory : [];
-
                   const supplierNameUpper = headerData.entityName ? headerData.entityName.toUpperCase().trim() : 'FORNECEDOR DESCONHECIDO';
                   const supplierIndex = currentHistory.findIndex(s => s.supplierName.toUpperCase() === supplierNameUpper);
                   
-                  const newHistoryEntry = {
-                      supplierId: headerData.entityId || 'xml_import',
-                      supplierName: headerData.entityName, 
-                      supplierSku: item.code || '', 
-                      lastCost: Number(item.unitPrice),
-                      lastPurchaseDate: entryDate
-                  };
-
+                  const newHistoryEntry = { supplierId: headerData.entityId || 'xml_import', supplierName: headerData.entityName, supplierSku: item.code || '', lastCost: Number(item.unitPrice), lastPurchaseDate: entryDate };
                   let updatedHistory = [...currentHistory];
-                  if (supplierIndex >= 0) {
-                      updatedHistory[supplierIndex] = { ...updatedHistory[supplierIndex], ...newHistoryEntry };
-                  } else {
-                      updatedHistory.push(newHistoryEntry);
+                  if (supplierIndex >= 0) updatedHistory[supplierIndex] = { ...updatedHistory[supplierIndex], ...newHistoryEntry };
+                  else updatedHistory.push(newHistoryEntry);
+
+                  const currentPriceInTable = Number(item.sellingPrice || item.price || 0);
+
+                  batch.update('products', targetId, {
+                      stock: utils.increment(Number(item.quantity)), 
+                      cost: Number(item.unitPrice), last_purchase: entryDate, suppliersHistory: updatedHistory,
+                      ...(autoUpdatePrice && currentPriceInTable > 0 ? { price: currentPriceInTable } : {}) 
+                  });
+
+                  if (productData.itemType === 'pack' && productData.parentId && productData.conversionFactor) {
+                      const qtyToAdd = Number(item.quantity) * Number(productData.conversionFactor);
+                      batch.update('products', productData.parentId, { stock: utils.increment(qtyToAdd) });
                   }
-
-                    const currentPriceInTable = Number(item.sellingPrice || item.price || 0);
-
-                    batch.update(productRef, {
-                        stock: increment(Number(item.quantity)), 
-                        cost: Number(item.unitPrice), 
-                        last_purchase: entryDate,
-                        suppliersHistory: updatedHistory,
-                        ...(autoUpdatePrice && currentPriceInTable > 0 ? { price: currentPriceInTable } : {}) 
-                    });
-
-                    // Lógica cascata para caixa fechada (Pack)
-                    if (productData.itemType === 'pack' && productData.parentId && productData.conversionFactor) {
-                        const qtyToAdd = Number(item.quantity) * Number(productData.conversionFactor);
-                        const unitRef = tenantDB.firestore.getRawRef('products', productData.parentId);
-                        batch.update(unitRef, { stock: increment(qtyToAdd) });
-                        console.log(`[CASCATA] Estoque Unitário Atualizado: +${qtyToAdd} un`);
-                    }
               }
           }
 
-          // 5. Executa tudo atomicamente
+          // 5. Executa tudo
           await batch.commit();
 
           alert("Nota lançada com sucesso! Estoque e Custos Atualizados.");
-          
-          // Limpa tela
-          setItems([]);
-          setInstallments([]);
-          setCurrentStep(1);
-          setLoading(false);
+          setItems([]); setInstallments([]); setCurrentStep(1); setLoading(false);
 
       } catch (error) {
           console.error("Erro ao salvar nota:", error);

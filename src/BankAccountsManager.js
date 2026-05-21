@@ -4,9 +4,8 @@ import {
   Search, CheckCircle, X, Landmark, FileText, Trash2, Settings, Filter, User, ArrowLeftRight
 } from 'lucide-react';
 import { useTenant } from './contexts/TenantContext'; 
+import { where } from 'firebase/firestore';
 // Importações limpas do Firebase apenas para as transações atômicas e filtros
-import { writeBatch, increment, doc, setDoc, serverTimestamp, where } from 'firebase/firestore'; 
-import { db } from './firebase'; 
 
 const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
 
@@ -47,11 +46,11 @@ const BankAccountsManager = ({ showNotification }) => {
       loadRouting();
   }, [tenantDB]);
 
-  // Salvar Configurações de Roteamento (Usando Referência Crua + setDoc para usar o merge)
+
   const handleSaveRouting = async () => {
       try {
-          const docRef = tenantDB.firestore.getRawRef('financial_settings', 'routing');
-          await setDoc(docRef, routingConfig, { merge: true });
+          // Usando a nossa nova abstração limpa:
+          await tenantDB.firestore.set('financial_settings', 'routing', routingConfig);
           showNotification('Roteamento de contas salvo com sucesso!', 'success');
           setIsSettingsModalOpen(false);
       } catch (error) {
@@ -144,24 +143,24 @@ const BankAccountsManager = ({ showNotification }) => {
 
       setIsProcessingTransfer(true);
       try {
-          const batch = writeBatch(db);
           const now = new Date().toISOString();
+          
+          // Inicia o lote (batch) pelo Contexto
+          const batch = tenantDB.firestore.batch();
 
-          // Pega as referências seguras pela DAL
-          const fromRef = tenantDB.firestore.getRawRef('bank_accounts', fromAccountId);
-          const toRef   = tenantDB.firestore.getRawRef('bank_accounts', toAccountId);
-
-          batch.update(fromRef, { currentBalance: increment(-amountNum) });
-          batch.update(toRef,   { currentBalance: increment(amountNum)  });
+          // Atualiza os saldos usando o utils.increment
+          batch.update('bank_accounts', fromAccountId, { 
+              currentBalance: tenantDB.firestore.utils.increment(-amountNum) 
+          });
+          batch.update('bank_accounts', toAccountId, { 
+              currentBalance: tenantDB.firestore.utils.increment(amountNum) 
+          });
 
           const fromAccount = accounts.find(a => a.id === fromAccountId);
           const toAccount   = accounts.find(a => a.id === toAccountId);
           
-          // Referência da coleção para gerar novos IDs
-          const txnCollectionRef = tenantDB.firestore.getRawRef('account_transactions');
-
-          const txnOutRef = doc(txnCollectionRef);
-          batch.set(txnOutRef, {
+          // Adiciona a transação de SAÍDA (usando utils.serverTimestamp)
+          batch.add('account_transactions', {
               accountId: fromAccountId,
               type: 'OUT',
               amount: amountNum,
@@ -169,12 +168,12 @@ const BankAccountsManager = ({ showNotification }) => {
               category: 'Transferência',
               relatedAccountId: toAccountId,
               date: now,
-              createdAt: serverTimestamp(),
+              createdAt: tenantDB.firestore.utils.serverTimestamp(),
               userName: currentUser?.name || 'Sistema'
           });
 
-          const txnInRef = doc(txnCollectionRef);
-          batch.set(txnInRef, {
+          // Adiciona a transação de ENTRADA (usando utils.serverTimestamp)
+          batch.add('account_transactions', {
               accountId: toAccountId,
               type: 'IN',
               amount: amountNum,
@@ -182,11 +181,13 @@ const BankAccountsManager = ({ showNotification }) => {
               category: 'Transferência',
               relatedAccountId: fromAccountId,
               date: now,
-              createdAt: serverTimestamp(),
+              createdAt: tenantDB.firestore.utils.serverTimestamp(),
               userName: currentUser?.name || 'Sistema'
           });
 
+          // Executa todas as operações juntas
           await batch.commit();
+
           showNotification('Transferência realizada com sucesso!', 'success');
           setIsTransferModalOpen(false);
           setTransferData({ fromAccountId: '', toAccountId: '', amount: '', description: '' });

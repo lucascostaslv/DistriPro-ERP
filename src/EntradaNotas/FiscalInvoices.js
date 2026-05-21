@@ -3,8 +3,8 @@ import {
   FileText, Search, Filter, Download, Ban, 
   Edit3, Printer, AlertTriangle, CheckCircle, Calendar, Trash2
 } from 'lucide-react';
-import { supabase } from '../supabaseClient';
 import { NFeService } from '../utils/NFeService';
+import { useTenant } from '../contexts/TenantContext';
 
 // Função auxiliar para baixar Base64
 
@@ -56,6 +56,8 @@ export const downloadSmart = (base64, filename) => {
 
 
 const FiscalInvoices = ({ storeConfig, showNotification, currentUser}) => {
+    const { tenantDB } = useTenant();
+
   const [invoices, setInvoices] = useState([]);
   const [loading, setLoading] = useState(false);
   
@@ -79,13 +81,10 @@ const FiscalInvoices = ({ storeConfig, showNotification, currentUser}) => {
   const [justification, setJustification] = useState('');
 
   const fetchInvoices = async () => {
-    if (!storeConfig?.id) return;
+    if (!tenantDB) return;
     setLoading(true);
     try {
-      let query = supabase
-        .from('fiscal_invoices')
-        .select('*')
-        .eq('firebase_store_id', String(storeConfig.id))
+      let query = tenantDB.supabase.query('fiscal_invoices')
         .order('issued_at', { ascending: false });
 
       // 1. Filtro de Cliente
@@ -126,7 +125,7 @@ const FiscalInvoices = ({ storeConfig, showNotification, currentUser}) => {
     }
   };
 
-  useEffect(() => { fetchInvoices(); }, [storeConfig]); // Recarrega se mudar a loja
+  useEffect(() => { fetchInvoices(); }, [tenantDB]); // Recarrega se mudar a loja
 
   // Função auxiliar para interpretar a resposta da API BrasilNFe
   const handleApiResponse = (response, successTitle, errorTitle) => {
@@ -156,11 +155,7 @@ const FiscalInvoices = ({ storeConfig, showNotification, currentUser}) => {
     if (!actionModal) return;
     const { type, invoice } = actionModal;
     
-    const { data: config } = await supabase
-        .from('fiscal_settings')
-        .select('api_token, environment') 
-        .eq('firebase_store_id', String(storeConfig.id))
-        .single();
+    const { data: config } = await tenantDB.supabase.query('fiscal_settings').single();
 
     if (!config?.api_token) return showNotification('Token não configurado.', 'error');
     const currentEnv = config.environment || 'HOMOLOG';
@@ -190,7 +185,8 @@ const FiscalInvoices = ({ storeConfig, showNotification, currentUser}) => {
             
             const success = handleApiResponse(result, 'Nota Cancelada!', 'Falha no Cancelamento');
             if (success) {
-                await supabase.from('fiscal_invoices').update({ status: 'CANCELADA' }).eq('id', invoice.id);
+
+                await tenantDB.supabase.update('fiscal_invoices', invoice.id, { status: 'CANCELADA' });
             }
         } 
         else if (type === 'CORRECT') {
@@ -199,8 +195,8 @@ const FiscalInvoices = ({ storeConfig, showNotification, currentUser}) => {
             
             const success = handleApiResponse(result, 'CC-e Registrada!', 'Falha na Correção');
             if (success) {
-                // ATUALIZAÇÃO: Marca no banco que essa nota tem correção
-                await supabase.from('fiscal_invoices').update({ has_correction: true }).eq('id', invoice.id);
+
+                await tenantDB.supabase.update('fiscal_invoices', invoice.id, { has_correction: true });
             }
         }
 
@@ -232,10 +228,7 @@ const FiscalInvoices = ({ storeConfig, showNotification, currentUser}) => {
 
       // 4. Exclui se a senha bater
       try {
-          const { error } = await supabase
-              .from('fiscal_invoices')
-              .delete()
-              .eq('id', id);
+          const { error } = await tenantDB.supabase.delete('fiscal_invoices', id);
 
           if (error) throw error;
           

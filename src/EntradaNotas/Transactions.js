@@ -1,11 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { PlusCircle, FileText, ScrollText, Minus, Save, X, Calendar, DollarSign, Tag, CheckSquare, Landmark} from 'lucide-react';
-import { writeBatch, doc, increment, serverTimestamp } from 'firebase/firestore';
-import { db } from '../firebase'; 
 import EntradaNotas from './EntradaNotas'; 
 import AccountsPayable from './AccountsPayable';
 import FiscalInvoices from './FiscalInvoices'; 
-import { useTenant } from '../contexts/TenantContext'; // <-- MÁGICA DO MULTI-TENANT
+import { useTenant } from '../contexts/TenantContext'; 
 
 const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
 
@@ -68,43 +66,44 @@ const Transactions = ({ showNotification, products }) => {
       }
 
       try {
-          const batch = writeBatch(db);
+          const batch = tenantDB.firestore.batch(); 
 
-          // 1. Ref da Movimentação Financeira (Usando getRawRef da DAL)
-          const finRef = doc(tenantDB.firestore.getRawRef('financial_movements'));
-          batch.set(finRef, {
+          // 1. Registo da Movimentação Financeira
+          batch.add('financial_movements', {
               type: 'EXPENSE',
               category: expenseForm.category,
               description: expenseForm.description,
               amount: amountNum,
               date: expenseForm.date,
               status: calculatedStatus,
-              createdAt: serverTimestamp(),
+              createdAt: tenantDB.firestore.utils.serverTimestamp(),
               userId: currentUser?.id || 'manager',
               userName: currentUser?.name || currentUser?.username || 'Gerente',
               accountId: expenseForm.accountId || null 
           });
 
-          // 2. Desconto direto (Se pago)
+          // 2. Desconto direto (Se pago e com conta selecionada)
           if (calculatedStatus === 'PAGO' && expenseForm.accountId) {
-              const accTxnRef = doc(tenantDB.firestore.getRawRef('account_transactions'));
-              batch.set(accTxnRef, {
+              // Adiciona a transação ao extrato
+              batch.add('account_transactions', {
                   accountId: expenseForm.accountId,
                   type: 'OUT',
                   amount: amountNum,
                   description: `DESPESA: ${expenseForm.description}`,
                   category: expenseForm.category,
                   date: expenseForm.date,
-                  createdAt: serverTimestamp(),
+                  createdAt: tenantDB.firestore.utils.serverTimestamp(),
                   userId: currentUser?.id || 'manager',
                   userName: currentUser?.name || currentUser?.username || 'Gerente'
               });
 
-              const accRef = tenantDB.firestore.getRawRef('bank_accounts', expenseForm.accountId);
-              batch.update(accRef, { currentBalance: increment(-amountNum) });
+              // Atualiza o saldo da conta
+              batch.update('bank_accounts', expenseForm.accountId, { 
+                  currentBalance: tenantDB.firestore.utils.increment(-amountNum) 
+              });
           }
 
-          await batch.commit();
+          await batch.commit(); // ✨ Executa tudo de forma segura
 
           const msg = calculatedStatus === 'PENDENTE' ? "Agendado no Contas a Pagar!" : "Despesa paga e descontada da conta!";
           if (showNotification) showNotification(msg, 'success'); else alert(msg);

@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { supabase } from './supabaseClient';
+import { useTenant } from './contexts/TenantContext';
 import { Settings, Plus, Save, Trash2, Edit2, AlertTriangle, ShieldCheck } from 'lucide-react';
 
-export default function TaxRulesManager({ storeConfig, showNotification }) {
+export default function TaxRulesManager({ showNotification }) {
+  const {tenantDB} = useTenant(); 
+
   const [profiles, setProfiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState(null); // ID do perfil em edição
@@ -20,41 +22,45 @@ export default function TaxRulesManager({ storeConfig, showNotification }) {
 
   // Carregar Perfis
   const fetchProfiles = async () => {
-    if (!storeConfig?.id) return;
+    if (!tenantDB) return;
     setLoading(true);
-    const { data, error } = await supabase
-      .from('fiscal_tax_profiles')
-      .select('*')
-      .eq('firebase_store_id', String(storeConfig.id));
+    
+    // ✨ Consulta limpa e segura
+    const { data, error } = await tenantDB.supabase.query('fiscal_tax_profiles');
     
     if (error) showNotification('Erro ao carregar regras: ' + error.message, 'error');
     else setProfiles(data || []);
+    
     setLoading(false);
   };
 
-  useEffect(() => { fetchProfiles(); }, [storeConfig]);
+  useEffect(() => { fetchProfiles(); }, [tenantDB]);
 
   // Salvar
   const handleSave = async () => {
     if (!formData.name) return showNotification('Nome da regra é obrigatório.', 'error');
     
     try {
+        // ✨ Payload limpo, sem precisar do firebase_store_id!
         const payload = {
-            firebase_store_id: String(storeConfig.id),
             name: formData.name.toUpperCase(),
             cst_nfe: formData.cst_nfe,
             cst_pis_cofins: formData.cst_pis_cofins,
-            cfop_state: formData.cfop_state, // Campos extras podem ser usados futuramente pelo Calculator
+            cfop_state: formData.cfop_state, 
             cfop_inter: formData.cfop_inter,
             origin: formData.origin,
             notes: formData.notes
         };
 
         if (editing) {
-            await supabase.from('fiscal_tax_profiles').update(payload).eq('id', editing);
+            // ✨ Update abstraído
+            const { error } = await tenantDB.supabase.update('fiscal_tax_profiles', editing, payload);
+            if (error) throw error;
             showNotification('Regra atualizada!', 'success');
         } else {
-            await supabase.from('fiscal_tax_profiles').insert(payload);
+            // ✨ Insert abstraído
+            const { error } = await tenantDB.supabase.insert('fiscal_tax_profiles', payload);
+            if (error) throw error;
             showNotification('Nova regra fiscal criada!', 'success');
         }
         
@@ -82,10 +88,12 @@ export default function TaxRulesManager({ storeConfig, showNotification }) {
 
   const handleDelete = async (id) => {
       if(!window.confirm("Tem certeza? Produtos usando esta regra podem ficar sem impostos.")) return;
-      await supabase.from('fiscal_tax_profiles').delete().eq('id', id);
-      fetchProfiles();
+      
+      // ✨ Delete abstraído
+      const { error } = await tenantDB.supabase.delete('fiscal_tax_profiles', id);
+      if (!error) fetchProfiles();
+      else showNotification('Erro ao excluir regra: ' + error.message, 'error');
   };
-
   return (
     <div className="p-4 max-w-5xl mx-auto space-y-6">
         
