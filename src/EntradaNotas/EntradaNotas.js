@@ -206,6 +206,7 @@ export default function EntradaNotas({ storeConfig, onClose, products: globalPro
 
   const handleQuickCreateChild = async () => {
       if (!newChildForm.name) return alert('Nome do produto unitário é obrigatório');
+      const { utils } = tenantDB.firestore; // ✨ Extrai o utils
       try {
           const code = newChildForm.code || 'GEN-UNIT-' + Date.now();
           const newProd = {
@@ -217,23 +218,18 @@ export default function EntradaNotas({ storeConfig, onClose, products: globalPro
             wholesalePrice: parseFloat(String(newChildForm.wholesalePrice).replace(',', '.')) || 0,
             profitMargin: parseFloat(String(newChildForm.margin).replace(',', '.')) || 0,
             stock: 0, isPack: false, 
-            createdAt: tenantDB.firestore.utils.serverTimestamp() // ✨
+            createdAt: utils.serverTimestamp() // ✨
         };
 
-          const newDocId = await tenantDB.firestore.add('products', newProd); // ✨
+          const newDocId = await tenantDB.firestore.add('products', newProd); 
           const createdItem = { ...newProd, id: newDocId };
           
           setProducts(prev => [...prev, createdItem]);
-          setItems(prev => prev.map(i => i.id === packConfigModal.itemId ? { 
-              ...i, childId: createdItem.id, childName: createdItem.name 
-          } : i));
-
+          setItems(prev => prev.map(i => i.id === packConfigModal.itemId ? { ...i, childId: createdItem.id, childName: createdItem.name } : i));
           setIsCreatingChild(false);
           setNewChildForm({ name: '', code: '' });
           alert('Item unitário criado e selecionado!');
-      } catch (e) {
-          alert('Erro ao criar: ' + e.message);
-      }
+      } catch (e) { alert('Erro ao criar: ' + e.message); }
   };
 
   // --- FUNÇÕES DE BUSCA ---
@@ -674,13 +670,13 @@ const handleSaveSupplier = async () => {
 
   const getOrCreateSupplier = async (cnpj, name) => {
      if(!auth.currentUser) return { name, id: 'ERR' };
-     const { utils } = tenantDB.firestore;
+     const { utils } = tenantDB.firestore; // ✨ Extrai o utils
      
-     const snap = await tenantDB.firestore.getAll('suppliers', [utils.where('cnpj', '==', cnpj), utils.limit(1)]); // ✨
+     const snap = await tenantDB.firestore.getAll('suppliers', [utils.where('cnpj', '==', cnpj), utils.limit(1)]); 
      if(snap.length > 0) return { name: snap[0].name, id: snap[0].code };
      
      const newCode = Date.now().toString().slice(-4);
-     await tenantDB.firestore.add('suppliers', { name, cnpj, code: newCode, autoCreated: true, createdBy: auth.currentUser.uid }); // ✨
+     await tenantDB.firestore.add('suppliers', { name, cnpj, code: newCode, autoCreated: true, createdBy: auth.currentUser.uid });
      return { name, id: newCode };
   };
 
@@ -718,15 +714,16 @@ const handleSaveSupplier = async () => {
   const handleQuickCreate = async (item) => {
       const codeToUse = item.systemSku || item.xmlProductCode;
       if (!codeToUse) return alert("O item precisa ter um código para ser cadastrado.");
+      const { utils } = tenantDB.firestore; // ✨ Extrai o utils
 
       const newProduct = {
           cbaCode: codeToUse, name: item.xmlProductName || 'Novo Produto', unit: item.unit,
           cost: Number(item.unitPrice) || 0, price: (Number(item.unitPrice) || 0) * 1.5, stock: 0, 
-          createdAt: tenantDB.firestore.utils.serverTimestamp() // ✨
+          createdAt: utils.serverTimestamp() // ✨
       };
 
       try {
-          const newDocId = await tenantDB.firestore.add('products', newProduct); // ✨
+          const newDocId = await tenantDB.firestore.add('products', newProduct);
           const createdProduct = { ...newProduct, id: newDocId };
           setProducts(prev => [...prev, createdProduct]);
           setItems(prev => prev.map(i => i.id === item.id ? { ...i, productId: createdProduct.id, systemSku: createdProduct.cbaCode, productName: createdProduct.name } : i));
@@ -797,28 +794,48 @@ const handleSaveSupplier = async () => {
       setLoading(true);
 
       try {
-          const batch = tenantDB.firestore.batch(); // ✨ Inicia o Batch Limpo
-          const utils = tenantDB.firestore.utils;
+          const batch = tenantDB.firestore.batch();
+          const { utils } = tenantDB.firestore;
           const entryDate = headerData.entryDate || new Date().toISOString().split('T')[0];
+
+          // 🔍 O EXTERMINADOR DE UNDEFINED
+          const sanitizePayload = (obj) => {
+              if (!obj || typeof obj !== "object") return obj;
+              if (obj.constructor && (obj.constructor.name === "FieldValue" || obj._methodName)) return obj;
+              const clone = Array.isArray(obj) ? [] : {};
+              for (const key in obj) {
+                  if (Object.prototype.hasOwnProperty.call(obj, key)) {
+                      const val = obj[key];
+                      if (val === undefined) clone[key] = "";
+                      else if (val !== null && typeof val === "object") {
+                          if (val.constructor && (val.constructor.name === "FieldValue" || val._methodName)) clone[key] = val;
+                          else clone[key] = sanitizePayload(val);
+                      } else clone[key] = val;
+                  }
+              }
+              return clone;
+          };
 
           // 2. Salvar Capa
           const invoiceId = tenantDB.firestore.generateId('invoices');
-          batch.set('invoices', invoiceId, {
+          const invoicePayload = sanitizePayload({
               ...headerData, items: items, totalValue: totals.totalNote, status: 'CONCLUIDA', type: 'ENTRADA', 
               created_at: utils.serverTimestamp()
           });
+          batch.set('invoices', invoiceId, invoicePayload);
 
           // 3. Gerar Parcelas
           if (installments.length > 0 && selectedType?.financialAction === 'PAGAR') {
               installments.forEach(inst => {
                   const billId = tenantDB.firestore.generateId('financial_movements');
-                  batch.set('financial_movements', billId, {
+                  const billPayload = sanitizePayload({
                       type: 'EXPENSE', description: `Nota ${headerData.number} - ${headerData.entityName} (${inst.number}/${installments.length})`,
                       amount: safeFloat(inst.value), value: safeFloat(inst.value), date: entryDate, dueDate: inst.dueDate,
                       status: inst.status || 'PENDENTE', category: 'Revenda', paymentMethod: financialConfig.paymentMethod,
-                      supplierId: headerData.entityId, supplierName: headerData.entityName, invoiceId: invoiceId, 
+                      supplierId: headerData.entityId || "", supplierName: headerData.entityName || "", invoiceId: invoiceId, 
                       createdAt: utils.serverTimestamp(), created_at: utils.serverTimestamp()
                   });
+                  batch.set('financial_movements', billId, billPayload);
               });
           }
 
@@ -826,59 +843,79 @@ const handleSaveSupplier = async () => {
           
           for (const item of items) {
               let targetId = item.productId;
+              let productData = null;
+              let productExists = false;
 
-              // Criar produto se não existir
-              if (!targetId) {
+              // 🛡️ VERIFICAÇÃO BLINDADA: Garante que o produto existe DE VERDADE no banco
+              if (targetId) {
+                  productData = await tenantDB.firestore.getById('products', targetId);
+                  productExists = !!(productData && productData.name); // Só existe se tiver nome
+              }
+
+              if (!productExists) {
                   const match = products.find(p => 
                       (p.name || '').toUpperCase() === (item.productName || '').toUpperCase() || 
                       (item.systemSku && (p.barcode === item.systemSku || p.cbaCode === item.systemSku)) ||
                       (item.barcode && (p.barcode === item.barcode || p.cbaCode === item.barcode))
                   );
                   
-                  if (match) targetId = match.id;
-                  else {
-                      targetId = tenantDB.firestore.generateId('products');
-                      batch.set('products', targetId, {
-                          cbaCode: item.systemSku || item.barcode || `AUTO-${targetId.substring(0,6)}`, barcode: item.barcode || item.systemSku || '',
-                          name: (item.productName || 'PRODUTO SEM NOME').toUpperCase(), unit: item.unit || 'UN',
-                          cost: Number(item.unitPrice) || 0, costPrice: Number(item.unitPrice) || 0, price: Number(item.sellingPrice) || 0,
-                          profitMargin: Number(item.margin) || 30, wholesalePrice: Number(item.wholesalePrice) || 0,
-                          stock: 0, isPack: false, createdAt: utils.serverTimestamp()
-                      });
+                  if (match) {
+                      targetId = match.id;
+                      productData = await tenantDB.firestore.getById('products', targetId);
+                      productExists = !!(productData && productData.name);
                   }
               }
 
-              // Atualiza estoque e cascata
-              const productData = await tenantDB.firestore.getById('products', targetId);
-              
-              if (productData) {
+              // SE O PRODUTO REALMENTE NÃO EXISTE, CRIAMOS UM NOVO
+              if (!productExists) {
+                  targetId = targetId || tenantDB.firestore.generateId('products');
+                  const newProdPayload = sanitizePayload({
+                      cbaCode: item.systemSku || item.barcode || `AUTO-${targetId.substring(0,6)}`, 
+                      barcode: item.barcode || item.systemSku || '',
+                      name: (item.productName || 'PRODUTO SEM NOME').toUpperCase(), unit: item.unit || 'UN',
+                      cost: Number(item.unitPrice) || 0, costPrice: Number(item.unitPrice) || 0, price: Number(item.sellingPrice) || 0,
+                      profitMargin: Number(item.margin) || 30, wholesalePrice: Number(item.wholesalePrice) || 0,
+                      stock: Number(item.quantity) || 0, // ✨ O estoque já entra somado na criação!
+                      isPack: false, createdAt: utils.serverTimestamp(),
+                      last_purchase: entryDate,
+                      suppliersHistory: [{
+                          supplierId: headerData.entityId || 'xml_import', supplierName: headerData.entityName || "", 
+                          supplierSku: item.code || '', lastCost: Number(item.unitPrice), lastPurchaseDate: entryDate
+                      }]
+                  });
+                  batch.set('products', targetId, newProdPayload); // Cria forçado
+              } 
+              // SE O PRODUTO EXISTE, ATUALIZAMOS ELE
+              else {
                   const currentHistory = Array.isArray(productData.suppliersHistory) ? productData.suppliersHistory : [];
                   const supplierNameUpper = headerData.entityName ? headerData.entityName.toUpperCase().trim() : 'FORNECEDOR DESCONHECIDO';
                   const supplierIndex = currentHistory.findIndex(s => s.supplierName.toUpperCase() === supplierNameUpper);
                   
-                  const newHistoryEntry = { supplierId: headerData.entityId || 'xml_import', supplierName: headerData.entityName, supplierSku: item.code || '', lastCost: Number(item.unitPrice), lastPurchaseDate: entryDate };
+                  const newHistoryEntry = { supplierId: headerData.entityId || 'xml_import', supplierName: headerData.entityName || "", supplierSku: item.code || '', lastCost: Number(item.unitPrice), lastPurchaseDate: entryDate };
                   let updatedHistory = [...currentHistory];
                   if (supplierIndex >= 0) updatedHistory[supplierIndex] = { ...updatedHistory[supplierIndex], ...newHistoryEntry };
                   else updatedHistory.push(newHistoryEntry);
 
                   const currentPriceInTable = Number(item.sellingPrice || item.price || 0);
 
-                  batch.update('products', targetId, {
-                      stock: utils.increment(Number(item.quantity)), 
-                      cost: Number(item.unitPrice), last_purchase: entryDate, suppliersHistory: updatedHistory,
+                  const updatePayload = sanitizePayload({
+                      stock: utils.increment(Number(item.quantity) || 0), 
+                      cost: Number(item.unitPrice) || 0, last_purchase: entryDate, suppliersHistory: updatedHistory,
                       ...(autoUpdatePrice && currentPriceInTable > 0 ? { price: currentPriceInTable } : {}) 
                   });
 
+                  // ✨ Troquei update() por set(). Isso impede qualquer travamento se o doc sumir milissegundos antes
+                  batch.set('products', targetId, updatePayload); 
+
+                  // CASCATA DA CAIXA
                   if (productData.itemType === 'pack' && productData.parentId && productData.conversionFactor) {
-                      const qtyToAdd = Number(item.quantity) * Number(productData.conversionFactor);
-                      batch.update('products', productData.parentId, { stock: utils.increment(qtyToAdd) });
+                      const qtyToAdd = (Number(item.quantity) || 0) * Number(productData.conversionFactor);
+                      batch.set('products', productData.parentId, { stock: utils.increment(qtyToAdd) }); 
                   }
               }
           }
 
-          // 5. Executa tudo
           await batch.commit();
-
           alert("Nota lançada com sucesso! Estoque e Custos Atualizados.");
           setItems([]); setInstallments([]); setCurrentStep(1); setLoading(false);
 
