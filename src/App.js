@@ -792,27 +792,32 @@ const printReceipt = (sale, companyInfo) => {
     <head>
       <title>Recibo #${sale.id}</title>
       <style>
-        @page { size: 80mm auto; margin: 3mm; }
-        body { 
-            font-family: 'Courier New', monospace; 
-            font-size: 10px; 
-            line-height: 1.3; 
-            color: #000 !important; 
-            font-weight: 900 !important; /* Força o negrito máximo */
-            margin: 0; 
-            padding: 0; 
-        }
-        pre { 
-            white-space: pre-wrap; 
-            word-wrap: break-word; 
-            font-family: inherit; 
-            font-size: inherit; 
-            line-height: inherit; 
-            font-weight: 900 !important; /* Garante que o texto pré-formatado também fique forte */
-            color: #000 !important; 
-            margin: 0; 
-        }
-      </style>
+                            /* FORÇA O PRETO E O CONTRASTE NA IMPRESSORA TÉRMICA */
+                            @media print {
+                                body, * {
+                                    color: #000000 !important;
+                                    -webkit-print-color-adjust: exact;
+                                    print-color-adjust: exact;
+                                }
+                            }
+                            
+                            /* MUDANÇA DE CORES PARA PRETO ABSOLUTO (#000000) E FONTES MAIS GROSSAS */
+                            body { font-family: 'Courier New', Courier, monospace; font-size: 12px; margin: 0; padding: 10px; color: #000000; font-weight: 600; }
+                            .header { text-align: center; margin-bottom: 15px; border-bottom: 1px dashed #000000; padding-bottom: 10px; }
+                            .company-name { font-size: 16px; font-weight: 900; margin-bottom: 5px; color: #000000; }
+                            .company-details { font-size: 10px; color: #000000; font-weight: bold; }
+                            .receipt-title { text-align: center; font-weight: 900; font-size: 14px; margin-bottom: 15px; text-transform: uppercase; border-bottom: 1px dashed #000000; padding-bottom: 10px; }
+                            
+                            .item-list { margin-bottom: 15px; }
+                            .item { margin-bottom: 8px; border-bottom: 1px dotted #000000; padding-bottom: 4px; }
+                            .item-name { font-weight: 900; margin-bottom: 2px; color: #000000; }
+                            .item-details { display: flex; justify-content: space-between; color: #000000; font-weight: bold; }
+                            
+                            .total-row { display: flex; justify-content: space-between; font-weight: 900; font-size: 14px; margin-top: 10px; border-top: 1px dashed #000000; padding-top: 10px; color: #000000; }
+                            .info-row { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 3px; color: #000000; font-weight: bold; }
+                            
+                            .footer { text-align: center; margin-top: 20px; font-size: 10px; color: #000000; border-top: 1px dashed #000000; padding-top: 10px; font-weight: 900; }
+                        </style>
     </head>
     <body>
       <pre>${receiptContent}</pre>
@@ -5761,7 +5766,6 @@ const StoreApp = ({ onLogout, updateStore }) => {
   const [products, setProducts] = useState([]);
   const [realtimeSales, setRealtimeSales] = useState([]);
 
-
   // Listener Contas Bancárias
   const [bankAccounts, setBankAccounts] = useState([]);
 
@@ -5867,46 +5871,52 @@ const StoreApp = ({ onLogout, updateStore }) => {
   ]);
 
   // 🔍 FUNÇÃO DE RASTREABILIDADE E HIGIENIZAÇÃO MULTI-TENANT
-const cleanUndefinedFields = (obj, path = '') => {
-    if (!obj || typeof obj !== 'object') return obj;
-    
+  const cleanUndefinedFields = (obj, path = "") => {
+    if (!obj || typeof obj !== "object") return obj;
+
     // Proteção essencial: não mexe nas classes nativas do Firebase (como serverTimestamp / FieldValue)
-    if (obj.constructor && (obj.constructor.name.includes('FieldValue') || obj.constructor.name.includes('Impl'))) {
-        return obj;
+    if (
+      obj.constructor &&
+      (obj.constructor.name.includes("FieldValue") ||
+        obj.constructor.name.includes("Impl"))
+    ) {
+      return obj;
     }
-    
+
     const res = Array.isArray(obj) ? [] : {};
-    
+
     for (const key in obj) {
-        if (Object.prototype.hasOwnProperty.call(obj, key)) {
-            const currentPath = path ? `${path}.${key}` : key;
-            
-            if (obj[key] === undefined) {
-                // 🚨 RASTREABILIDADE EM TEMPO REAL NO CONSOLE:
-                console.error(`[RASTREAMENTO MULTI-TENANT] Campo UNDEFINED detectado no caminho: "${currentPath}". Convertendo para "" para evitar travamento do Firebase.`);
-                
-                if (Array.isArray(res)) {
-                    res.push("");
-                } else {
-                    res[key] = "";
-                }
-            } else if (typeof obj[key] === 'object' && obj[key] !== null) {
-                if (Array.isArray(res)) {
-                    res.push(cleanUndefinedFields(obj[key], currentPath));
-                } else {
-                    res[key] = cleanUndefinedFields(obj[key], currentPath);
-                }
-            } else {
-                if (Array.isArray(res)) {
-                    res.push(obj[key]);
-                } else {
-                    res[key] = obj[key];
-                }
-            }
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        const currentPath = path ? `${path}.${key}` : key;
+
+        if (obj[key] === undefined) {
+          // 🚨 RASTREABILIDADE EM TEMPO REAL NO CONSOLE:
+          console.error(
+            `[RASTREAMENTO MULTI-TENANT] Campo UNDEFINED detectado no caminho: "${currentPath}". Convertendo para "" para evitar travamento do Firebase.`,
+          );
+
+          if (Array.isArray(res)) {
+            res.push("");
+          } else {
+            res[key] = "";
+          }
+        } else if (typeof obj[key] === "object" && obj[key] !== null) {
+          if (Array.isArray(res)) {
+            res.push(cleanUndefinedFields(obj[key], currentPath));
+          } else {
+            res[key] = cleanUndefinedFields(obj[key], currentPath);
+          }
+        } else {
+          if (Array.isArray(res)) {
+            res.push(obj[key]);
+          } else {
+            res[key] = obj[key];
+          }
         }
+      }
     }
     return res;
-};
+  };
 
   // Função de Venda (com baixa de estoque e COMANDA)
   const handleNewSale = async (sale) => {
@@ -5940,7 +5950,7 @@ const cleanUndefinedFields = (obj, path = '') => {
 
       // 1. Gera o ID da venda antes para poder referenciar
       const saleId = tenantDB.firestore.generateId("sales");
-      
+
       // Monta o objeto da venda usando o serverTimestamp nativo já importado no topo do App.js
       const finalSale = {
         ...sale,
@@ -5953,7 +5963,10 @@ const cleanUndefinedFields = (obj, path = '') => {
       // 🔍 Higienização robusta em tempo de execução para converter qualquer 'undefined' das comandas em ""
       const sanitizePayload = (obj) => {
         if (!obj || typeof obj !== "object") return obj;
-        if (obj.constructor && (obj.constructor.name === "FieldValue" || obj._methodName)) {
+        if (
+          obj.constructor &&
+          (obj.constructor.name === "FieldValue" || obj._methodName)
+        ) {
           return obj; // Não corrompe as classes internas do Firebase
         }
         const clone = Array.isArray(obj) ? [] : {};
@@ -5963,7 +5976,10 @@ const cleanUndefinedFields = (obj, path = '') => {
             if (val === undefined) {
               clone[key] = "";
             } else if (val !== null && typeof val === "object") {
-              if (val.constructor && (val.constructor.name === "FieldValue" || val._methodName)) {
+              if (
+                val.constructor &&
+                (val.constructor.name === "FieldValue" || val._methodName)
+              ) {
                 clone[key] = val;
               } else {
                 clone[key] = sanitizePayload(val);
@@ -5977,7 +5993,7 @@ const cleanUndefinedFields = (obj, path = '') => {
       };
 
       const sanitizedSale = sanitizePayload(finalSale);
-      
+
       // Salva a venda higienizada
       batch.set("sales", saleId, sanitizedSale);
 
