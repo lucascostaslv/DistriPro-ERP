@@ -218,15 +218,11 @@ const DoseManager = ({
   const [keyboardQty, setKeyboardQty] = useState(1);
   const searchInputRef = useRef(null);
 
-  const filteredOpenBottles = openBottles.filter((b) =>
-    b.productName.toLowerCase().includes(search.toLowerCase()),
-  );
-  const productsToOpen = products.filter(
-    (p) =>
-      p.itemType !== "pack" &&
-      (p.name.toLowerCase().includes(search.toLowerCase()) ||
-        String(p.barcode || "").includes(search)),
-  );
+  const filteredOpenBottles = openBottles.filter(b => (b.productName || '').toLowerCase().includes((search || '').toLowerCase()));
+    const productsToOpen = products.filter(p => 
+        p.itemType !== 'pack' && 
+        ((p.name || '').toLowerCase().includes((search || '').toLowerCase()) || String(p.barcode || '').includes(search))
+    );
 
   // Reseta navegação quando a busca muda
   useEffect(() => {

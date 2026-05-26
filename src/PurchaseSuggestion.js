@@ -100,8 +100,8 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
       const lower = searchTerm.toLowerCase();
       list = list.filter(
         (p) =>
-          p.name.toLowerCase().includes(lower) ||
-          String(p.barcode).includes(lower),
+          (p.name || "").toLowerCase().includes(lower) || // ✨ Blindado!
+          String(p.barcode || "").includes(lower),
       );
     }
 
@@ -124,7 +124,9 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
       if (b.stats.suggestedQty !== a.stats.suggestedQty) {
         return b.stats.suggestedQty - a.stats.suggestedQty;
       }
-      return a.name.localeCompare(b.name);
+      
+      // ✨ Blindado contra produtos sem nome na hora de ordenar de A a Z!
+      return (a.name || "").localeCompare(b.name || ""); 
     });
 
     return list;
