@@ -719,18 +719,17 @@ const SuperAdminDashboard = ({ onLogout, showNotification }) => {
 export const printReceipt = (sale, companyInfo) => {
   const padStart = (str, len, char = " ") => String(str).padStart(len, char);
 
-  const lineLength = 48; // Caracteres para impressora térmica de 80mm
+  const lineLength = 48;
   const separator = "-".repeat(lineLength) + "\n";
 
   const center = (text) => {
-    const textStr = String(text); // Garante que o valor é string
+    const textStr = String(text);
     const padding = Math.floor((lineLength - textStr.length) / 2);
     return " ".repeat(padding > 0 ? padding : 0) + textStr + "\n";
   };
 
   let receiptContent = "";
-  
-  // Cabeçalho da Empresa
+
   receiptContent += center(companyInfo.name || "NOME DA EMPRESA");
   if (companyInfo && companyInfo.address && typeof companyInfo.address === "object") {
     const addr = companyInfo.address;
@@ -743,29 +742,21 @@ export const printReceipt = (sale, companyInfo) => {
   receiptContent += separator;
   receiptContent += center("CUPOM NAO FISCAL");
   receiptContent += separator;
-  
-  // Dados Básicos da Venda (Sem ID)
+
   receiptContent += `DATA: ${new Date(sale.date).toLocaleString("pt-BR")}\n`;
   receiptContent += `CLIENTE: ${sale.clientName || "Consumidor Final"}\n`;
   receiptContent += separator;
 
-  // Itens da Venda - COMPACTADO PARA 1 LINHA (Muita economia de papel)
   sale.items.forEach((item) => {
     const qtyStr = `${item.qty}x `;
     const totalStr = (item.price * item.qty).toFixed(2);
-    
-    // Calcula o espaço que sobrou para o nome do produto
     const maxNameLen = lineLength - qtyStr.length - totalStr.length;
-    
-    // Corta o nome se for muito grande, ou preenche com espaços para empurrar o preço para a direita
     const nameStr = item.name.substring(0, maxNameLen).padEnd(maxNameLen, " ");
-    
     receiptContent += `${qtyStr}${nameStr}${totalStr}\n`;
   });
 
   receiptContent += separator;
-  
-  // Totais compactados
+
   const totalItems = `QTD. ITENS:`;
   const totalItemsValue = `${sale.items.reduce((acc, item) => acc + item.qty, 0)}`;
   receiptContent += `${totalItems}${padStart(totalItemsValue, lineLength - totalItems.length)}\n`;
@@ -778,34 +769,41 @@ export const printReceipt = (sale, companyInfo) => {
   receiptContent += `PAGAMENTO: ${sale.paymentMethod}${sale.installments > 1 ? ` (${sale.installments}x)` : ""}\n`;
   receiptContent += separator;
   receiptContent += center("OBRIGADO PELA PREFERENCIA!");
-  receiptContent += "\n\n"; // Margem de segurança para o corte do papel
+  receiptContent += "\n\n";
 
-  // HTML Ultra-limpo com foco no <pre>
   const html = `
     <html>
     <head>
       <title>Recibo</title>
       <style>
         @media print {
-            body, * {
-                color: #000000 !important;
-                -webkit-print-color-adjust: exact;
-                print-color-adjust: exact;
-            }
-            @page { margin: 0; } /* Remove margens extras da página de impressão */
+          @page {
+            margin: 0;
+            size: 80mm auto; /* Largura térmica padrão, altura automática pelo conteúdo */
+          }
+          body, * {
+            color: #000000 !important;
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+          }
         }
-        body { 
-            margin: 0; 
-            padding: 2px 5px; /* Reduz padding lateral e vertical */
-            background: #fff;
+        html, body {
+          margin: 0;
+          padding: 0;
+          width: 80mm;
+          background: #fff;
         }
-        pre { 
-            font-family: 'Courier New', Courier, monospace; 
-            font-size: 11px; /* Tamanho ajustado para caber certinho */
-            font-weight: 600; /* Mantém bem preto/nítido */
-            line-height: 1.15; /* Deixa as linhas um pouco mais juntas */
-            margin: 0; 
-            overflow-x: hidden;
+        pre {
+          font-family: 'Courier New', Courier, monospace;
+          font-size: 11px;
+          font-weight: 600;
+          line-height: 1.15;
+          margin: 0;
+          padding: 2px 4px;
+          width: 80mm;
+          box-sizing: border-box;
+          overflow-x: hidden;
+          white-space: pre-wrap; /* Evita overflow horizontal */
         }
       </style>
     </head>
@@ -814,7 +812,7 @@ export const printReceipt = (sale, companyInfo) => {
     </body>
     </html>
   `;
-  
+
   const iframe = document.createElement("iframe");
   iframe.style.position = "absolute";
   iframe.style.width = "0";
@@ -831,7 +829,7 @@ export const printReceipt = (sale, companyInfo) => {
   setTimeout(() => {
     iframe.contentWindow.print();
     document.body.removeChild(iframe);
-  }, 250); 
+  }, 250);
 };
 
 // --- MODULES ---
