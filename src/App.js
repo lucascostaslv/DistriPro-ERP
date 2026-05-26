@@ -1323,8 +1323,9 @@ const PDV = ({
         const isVisibleType =
           p.itemType === "supply" ? p.isCheckoutEnabled === true : true;
 
+          const lower = searchTerm.toLowerCase();
         const matchesTerm =
-          p.name.toLowerCase().includes(term) ||
+          (p.name || "").toLowerCase().includes(lower) ||
           (p.cbaCode && p.cbaCode.includes(term)) ||
           (p.extraBarcodes &&
             p.extraBarcodes.some((bc) => bc.includes(term))) ||
