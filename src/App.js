@@ -716,37 +716,23 @@ const SuperAdminDashboard = ({ onLogout, showNotification }) => {
 };
 
 // --- RECEIPT UTILS ---
-const printReceipt = (sale, companyInfo) => {
-  // Configurado para impressora térmica de 80mm (aprox. 302px)
-  const width = 302;
-  const height = 800;
-  const left = window.screen.width / 2 - width / 2;
-  const top = window.screen.height / 2 - height / 2;
-
-  const w = window.open(
-    "",
-    "_blank",
-    `width=${width},height=${height},top=${top},left=${left}`,
-  );
-
+export const printReceipt = (sale, companyInfo) => {
   const padStart = (str, len, char = " ") => String(str).padStart(len, char);
 
-  const lineLength = 48; // Caracteres para impressora de 80mm
+  const lineLength = 48; // Caracteres para impressora térmica de 80mm
   const separator = "-".repeat(lineLength) + "\n";
 
   const center = (text) => {
-    const textStr = String(text); // Garante que o valor é uma string para evitar erros
+    const textStr = String(text); // Garante que o valor é string
     const padding = Math.floor((lineLength - textStr.length) / 2);
     return " ".repeat(padding > 0 ? padding : 0) + textStr + "\n";
   };
 
   let receiptContent = "";
+  
+  // Cabeçalho da Empresa
   receiptContent += center(companyInfo.name || "NOME DA EMPRESA");
-  if (
-    companyInfo &&
-    companyInfo.address &&
-    typeof companyInfo.address === "object"
-  ) {
+  if (companyInfo && companyInfo.address && typeof companyInfo.address === "object") {
     const addr = companyInfo.address;
     receiptContent += center(`${addr.street || ""}, ${addr.number || ""}`);
     receiptContent += center(`${addr.city || ""} - ${addr.state || ""}`);
@@ -757,28 +743,34 @@ const printReceipt = (sale, companyInfo) => {
   receiptContent += separator;
   receiptContent += center("CUPOM NAO FISCAL");
   receiptContent += separator;
-  receiptContent += `VENDA: ${sale.id}\n`;
+  
+  // Dados Básicos da Venda (Sem ID)
   receiptContent += `DATA: ${new Date(sale.date).toLocaleString("pt-BR")}\n`;
   receiptContent += `CLIENTE: ${sale.clientName || "Consumidor Final"}\n`;
   receiptContent += separator;
 
+  // Itens da Venda - COMPACTADO PARA 1 LINHA (Muita economia de papel)
   sale.items.forEach((item) => {
-    const itemCode = item.cbaCode || item.id;
-    const line1 = `${itemCode} ${item.name}`;
-    receiptContent += line1.substring(0, lineLength) + "\n";
-
-    const qty = `${item.qty} UN x ${item.price.toFixed(2)}`;
-    const total = (item.price * item.qty).toFixed(2);
-    const line2 = `${qty}${padStart(total, lineLength - qty.length)}\n`;
-    receiptContent += line2;
+    const qtyStr = `${item.qty}x `;
+    const totalStr = (item.price * item.qty).toFixed(2);
+    
+    // Calcula o espaço que sobrou para o nome do produto
+    const maxNameLen = lineLength - qtyStr.length - totalStr.length;
+    
+    // Corta o nome se for muito grande, ou preenche com espaços para empurrar o preço para a direita
+    const nameStr = item.name.substring(0, maxNameLen).padEnd(maxNameLen, " ");
+    
+    receiptContent += `${qtyStr}${nameStr}${totalStr}\n`;
   });
 
   receiptContent += separator;
-  const totalItems = `QTD. TOTAL DE ITENS:`;
+  
+  // Totais compactados
+  const totalItems = `QTD. ITENS:`;
   const totalItemsValue = `${sale.items.reduce((acc, item) => acc + item.qty, 0)}`;
   receiptContent += `${totalItems}${padStart(totalItemsValue, lineLength - totalItems.length)}\n`;
 
-  const totalValue = `VALOR TOTAL R$:`;
+  const totalValue = `TOTAL R$:`;
   const totalFormatted = sale.total.toFixed(2);
   receiptContent += `${totalValue}${padStart(totalFormatted, lineLength - totalValue.length)}\n`;
 
@@ -786,47 +778,43 @@ const printReceipt = (sale, companyInfo) => {
   receiptContent += `PAGAMENTO: ${sale.paymentMethod}${sale.installments > 1 ? ` (${sale.installments}x)` : ""}\n`;
   receiptContent += separator;
   receiptContent += center("OBRIGADO PELA PREFERENCIA!");
+  receiptContent += "\n\n"; // Margem de segurança para o corte do papel
 
+  // HTML Ultra-limpo com foco no <pre>
   const html = `
     <html>
     <head>
-      <title>Recibo #${sale.id}</title>
+      <title>Recibo</title>
       <style>
-        /* FORÇA O PRETO E O CONTRASTE NA IMPRESSORA TÉRMICA */
         @media print {
             body, * {
                 color: #000000 !important;
                 -webkit-print-color-adjust: exact;
                 print-color-adjust: exact;
             }
+            @page { margin: 0; } /* Remove margens extras da página de impressão */
         }
-        
-        /* MUDANÇA DE CORES PARA PRETO ABSOLUTO (#000000) E FONTES MAIS GROSSAS */
-        body { font-family: 'Courier New', Courier, monospace; font-size: 12px; margin: 0; padding: 10px; color: #000000; font-weight: 600; }
-        .header { text-align: center; margin-bottom: 15px; border-bottom: 1px dashed #000000; padding-bottom: 10px; }
-        .company-name { font-size: 16px; font-weight: 900; margin-bottom: 5px; color: #000000; }
-        .company-details { font-size: 10px; color: #000000; font-weight: bold; }
-        .receipt-title { text-align: center; font-weight: 900; font-size: 14px; margin-bottom: 15px; text-transform: uppercase; border-bottom: 1px dashed #000000; padding-bottom: 10px; }
-        
-        .item-list { margin-bottom: 15px; }
-        .item { margin-bottom: 8px; border-bottom: 1px dotted #000000; padding-bottom: 4px; }
-        .item-name { font-weight: 900; margin-bottom: 2px; color: #000000; }
-        .item-details { display: flex; justify-content: space-between; color: #000000; font-weight: bold; }
-        
-        .total-row { display: flex; justify-content: space-between; font-weight: 900; font-size: 14px; margin-top: 10px; border-top: 1px dashed #000000; padding-top: 10px; color: #000000; }
-        .info-row { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 3px; color: #000000; font-weight: bold; }
-        
-        .footer { text-align: center; margin-top: 20px; font-size: 10px; color: #000000; border-top: 1px dashed #000000; padding-top: 10px; font-weight: 900; }
+        body { 
+            margin: 0; 
+            padding: 2px 5px; /* Reduz padding lateral e vertical */
+            background: #fff;
+        }
+        pre { 
+            font-family: 'Courier New', Courier, monospace; 
+            font-size: 11px; /* Tamanho ajustado para caber certinho */
+            font-weight: 600; /* Mantém bem preto/nítido */
+            line-height: 1.15; /* Deixa as linhas um pouco mais juntas */
+            margin: 0; 
+            overflow-x: hidden;
+        }
       </style>
     </head>
     <body>
       <pre>${receiptContent}</pre>
-      <script>
-        window.onload = function() { setTimeout(() => { window.print(); window.close(); }, 250); }
-      </script>
     </body>
     </html>
   `;
+  
   const iframe = document.createElement("iframe");
   iframe.style.position = "absolute";
   iframe.style.width = "0";
@@ -843,7 +831,7 @@ const printReceipt = (sale, companyInfo) => {
   setTimeout(() => {
     iframe.contentWindow.print();
     document.body.removeChild(iframe);
-  }, 250); // Timeout para garantir que o conteúdo foi renderizado
+  }, 250); 
 };
 
 // --- MODULES ---
