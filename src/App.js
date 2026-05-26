@@ -5866,6 +5866,48 @@ const StoreApp = ({ onLogout, updateStore }) => {
     store.companyInfo,
   ]);
 
+  // 🔍 FUNÇÃO DE RASTREABILIDADE E HIGIENIZAÇÃO MULTI-TENANT
+const cleanUndefinedFields = (obj, path = '') => {
+    if (!obj || typeof obj !== 'object') return obj;
+    
+    // Proteção essencial: não mexe nas classes nativas do Firebase (como serverTimestamp / FieldValue)
+    if (obj.constructor && (obj.constructor.name.includes('FieldValue') || obj.constructor.name.includes('Impl'))) {
+        return obj;
+    }
+    
+    const res = Array.isArray(obj) ? [] : {};
+    
+    for (const key in obj) {
+        if (Object.prototype.hasOwnProperty.call(obj, key)) {
+            const currentPath = path ? `${path}.${key}` : key;
+            
+            if (obj[key] === undefined) {
+                // 🚨 RASTREABILIDADE EM TEMPO REAL NO CONSOLE:
+                console.error(`[RASTREAMENTO MULTI-TENANT] Campo UNDEFINED detectado no caminho: "${currentPath}". Convertendo para "" para evitar travamento do Firebase.`);
+                
+                if (Array.isArray(res)) {
+                    res.push("");
+                } else {
+                    res[key] = "";
+                }
+            } else if (typeof obj[key] === 'object' && obj[key] !== null) {
+                if (Array.isArray(res)) {
+                    res.push(cleanUndefinedFields(obj[key], currentPath));
+                } else {
+                    res[key] = cleanUndefinedFields(obj[key], currentPath);
+                }
+            } else {
+                if (Array.isArray(res)) {
+                    res.push(obj[key]);
+                } else {
+                    res[key] = obj[key];
+                }
+            }
+        }
+    }
+    return res;
+};
+
   // Função de Venda (com baixa de estoque e COMANDA)
   const handleNewSale = async (sale) => {
     try {
@@ -5875,16 +5917,14 @@ const StoreApp = ({ onLogout, updateStore }) => {
         .single();
 
       const batch = tenantDB.firestore.batch();
-      // Verificação de Contingência (Etapa 2)
-      // Tenta pegar a data do nfeConfig ou faz o fallback para o store
+
       const certDateString = nfeConfig?.cert_date || store?.certDate;
       const isExpired = certDateString
         ? new Date(certDateString) < new Date()
         : false;
 
       if (isExpired) {
-        const saleRef = tenantDB.firestore.getRawRef("sales", String(sale.id));
-        await updateDoc(saleRef, {
+        await tenantDB.firestore.update("sales", String(sale.id), {
           nfeStatus: "CONTINGÊNCIA",
           nfeMessage: "Venda realizada com certificado expirado.",
         });
@@ -5895,73 +5935,94 @@ const StoreApp = ({ onLogout, updateStore }) => {
         );
         printReceipt(sale, store.companyInfo);
         setIsEmitting(false);
-        return; // Interrompe o envio para a API BrasilNFe
-      }
-
-      if (isExpired) {
-        const saleRef = tenantDB.firestore.getRawRef("sales", String(sale.id));
-        await updateDoc(saleRef, {
-          nfeStatus: "CONTINGÊNCIA",
-          nfeMessage: "Venda realizada com certificado expirado.",
-        });
-
-        showNotification(
-          "Certificado expirado. Imprimindo Cupom Não Fiscal.",
-          "warning",
-        );
-        printReceipt(sale, store.companyInfo);
-        setIsEmitting(false);
-        return; // Interrompe o envio para a API BrasilNFe
+        return;
       }
 
       // 1. Gera o ID da venda antes para poder referenciar
       const saleId = tenantDB.firestore.generateId("sales");
+      
+      // Monta o objeto da venda usando o serverTimestamp nativo já importado no topo do App.js
       const finalSale = {
         ...sale,
         id: saleId,
-        createdAt: tenantDB.firestore.utils.serverTimestamp(),
+        createdAt: serverTimestamp(), // ✨ Nativo do Firebase, sem prefixo 'utils'
         userId: currentUser?.id || "anon",
         userName: currentUser?.username || "Sistema",
       };
 
-      // Salva a Venda
-      batch.set("sales", saleId, finalSale);
+      // 🔍 Higienização robusta em tempo de execução para converter qualquer 'undefined' das comandas em ""
+      const sanitizePayload = (obj) => {
+        if (!obj || typeof obj !== "object") return obj;
+        if (obj.constructor && (obj.constructor.name === "FieldValue" || obj._methodName)) {
+          return obj; // Não corrompe as classes internas do Firebase
+        }
+        const clone = Array.isArray(obj) ? [] : {};
+        for (const key in obj) {
+          if (Object.prototype.hasOwnProperty.call(obj, key)) {
+            const val = obj[key];
+            if (val === undefined) {
+              clone[key] = "";
+            } else if (val !== null && typeof val === "object") {
+              if (val.constructor && (val.constructor.name === "FieldValue" || val._methodName)) {
+                clone[key] = val;
+              } else {
+                clone[key] = sanitizePayload(val);
+              }
+            } else {
+              clone[key] = val;
+            }
+          }
+        }
+        return clone;
+      };
+
+      const sanitizedSale = sanitizePayload(finalSale);
+      
+      // Salva a venda higienizada
+      batch.set("sales", saleId, sanitizedSale);
 
       // 2. Baixa de Estoque
       const comandaUpdates = {};
 
-      sale.items.forEach(item => {
-            const originalProd = products.find(p => p.id === (item.originalId || item.id));
-            if (originalProd) {
-                if (originalProd.itemType === 'pack' && originalProd.parentId && originalProd.conversionFactor) {
-                    const parentExists = products.find(p => p.id === originalProd.parentId);
-                    
-                    if (parentExists) {
-                        const qtyToDeduct = item.qty * originalProd.conversionFactor;
-                        // Alterado para batch.set com merge: true
-                        batch.set('products', originalProd.parentId, { 
-                            stock: tenantDB.firestore.utils.increment(-qtyToDeduct), 
-                            lastSale: tenantDB.firestore.utils.serverTimestamp() 
-                        }, { merge: true });
-                    }
-                } else {
-                    // Alterado para batch.set com merge: true
-                    batch.set('products', originalProd.id, { 
-                        stock: tenantDB.firestore.utils.increment(-item.qty), 
-                        lastSale: tenantDB.firestore.utils.serverTimestamp() 
-                    }, { merge: true });
-                }
-            }
+      sale.items.forEach((item) => {
+        const originalProd = products.find(
+          (p) => p.id === (item.originalId || item.id),
+        );
+        if (originalProd) {
+          if (
+            originalProd.itemType === "pack" &&
+            originalProd.parentId &&
+            originalProd.conversionFactor
+          ) {
+            const parentExists = products.find(
+              (p) => p.id === originalProd.parentId,
+            );
 
-            if (item.source === 'tab' && item.tabId && item.tabItemId) {
-                if (!comandaUpdates[item.tabId]) comandaUpdates[item.tabId] = [];
-                comandaUpdates[item.tabId].push(item.tabItemId);
+            if (parentExists) {
+              const qtyToDeduct = item.qty * originalProd.conversionFactor;
+              batch.update("products", originalProd.parentId, {
+                stock: increment(-qtyToDeduct), // ✨ Nativo do Firebase
+                lastSale: serverTimestamp(), // ✨ Nativo do Firebase
+              });
             }
-        });
+          } else {
+            batch.update("products", originalProd.id, {
+              stock: increment(-item.qty), // ✨ Nativo do Firebase
+              lastSale: serverTimestamp(), // ✨ Nativo do Firebase
+            });
+          }
+        }
+
+        if (item.source === "tab" && item.tabId && item.tabItemId) {
+          if (!comandaUpdates[item.tabId]) comandaUpdates[item.tabId] = [];
+          comandaUpdates[item.tabId].push(item.tabItemId);
+        }
+      });
 
       // 3. Financeiro (Se não for Perca)
       if (!sale.isLoss) {
-        batch.add("financial_movements", {
+        const finId = tenantDB.firestore.generateId("financial_movements");
+        batch.set("financial_movements", finId, {
           type: "INCOME",
           category: "Vendas",
           description: `Venda #${saleId.slice(-6)}`,
@@ -5970,7 +6031,7 @@ const StoreApp = ({ onLogout, updateStore }) => {
           paymentMethod: sale.paymentMethod,
           saleId: saleId,
           userId: currentUser?.id || "anon",
-          createdAt: tenantDB.firestore.utils.serverTimestamp(),
+          createdAt: serverTimestamp(), // ✨ Nativo do Firebase
         });
 
         const routeData = await tenantDB.firestore.getById(
@@ -5998,53 +6059,39 @@ const StoreApp = ({ onLogout, updateStore }) => {
               description: `VENDA PDV #${saleId.slice(-6)}`,
               category: "Vendas",
               date: new Date().toISOString(),
-              createdAt: tenantDB.firestore.utils.serverTimestamp(),
+              createdAt: serverTimestamp(), // ✨ Nativo do Firebase
               userId: currentUser?.id || "anon",
               userName: currentUser?.username || "Caixa",
             });
 
             batch.update("bank_accounts", targetAccountId, {
-              currentBalance: tenantDB.firestore.utils.increment(netAmount),
+              currentBalance: increment(netAmount), // ✨ Nativo do Firebase
             });
           }
         }
       }
 
+      // Executa o lote atómico com segurança multi-tenant
       await batch.commit();
 
       // 4. Processar Baixa nas Comandas (Pós-Venda)
-      // Isso é feito separado para garantir que podemos ler o estado atual da comanda e remover os itens certos pelo ID único
       for (const [tabId, itemUniqueIds] of Object.entries(comandaUpdates)) {
-        const tabRef = doc(
-          firebase.db,
-          "artifacts",
-          appId,
-          "public",
-          "data",
-          "tabs",
-          tabId,
-        );
-        const tabSnap = await getDoc(tabRef);
-        if (tabSnap.exists()) {
-          const tabData = tabSnap.data();
-          // Filtra mantendo apenas os itens que NÃO foram pagos agora
+        const tabData = await tenantDB.firestore.getById("tabs", tabId);
+        if (tabData && tabData.items) {
           const newItems = tabData.items.filter(
             (i) => !itemUniqueIds.includes(i.uniqueId),
           );
-
           if (newItems.length === 0) {
-            // Se acabou os itens, fecha ou deleta a comanda?
-            // O usuário disse: "fechada". Vamos deletar para limpar ou mudar status.
-            // Vamos DELETAR para simplificar a lista de abertas, conforme pedido "deletar a comanda mesmo sem ter pago" (manual),
-            // mas se pagou tudo, o ideal é arquivar ou deletar. Vamos deletar.
-            await deleteDoc(tabRef);
+            await tenantDB.firestore.delete("tabs", tabId);
           } else {
-            await updateDoc(tabRef, { items: newItems });
+            await tenantDB.firestore.update("tabs", tabId, {
+              items: newItems,
+            });
           }
         }
       }
 
-      // Modal de Nota
+      // Fluxo de perguntar sobre a emissão de nota
       const hasDoseItems = sale.items?.some((i) => i.isDose);
       const shouldAskToEmit =
         !sale.isLoss &&
@@ -6052,7 +6099,6 @@ const StoreApp = ({ onLogout, updateStore }) => {
         (currentUser?.role === "cashier" || currentUser?.role === "admin");
 
       if (hasDoseItems) {
-        // Dose: cupom não fiscal direto, sem perguntar NF-e
         printReceipt(finalSale, store.companyInfo);
         showNotification("Venda de doses registrada!", "success");
       } else if (shouldAskToEmit) {
@@ -6068,7 +6114,6 @@ const StoreApp = ({ onLogout, updateStore }) => {
       showNotification("Erro: " + error.message, "error");
     }
   };
-
   // Notificação de Contas a Pagar
   useEffect(() => {
     const checkBillNotifications = async () => {
@@ -6290,13 +6335,13 @@ const StoreApp = ({ onLogout, updateStore }) => {
       );
       // --------------------------------------
 
-      // 5. Recálculo Itens
+      // 5. Recálculo Itens (Com trava de segurança para campos undefined)
       const itemsWithFreshTaxes = sale.items.map((item) => {
         const liveProduct = products.find((p) => p.id === item.id);
         const mergedItem = liveProduct
           ? {
               ...item,
-              ncm: liveProduct.ncm || item.ncm,
+              ncm: liveProduct.ncm || item.ncm || "", // ✨ Fallback "|| ''" adicionado aqui para evitar undefined
               cest: liveProduct.cest || item.cest || "",
               taxProfileId: String(
                 liveProduct.taxProfileId || item.taxProfileId || "",
