@@ -600,7 +600,8 @@ const handleSaveSupplier = async () => {
         
         let existingProd = products.find(p => String(p.barcode) === validCode || String(p.cbaCode) === validCode);
         if (!existingProd) {
-             existingProd = products.find(p => p.name.toUpperCase().trim() === xProd.toUpperCase().trim());
+             // ✨ Blindagem: (p.name || "") e (xProd || "")
+             existingProd = products.find(p => (p.name || "").toUpperCase().trim() === (xProd || "").toUpperCase().trim());
         }
 
         newItems.push({

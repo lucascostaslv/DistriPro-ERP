@@ -782,13 +782,9 @@ const InventoryWMS = ({
   // 1. Filtragem Inteligente
   const filteredAuditProducts = useMemo(() => {
     return products.filter((p) => {
-      const matchName = p.name
-        .toLowerCase()
-        .includes(auditSearchTerm.toLowerCase());
-      const matchGroup = auditFilterGroup
-        ? p.category === auditFilterGroup
-        : true;
-      // Agora o getDisplayStock já existe quando o código chegar aqui!
+      // ✨ Blindagem: (p.name || "")
+      const matchName = (p.name || "").toLowerCase().includes(auditSearchTerm.toLowerCase());
+      const matchGroup = auditFilterGroup ? p.category === auditFilterGroup : true;
       const matchZero = auditShowZero ? true : Number(getDisplayStock(p)) > 0;
       return matchName && matchGroup && matchZero;
     });
@@ -924,7 +920,8 @@ const InventoryWMS = ({
     return products.filter((p) => {
       const term = searchTerm.toLowerCase();
       return (
-        p.name.toLowerCase().includes(term) ||
+        // ✨ Blindagem: (p.name || "")
+        (p.name || "").toLowerCase().includes(term) ||
         (p.barcode && p.barcode.includes(term))
       );
     });

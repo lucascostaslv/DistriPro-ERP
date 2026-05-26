@@ -335,7 +335,8 @@ const ComandaManager = ({
     if (!productSearch) return [];
     const term = productSearch.toLowerCase();
     return products.filter(
-      (p) => p.name.toLowerCase().includes(term) || p.cbaCode?.includes(term),
+      // ✨ Blindagem: (p.name || "")
+      (p) => (p.name || "").toLowerCase().includes(term) || p.cbaCode?.includes(term),
     );
   }, [products, productSearch]);
 
