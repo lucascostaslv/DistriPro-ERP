@@ -1277,6 +1277,7 @@ const PDV = ({
   const isWholesaleEnabled = storeConfig?.enableWholesale;
 
   // --- EFEITO GLOBAL: Aplica o modo escolhido a todos os itens ---
+  // --- EFEITO GLOBAL: Aplica o modo escolhido a todos os itens ---
   useEffect(() => {
     if (cart.length === 0) return;
     setCart((currentCart) =>
@@ -1284,12 +1285,27 @@ const PDV = ({
         const originalProduct = products.find((p) => p.id === item.id) || item;
         const retailPrice = Number(originalProduct.price) || 0;
         const wholesalePrice = Number(originalProduct.wholesalePrice) || 0;
-        const useWholesale = pricingMode === "wholesale" && wholesalePrice > 0;
+        const cardPrice = Number(originalProduct.cardPrice) || 0;
+
+        let finalPrice = retailPrice;
+        let priceLabel = "VAREJO";
+        let isWholesale = false;
+
+        // Lógica de fallback: se não tiver preço cadastrado, volta pro varejo
+        if (pricingMode === "wholesale" && wholesalePrice > 0) {
+          finalPrice = wholesalePrice;
+          priceLabel = "ATACADO";
+          isWholesale = true;
+        } else if (pricingMode === "card" && cardPrice > 0) {
+          finalPrice = cardPrice;
+          priceLabel = "CARTÃO";
+        }
+
         return {
           ...item,
-          price: useWholesale ? wholesalePrice : retailPrice,
-          priceMode: useWholesale ? "ATACADO" : "VAREJO",
-          isWholesale: useWholesale,
+          price: finalPrice,
+          priceMode: priceLabel,
+          isWholesale: isWholesale,
         };
       }),
     );
@@ -1484,9 +1500,20 @@ const PDV = ({
 
     const retailPrice = Number(product.price) || 0;
     const wholesalePrice = Number(product.wholesalePrice) || 0;
-    const useWholesale = pricingMode === "wholesale" && wholesalePrice > 0;
-    const finalPrice = useWholesale ? wholesalePrice : retailPrice;
-    const priceLabel = useWholesale ? "ATACADO" : "VAREJO";
+    const cardPrice = Number(product.cardPrice) || 0;
+
+    let finalPrice = retailPrice;
+    let priceLabel = "VAREJO";
+    let useWholesale = false;
+
+    if (pricingMode === "wholesale" && wholesalePrice > 0) {
+      finalPrice = wholesalePrice;
+      priceLabel = "ATACADO";
+      useWholesale = true;
+    } else if (pricingMode === "card" && cardPrice > 0) {
+      finalPrice = cardPrice;
+      priceLabel = "CARTÃO";
+    }
 
     setCart((prevCart) => {
       const existingItem = prevCart.find((item) => item.id === product.id);
@@ -1496,7 +1523,9 @@ const PDV = ({
             ? {
                 ...item,
                 qty: item.qty + qtyToAdd,
-                price: item.isWholesale ? wholesalePrice : retailPrice,
+                price: finalPrice,       // ✨ Atualiza com a tabela de preço ativa
+                priceMode: priceLabel,   // ✨ Atualiza a identificação visual
+                isWholesale: useWholesale,
               }
             : item,
         );
@@ -1920,13 +1949,19 @@ const PDV = ({
             </div>
             <div className="bg-slate-300 w-[1px] h-5 mx-1"></div>
 
-            {/* Toggle Varejo/Atacado Compacto */}
+            {/* Toggle Varejo/Cartão/Atacado Compacto */}
             <div className="flex bg-slate-200 p-0.5 rounded text-[11px]">
               <button
                 onClick={() => setPricingMode("retail")}
                 className={`px-3 py-1 rounded-sm font-bold transition-all ${pricingMode === "retail" ? "bg-white text-indigo-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
               >
                 Varejo
+              </button>
+              <button
+                onClick={() => setPricingMode("card")}
+                className={`px-3 py-1 rounded-sm font-bold transition-all ${pricingMode === "card" ? "bg-purple-600 text-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+              >
+                Cartão
               </button>
               <button
                 onClick={() => setPricingMode("wholesale")}
@@ -1979,14 +2014,23 @@ const PDV = ({
               return (
                 <div
                   key={idx}
-                  className={`flex items-center gap-3 p-2 rounded-lg border transition-all ${selectedCartIndex === idx ? "ring-2 ring-indigo-500 shadow-md transform scale-[1.01] z-10" : ""} ${item.isWholesale ? "bg-emerald-50 border-emerald-100" : "bg-white border-slate-100 hover:bg-slate-50"}`}
+                  onClick={() => setSelectedCartIndex(idx)}
+                  className={`flex items-center gap-3 p-2 rounded-lg border transition-all cursor-pointer ${
+                    selectedCartIndex === idx ? "ring-2 ring-indigo-500 shadow-md transform scale-[1.01] z-10" : ""
+                  } ${
+                    item.priceMode === "ATACADO"
+                      ? "bg-emerald-50 border-emerald-100"
+                      : item.priceMode === "CARTÃO"
+                        ? "bg-purple-50 border-purple-100"
+                        : "bg-white border-slate-100 hover:bg-slate-50"
+                  }`}
                 >
                   {/* Checkbox Compacto */}
-                  <div className="pl-1">
+                  <div className="pl-1" onClick={(e) => e.stopPropagation()}>
                     <input
                       type="checkbox"
                       className="w-4 h-4 rounded text-emerald-600 cursor-pointer"
-                      checked={item.isWholesale}
+                      checked={item.priceMode === "ATACADO"}
                       disabled={
                         !(
                           Number(
@@ -2003,13 +2047,19 @@ const PDV = ({
                     <div className="font-bold text-slate-800 text-sm truncate">
                       {item.name}
                     </div>
-                    <div className="flex gap-1 mt-0.5">
+                    <div className="flex gap-1 mt-0.5 items-center">
                       <span className="text-[10px] text-slate-500 bg-slate-100 px-1 rounded">
                         {item.unit || "UN"}
                       </span>
-                      {item.isWholesale && (
-                        <span className="text-[9px] font-bold text-emerald-600 uppercase bg-emerald-100 px-1 rounded">
+                      {/* Etiquetas de Identificação Visual por Item */}
+                      {item.priceMode === "ATACADO" && (
+                        <span className="text-[9px] font-bold text-emerald-600 uppercase bg-emerald-100 px-1 rounded animate-in fade-in zoom-in-95 duration-150">
                           Atacado
+                        </span>
+                      )}
+                      {item.priceMode === "CARTÃO" && (
+                        <span className="text-[9px] font-bold text-purple-600 uppercase bg-purple-100 px-1 rounded animate-in fade-in zoom-in-95 duration-150">
+                          Cartão
                         </span>
                       )}
                     </div>

@@ -262,6 +262,7 @@ const InventoryWMS = ({
     name: "",
     barcode: "",
     price: "",
+    cardPrice: "",
     wholesalePrice: "",
     costPrice: "",
     profitMargin: "",
@@ -426,6 +427,7 @@ const InventoryWMS = ({
       ...prod,
       barcode: prod.barcode || prod.cbaCode || prod.ean || "",
       costPrice: prod.cost || prod.costPrice || 0,
+      cardPrice: prod.cardPrice || "",
       packQuantity: prod.conversionFactor || prod.packQuantity || 0,
       supplierId: prod.supplierId || "",
       suppliersHistory: prod.suppliersHistory || [],
@@ -581,6 +583,7 @@ const InventoryWMS = ({
         // TRATAMENTO NUMÉRICO (Crucial para o PDV e Relatórios!)
         // Garante que "10.50" vire 10.50 (número real)
         price: Number(currentProduct.price) || 0,
+        cardPrice: Number(currentProduct.cardPrice) || 0,
         wholesalePrice: Number(currentProduct.wholesalePrice) || 0,
 
         // Normaliza o Custo (Formulário usa 'costPrice', Sistema usa 'cost')
@@ -1752,7 +1755,8 @@ const InventoryWMS = ({
                     <div className="absolute -top-3 left-4 bg-slate-50 px-2 text-xs font-bold text-slate-500 flex items-center gap-1">
                       <DollarSign size={12} /> Formação de Preço
                     </div>
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-2">
+                    {/* Alterado para grid-cols-5 para acomodar o novo preço */}
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mt-2">
                       <div>
                         <label className="text-[10px] font-bold text-slate-500 uppercase">
                           Custo (R$)
@@ -1801,6 +1805,27 @@ const InventoryWMS = ({
                           placeholder="0.00"
                         />
                       </div>
+                      
+                      {/* ✨ NOVO CAMPO: PREÇO CARTÃO */}
+                      <div>
+                        <label className="text-[10px] font-bold text-purple-700 uppercase">
+                          Preço Cartão
+                        </label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          className="w-full border border-purple-300 bg-purple-50 p-2 rounded text-sm font-bold text-purple-900"
+                          value={currentProduct.cardPrice || ""}
+                          onChange={(e) =>
+                            setCurrentProduct({
+                              ...currentProduct,
+                              cardPrice: e.target.value,
+                            })
+                          }
+                          placeholder="0.00"
+                        />
+                      </div>
+
                       <div>
                         <label className="text-[10px] font-bold text-emerald-700 uppercase">
                           Preço Atacado

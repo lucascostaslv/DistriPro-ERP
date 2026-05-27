@@ -359,7 +359,7 @@ const handleSaveSupplier = async () => {
   };
 
   const confirmAddProduct = (product = null) => {
-      const newIdRef = tenantDB.firestore.generateId('products'); // ✨
+      const newIdRef = tenantDB.firestore.generateId('products');
       setItems([...items, {
           id: Math.random().toString(36).substr(2, 9),
           productId: product ? product.id : newIdRef,
@@ -367,7 +367,9 @@ const handleSaveSupplier = async () => {
           barcode: product ? product.barcode : '', productName: product ? product.name : '',
           unit: product ? (product.unit || 'UN') : 'UN', quantity: 1,
           unitPrice: product ? (Number(product.cost) || 0) : 0, margin: product ? (Number(product.profitMargin) || 30) : 30,
-          sellingPrice: product ? (Number(product.price) || 0) : 0, wholesalePrice: product ? (Number(product.wholesalePrice) || 0) : 0,
+          sellingPrice: product ? (Number(product.price) || 0) : 0, 
+          cardPrice: product ? (Number(product.cardPrice) || 0) : 0, // ✨ NOVO ATRIBUTO
+          wholesalePrice: product ? (Number(product.wholesalePrice) || 0) : 0,
           total: product ? (Number(product.cost) || 0) : 0, isNew: !product
       }]);
       setProdSearchModalOpen(false);
@@ -441,6 +443,7 @@ const handleSaveSupplier = async () => {
                       updates.productName = match.name;
                       updates.unit = match.unit || 'UN';
                       updates.sellingPrice = match.price || 0;
+                      updates.cardPrice = match.cardPrice || 0; // ✨ Puxa do banco
                       updates.margin = match.profitMargin || 30;
                       if (!item.unitPrice || item.unitPrice === 0) updates.unitPrice = match.cost || 0;
                   } else {
@@ -875,6 +878,7 @@ const handleSaveSupplier = async () => {
                       barcode: item.barcode || item.systemSku || '',
                       name: (item.productName || 'PRODUTO SEM NOME').toUpperCase(), unit: item.unit || 'UN',
                       cost: Number(item.unitPrice) || 0, costPrice: Number(item.unitPrice) || 0, price: Number(item.sellingPrice) || 0,
+                      cardPrice: Number(item.cardPrice) || 0,
                       profitMargin: Number(item.margin) || 30, wholesalePrice: Number(item.wholesalePrice) || 0,
                       stock: Number(item.quantity) || 0, // ✨ O estoque já entra somado na criação!
                       isPack: false, createdAt: utils.serverTimestamp(),
@@ -902,6 +906,7 @@ const handleSaveSupplier = async () => {
                   const updatePayload = sanitizePayload({
                       stock: utils.increment(Number(item.quantity) || 0), 
                       cost: Number(item.unitPrice) || 0, last_purchase: entryDate, suppliersHistory: updatedHistory,
+                      cardPrice: Number(item.cardPrice) || 0,
                       ...(autoUpdatePrice && currentPriceInTable > 0 ? { price: currentPriceInTable } : {}) 
                   });
 
@@ -1123,6 +1128,7 @@ const handleSaveSupplier = async () => {
                             <th className="p-2 border-b border-r w-24 text-right">Custo (R$)</th>
                             <th className="p-2 border-b border-r w-20 text-center bg-indigo-50 text-indigo-800">Margem %</th>
                             <th className="p-2 border-b border-r w-24 text-right bg-indigo-50 text-indigo-800">Venda (R$)</th>
+                            <th className="p-2 border-b border-r w-24 text-right bg-purple-50 text-purple-800">Cartão (R$)</th>
                             <th className="p-2 border-b border-r w-24 text-right bg-emerald-50 text-emerald-800">Atacado (R$)</th>
                             <th className="p-2 border-b text-right w-24">Total</th>
                             <th className="p-2 border-b w-8"></th>
@@ -1273,6 +1279,17 @@ const handleSaveSupplier = async () => {
                                         className="w-full h-full bg-transparent outline-none text-right text-indigo-700 font-bold" 
                                         value={item.sellingPrice} 
                                         onChange={(e) => handleItemChange(item.id, 'sellingPrice', e.target.value)}
+                                    />
+                                </td>
+                                {/* ✨ PREÇO CARTÃO (NOVO INPUT) */}
+                                <td className="p-1 border-r bg-purple-50/30">
+                                    <input 
+                                        type="number" step="0.01" 
+                                        className="w-full h-full bg-transparent outline-none text-right text-purple-700 font-bold" 
+                                        value={item.cardPrice || ''} 
+                                        onFocus={(e) => e.target.select()}
+                                        onChange={(e) => handleItemChange(item.id, 'cardPrice', e.target.value)}
+                                        placeholder="0.00"
                                     />
                                 </td>
                                 {/* Preço atacado*/}

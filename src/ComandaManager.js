@@ -304,18 +304,24 @@ const ComandaManager = ({
       selectedItemsToPay.includes(i.uniqueId),
     );
 
-    const cartItems = itemsToSend.map((i) => ({
-      id: i.productId,
-      originalId: i.productId,
-      name: i.name,
-      price: i.price,
-      qty: i.quantity || 1,
-      bottleId: i.bottleId,
-      isDose: i.isDose,
-      source: "tab",
-      tabId: selectedComanda.id,
-      tabItemId: i.uniqueId,
-    }));
+    const cartItems = itemsToSend.map((i) => {
+      // Encontra o produto em tempo real para obter o preço de cartão atualizado
+      const liveProd = products.find(p => p.id === i.productId);
+      
+      return {
+        id: i.productId,
+        originalId: i.productId,
+        name: i.name,
+        price: i.price, // Preço padrão da comanda
+        cardPrice: liveProd ? (Number(liveProd.cardPrice) || 0) : 0, // ✨ Envia o preço de cartão oculto para o PDV
+        qty: i.quantity || 1,
+        bottleId: i.bottleId,
+        isDose: i.isDose,
+        source: "tab",
+        tabId: selectedComanda.id,
+        tabItemId: i.uniqueId,
+      };
+    });
 
     onSendToCart(cartItems);
     onClose();
