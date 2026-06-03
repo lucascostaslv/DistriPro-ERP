@@ -814,9 +814,12 @@ export const printReceipt = (sale, companyInfo) => {
   `;
 
   const iframe = document.createElement("iframe");
-  iframe.style.position = "absolute";
-  iframe.style.width = "0";
-  iframe.style.height = "0";
+  iframe.style.position = "fixed";
+  iframe.style.left = "-100vw";
+  iframe.style.top = "0";
+  iframe.style.width = "302px"; // 80mm a 96dpi — garante layout correto antes de imprimir
+  iframe.style.height = "auto";
+  iframe.style.visibility = "hidden";
   iframe.style.border = "none";
   document.body.appendChild(iframe);
 
@@ -828,8 +831,8 @@ export const printReceipt = (sale, companyInfo) => {
   iframe.contentWindow.focus();
   setTimeout(() => {
     iframe.contentWindow.print();
-    document.body.removeChild(iframe);
-  }, 250);
+    setTimeout(() => document.body.removeChild(iframe), 500);
+  }, 500);
 };
 
 // --- MODULES ---
@@ -1102,6 +1105,12 @@ const PDV = ({
   const [modalStep, setModalStep] = useState("config");
   const [shouldPrint, setShouldPrint] = useState(false);
   const [pendingSale, setPendingSale] = useState(null);
+  const [focusedConfirmOption, setFocusedConfirmOption] = useState(1); // 0 = Voltar, 1 = Fechar Venda
+  const [paymentEntries, setPaymentEntries] = useState([]); // entradas de multi-pagamento
+  const [currentEntryMethod, setCurrentEntryMethod] = useState("");
+  const [currentEntryAmount, setCurrentEntryAmount] = useState("");
+  const paymentAmountRef = useRef(null);
+  const methodButtonsContainerRef = useRef(null);
   const [lossReason, setLossReason] = useState("");
   const [showHistory, setShowHistory] = useState(false);
 
@@ -1134,6 +1143,17 @@ const PDV = ({
   useEffect(() => {
     setSelectedSearchIndex(-1);
   }, [searchTerm]);
+
+  // Garante foco no botão "Fechar Venda" ao entrar no passo de confirmação
+  useEffect(() => {
+    if (modalStep === "confirm") setFocusedConfirmOption(1);
+  }, [modalStep]);
+
+  // Foca o campo de valor quando: modal abre, método muda, ou entrada é adicionada/removida
+  useEffect(() => {
+    if (!paymentModalOpen || paymentMethod === "PERCA") return;
+    paymentAmountRef.current?.focus();
+  }, [currentEntryMethod, paymentModalOpen, paymentEntries.length]);
 
   // Reseta a seleção do carrinho se ele esvaziar
   useEffect(() => {
@@ -1221,13 +1241,32 @@ const PDV = ({
 
       if (
         actions[e.key] &&
-        (!isTyping || e.key === "F10" || e.key === "F11" || e.key === "F12")
+        (!isTyping || e.key === "F10" || e.key === "F11" || e.key === "F12" ||
+         (paymentModalOpen && modalStep === "config" && ["F1","F2","F3","F4","F5"].includes(e.key)))
       ) {
         actions[e.key]();
       }
 
-      if (e.key === "Enter" && paymentModalOpen && modalStep === "confirm") {
-        confirmSale();
+      if (paymentModalOpen && modalStep === "confirm") {
+        if (e.key === "ArrowLeft") {
+          e.preventDefault();
+          setFocusedConfirmOption(0);
+        } else if (e.key === "ArrowRight") {
+          e.preventDefault();
+          setFocusedConfirmOption(1);
+        } else if (e.key === "Enter") {
+          e.preventDefault();
+          if (focusedConfirmOption === 0) setModalStep("config");
+          else confirmSale();
+        }
+      }
+
+      // Enter no passo de config: finaliza revisão quando pagamento está coberto
+      if (paymentModalOpen && modalStep === "config" && !isTyping && e.key === "Enter") {
+        if (paymentMethod !== "PERCA" && remaining <= 0.005 && paymentEntries.length > 0) {
+          e.preventDefault();
+          handleReview();
+        }
       }
 
       // 5. NAVEGAÇÃO DO CARRINHO (Setas)
@@ -1267,6 +1306,9 @@ const PDV = ({
     showDosePanel,
     selectedCartIndex,
     showSearchResults,
+    focusedConfirmOption,
+    paymentEntries,
+    paymentMethod,
   ]);
 
   // Foca na barra de pesquisa ao abrir
@@ -1445,6 +1487,7 @@ const PDV = ({
     if (window.confirm("Limpar todo o carrinho?")) {
       setCart([]);
       setPaymentMethod("");
+      setPaymentEntries([]);
     }
   };
 
@@ -1586,6 +1629,8 @@ const PDV = ({
       product?.itemType === "pack" ? product.conversionFactor || 1 : 1;
     return acc + unitCost * item.qty * factor;
   }, 0);
+  const totalPaid = paymentEntries.reduce((s, e) => s + e.amount, 0);
+  const remaining = Math.round((totalCart - totalPaid) * 100) / 100;
 
   // --- FUNÇÃO PARA SALVAR SANGRIA (Adicione antes do return) ---
   const handleConfirmSangria = async () => {
@@ -1666,12 +1711,93 @@ const PDV = ({
 
   const handlePaymentInit = (method) => {
     if (cart.length === 0) return showNotification("Carrinho vazio", "error");
+
+    // Se o modal já está aberto em modo normal, só troca o método da entrada atual
+    if (paymentModalOpen && modalStep === "config" && paymentMethod !== "PERCA" && method !== "PERCA") {
+      setCurrentEntryMethod(method);
+      setInstallments(1);
+      setSelectedProfileId(feeProfiles[0]?.id || "");
+      setFiadoClientId("");
+      setFiadoDueDate("");
+      setIsNewClient(false);
+      setNewClientName("");
+      return;
+    }
+
     setPaymentMethod(method);
     setLossReason("");
     setPaymentModalOpen(true);
     setModalStep("config");
     setShouldPrint(false);
     setPendingSale(null);
+    setInstallments(1);
+    setSelectedProfileId(feeProfiles[0]?.id || "");
+    setFiadoClientId("");
+    setFiadoDueDate("");
+    setIsNewClient(false);
+    setNewClientName("");
+    setPaymentEntries([]);
+    setCurrentEntryMethod(method !== "PERCA" ? method : "");
+    setCurrentEntryAmount(method !== "PERCA" ? totalCart.toFixed(2).replace(".", ",") : "");
+  };
+
+  const handleAddEntry = () => {
+    const rawAmount = parseFloat(String(currentEntryAmount).replace(",", "."));
+    if (!rawAmount || rawAmount <= 0) return showNotification("Valor inválido", "error");
+    if (!currentEntryMethod) return showNotification("Selecione um método de pagamento", "error");
+    if (rawAmount > remaining + 0.005) return showNotification(`Máximo: ${formatCurrency(remaining)}`, "error");
+
+    const amount = Math.min(rawAmount, remaining);
+
+    let entryClientId = null;
+    let entryClientName = "Consumidor Final";
+    let entryDueDate = null;
+
+    if (currentEntryMethod === "Fiado") {
+      if (!fiadoDueDate) return showNotification("Data de vencimento obrigatória", "error");
+      if (isNewClient) {
+        if (!newClientName.trim()) return showNotification("Nome do cliente obrigatório", "error");
+        entryClientName = newClientName.trim();
+        entryClientId = Date.now();
+        setClients((prev) => [...prev, { id: entryClientId, name: entryClientName, phone: "", type: "PF", debt: amount }]);
+      } else {
+        if (!fiadoClientId) return showNotification("Selecione um cliente", "error");
+        entryClientId = Number(fiadoClientId);
+        entryClientName = clients.find((c) => c.id === entryClientId)?.name || "Cliente";
+      }
+      entryDueDate = fiadoDueDate;
+    }
+
+    let entryFee = 0;
+    if (["Crédito", "Débito", "Pix"].includes(currentEntryMethod)) {
+      const profile = feeProfiles.find((p) => p.id === Number(selectedProfileId));
+      if (profile) {
+        let rate = 0;
+        if (currentEntryMethod === "Débito") rate = profile.debit || 0;
+        if (currentEntryMethod === "Pix") rate = profile.pix || 0;
+        if (currentEntryMethod === "Crédito") rate = profile.credit?.[installments] || 0;
+        entryFee = (amount * rate) / 100;
+      }
+    }
+
+    const newEntry = {
+      id: Date.now(),
+      method: currentEntryMethod,
+      amount,
+      profileId: selectedProfileId || null,
+      installments: currentEntryMethod === "Crédito" ? installments : 1,
+      clientId: entryClientId,
+      clientName: entryClientName,
+      dueDate: entryDueDate,
+      fee: entryFee,
+    };
+
+    const newEntries = [...paymentEntries, newEntry];
+    const newTotalPaid = newEntries.reduce((s, e) => s + e.amount, 0);
+    const newRemaining = Math.round((totalCart - newTotalPaid) * 100) / 100;
+
+    setPaymentEntries(newEntries);
+    setCurrentEntryAmount(newRemaining > 0.005 ? newRemaining.toFixed(2).replace(".", ",") : "");
     setInstallments(1);
     setSelectedProfileId(feeProfiles[0]?.id || "");
     setFiadoClientId("");
@@ -1705,53 +1831,21 @@ const PDV = ({
       setModalStep("confirm");
       return;
     }
-    let feeAmount = 0;
-    let finalClientId = null;
-    let finalClientName = "Consumidor Final";
 
-    if (["Crédito", "Débito", "Pix"].includes(paymentMethod)) {
-      const profile = feeProfiles.find(
-        (p) => p.id === Number(selectedProfileId),
-      );
-      if (profile) {
-        let rate = 0;
-        if (paymentMethod === "Débito") rate = profile.debit;
-        if (paymentMethod === "Pix") rate = profile.pix;
-        if (paymentMethod === "Crédito")
-          rate = profile.credit[installments] || 0;
-        feeAmount = (totalCart * rate) / 100;
-      }
-    }
+    // Multi-pagamento: valida cobertura total
+    if (paymentEntries.length === 0)
+      return showNotification("Adicione pelo menos um pagamento", "error");
+    if (remaining > 0.005)
+      return showNotification(`Faltam ${formatCurrency(remaining)} para cobrir o total`, "error");
 
-    if (paymentMethod === "Fiado") {
-      if (!fiadoDueDate)
-        return showNotification("Data de vencimento obrigatória", "error");
-      if (isNewClient) {
-        if (!newClientName)
-          return showNotification("Nome do cliente obrigatório", "error");
-        // NOTA: Idealmente mover criação de ID para backend/supabase depois
-        const newId = Date.now();
-        const newClientObj = {
-          id: newId,
-          name: newClientName,
-          phone: "",
-          type: "PF",
-          debt: totalCart,
-        };
-        setClients([...clients, newClientObj]);
-        finalClientId = newId;
-        finalClientName = newClientName;
-      } else {
-        if (!fiadoClientId)
-          return showNotification("Selecione um cliente", "error");
-        finalClientId = Number(fiadoClientId);
-        const existingClient = clients.find((c) => c.id === finalClientId);
-        finalClientName = existingClient.name;
-        // setClients não persiste no banco aqui, apenas visual. O App.js deve tratar persistencia real se necessário
-      }
-    }
+    // Método dominante = maior valor
+    const dominantEntry = [...paymentEntries].sort((a, b) => b.amount - a.amount)[0];
+    const totalFee = paymentEntries.reduce((s, e) => s + (e.fee || 0), 0);
+    const fiadoEntry = paymentEntries.find((e) => e.method === "Fiado");
+    const finalClientId = fiadoEntry?.clientId || null;
+    const finalClientName = fiadoEntry?.clientName || "Consumidor Final";
+    const clientData = finalClientId ? clients.find((c) => c.id === finalClientId) : null;
 
-    const clientData = clients.find((c) => c.id === finalClientId) || null;
     const itemsWithTax = cart.map((item) => {
       const originalProduct = products.find(
         (p) => p.id === (item.originalId || item.id),
@@ -1765,7 +1859,7 @@ const PDV = ({
         companyInfo,
         taxProfile,
       );
-      return { ...item, taxDetails: taxDetails };
+      return { ...item, taxDetails };
     });
 
     const sale = {
@@ -1774,14 +1868,24 @@ const PDV = ({
       items: itemsWithTax,
       total: totalCart,
       cost: totalCost,
-      fee: feeAmount,
-      net: totalCart - feeAmount,
-      profit: totalCart - feeAmount - totalCost,
-      paymentMethod,
-      installments: paymentMethod === "Crédito" ? installments : 1,
+      fee: totalFee,
+      net: totalCart - totalFee,
+      profit: totalCart - totalFee - totalCost,
+      paymentMethod: dominantEntry.method,
+      paymentMethods: paymentEntries.map((e) => ({
+        method: e.method,
+        amount: e.amount,
+        profileId: e.profileId || null,
+        installments: e.installments || 1,
+        clientId: e.clientId || null,
+        clientName: e.clientName || null,
+        dueDate: e.dueDate || null,
+        fee: e.fee || 0,
+      })),
+      installments: dominantEntry.method === "Crédito" ? dominantEntry.installments : 1,
       clientName: finalClientName,
       clientId: finalClientId,
-      dueDate: paymentMethod === "Fiado" ? fiadoDueDate : null,
+      dueDate: fiadoEntry?.dueDate || null,
     };
     setPendingSale(sale);
     setModalStep("confirm");
@@ -1793,6 +1897,7 @@ const PDV = ({
     if (shouldPrint) printReceipt(pendingSale, companyInfo);
     setCart([]);
     setPaymentModalOpen(false);
+    setPaymentEntries([]);
   };
 
   const handleSaveProduct = (e) => {
@@ -2219,141 +2324,199 @@ const PDV = ({
       <Modal
         isOpen={paymentModalOpen}
         onClose={() => setPaymentModalOpen(false)}
-        title={`Pagamento: ${paymentMethod}`}
+        title={paymentMethod === "PERCA" ? "Registrar Perca" : "Pagamento"}
       >
-        {/* ... Código do modal de pagamento mantém o mesmo ... */}
-        {/* Se quiser passar o código do modal de novo para garantir, posso incluir, mas a lógica interna não mudou */}
-        <div className="space-y-4">
+        <div className="space-y-3">
           {modalStep === "config" ? (
             <>
-              <div className="text-center p-4 bg-slate-50 rounded">
-                <p className="text-sm text-slate-500">Valor a Pagar</p>
-                <p className="text-3xl font-bold text-slate-800">
-                  {formatCurrency(totalCart)}
-                </p>
-              </div>
-              <div className="text-center p-4 bg-slate-50 rounded">
-                <p className="text-sm text-slate-500">
-                  {paymentMethod === "PERCA"
-                    ? "Custo do Prejuízo"
-                    : "Valor a Pagar"}
-                </p>
-                <p
-                  className={`text-3xl font-bold ${paymentMethod === "PERCA" ? "text-red-600" : "text-slate-800"}`}
-                >
-                  {paymentMethod === "PERCA"
-                    ? formatCurrency(totalCost)
-                    : formatCurrency(totalCart)}
-                </p>
-              </div>
-              {paymentMethod === "PERCA" && (
-                <div className="animate-in fade-in">
-                  <label className="block text-xs font-bold text-red-700 mb-1">
-                    Motivo da Perca / Quebra *
-                  </label>
-                  <input
-                    className="w-full border border-red-300 bg-red-50 text-red-900 p-2 rounded text-sm focus:ring-red-500"
-                    placeholder="Ex: Produto vencido..."
-                    value={lossReason}
-                    onChange={(e) => setLossReason(e.target.value)}
-                    autoFocus
-                  />
-                </div>
-              )}
-              {paymentMethod !== "Dinheiro" &&
-                paymentMethod !== "Fiado" &&
-                paymentMethod !== "PERCA" && (
-                  <div>
-                    <label className="block text-xs font-bold text-slate-500 mb-1">
-                      Perfil de Taxa (Máquina)
-                    </label>
-                    <select
-                      className="w-full border p-2 rounded text-sm"
-                      value={selectedProfileId}
-                      onChange={(e) => setSelectedProfileId(e.target.value)}
-                    >
-                      {feeProfiles.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name}
-                        </option>
-                      ))}
-                    </select>
+              {paymentMethod === "PERCA" ? (
+                /* ─── MODO PERCA ─── */
+                <>
+                  <div className="text-center p-4 bg-red-50 rounded">
+                    <p className="text-sm text-red-500 font-bold">Custo do Prejuízo</p>
+                    <p className="text-3xl font-bold text-red-600">{formatCurrency(totalCost)}</p>
                   </div>
-                )}
-              {paymentMethod === "Crédito" && (
-                <div>
-                  <label className="block text-xs font-bold text-slate-500 mb-1">
-                    Parcelas
-                  </label>
-                  <select
-                    className="w-full border p-2 rounded text-sm"
-                    value={installments}
-                    onChange={(e) => setInstallments(Number(e.target.value))}
+                  <div>
+                    <label className="block text-xs font-bold text-red-700 mb-1">Motivo da Perca / Quebra *</label>
+                    <input
+                      className="w-full border border-red-300 bg-red-50 text-red-900 p-2 rounded text-sm focus:ring-1 focus:ring-red-500 focus:outline-none"
+                      placeholder="Ex: Produto vencido..."
+                      value={lossReason}
+                      onChange={(e) => setLossReason(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter" && lossReason.trim()) handleReview(); }}
+                      autoFocus
+                    />
+                  </div>
+                  <button
+                    onClick={handleReview}
+                    disabled={!lossReason.trim()}
+                    className={`w-full py-3 rounded font-bold ${lossReason.trim() ? "bg-red-600 text-white hover:bg-red-700" : "bg-slate-200 text-slate-400 cursor-not-allowed"}`}
                   >
-                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((i) => (
-                      <option key={i} value={i}>
-                        {i}x
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-              {paymentMethod === "Fiado" && (
-                <div className="space-y-3 bg-amber-50 p-3 rounded border border-amber-100">
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => setIsNewClient(false)}
-                      className={`flex-1 py-1 text-xs font-bold rounded ${!isNewClient ? "bg-amber-600 text-white" : "bg-white text-amber-600 border"}`}
-                    >
-                      Cliente Existente
-                    </button>
-                    <button
-                      onClick={() => setIsNewClient(true)}
-                      className={`flex-1 py-1 text-xs font-bold rounded ${isNewClient ? "bg-amber-600 text-white" : "bg-white text-amber-600 border"}`}
-                    >
-                      Novo Cliente
-                    </button>
+                    Revisar Perca
+                  </button>
+                </>
+              ) : (
+                /* ─── MODO MULTI-PAGAMENTO ─── */
+                <>
+                  {/* Barra Total / Pago / Restante */}
+                  <div className="grid grid-cols-3 gap-2 p-3 bg-slate-50 rounded text-center text-sm">
+                    <div>
+                      <p className="text-xs text-slate-500">Total</p>
+                      <p className="font-bold text-slate-800">{formatCurrency(totalCart)}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-500">Pago</p>
+                      <p className="font-bold text-emerald-600">{formatCurrency(totalPaid)}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-500">Restante</p>
+                      <p className={`font-bold ${remaining > 0.005 ? "text-red-600" : "text-emerald-600"}`}>
+                        {formatCurrency(Math.max(0, remaining))}
+                      </p>
+                    </div>
                   </div>
-                  {isNewClient ? (
-                    <input
-                      className="w-full border p-2 rounded text-sm"
-                      placeholder="Nome do Cliente"
-                      value={newClientName}
-                      onChange={(e) => setNewClientName(e.target.value)}
-                    />
-                  ) : (
-                    <select
-                      className="w-full border p-2 rounded text-sm"
-                      value={fiadoClientId}
-                      onChange={(e) => setFiadoClientId(e.target.value)}
-                    >
-                      <option value="">Selecione...</option>
-                      {clients.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
+
+                  {/* Lista de pagamentos já adicionados */}
+                  {paymentEntries.length > 0 && (
+                    <div className="space-y-1 max-h-28 overflow-y-auto">
+                      {paymentEntries.map((entry) => (
+                        <div key={entry.id} className="flex justify-between items-center px-3 py-1.5 bg-white border rounded text-sm">
+                          <span className="font-semibold text-slate-700">
+                            {entry.method}{entry.installments > 1 ? ` (${entry.installments}x)` : ""}
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-emerald-700">{formatCurrency(entry.amount)}</span>
+                            <button
+                              onClick={() => setPaymentEntries((prev) => prev.filter((e) => e.id !== entry.id))}
+                              className="text-slate-400 hover:text-red-500 font-bold text-base w-5 h-5 flex items-center justify-center"
+                            >×</button>
+                          </div>
+                        </div>
                       ))}
-                    </select>
+                    </div>
                   )}
-                  <div>
-                    <label className="block text-xs font-bold text-amber-800 mb-1">
-                      Data de Vencimento
-                    </label>
-                    <input
-                      type="date"
-                      className="w-full border p-2 rounded text-sm"
-                      value={fiadoDueDate}
-                      onChange={(e) => setFiadoDueDate(e.target.value)}
-                    />
-                  </div>
-                </div>
+
+                  {/* Adicionar nova entrada */}
+                  {remaining > 0.005 ? (
+                    <>
+                      {/* Seletor de método — ←/→ navega, Enter/Espaço seleciona */}
+                      <div ref={methodButtonsContainerRef} className="grid grid-cols-5 gap-1">
+                        {["Dinheiro", "Pix", "Débito", "Crédito", "Fiado"].map((m, idx) => {
+                          const allMethods = ["Dinheiro", "Pix", "Débito", "Crédito", "Fiado"];
+                          const selectMethod = (method) => {
+                            setCurrentEntryMethod(method);
+                            setInstallments(1);
+                            setSelectedProfileId(feeProfiles[0]?.id || "");
+                            setFiadoClientId("");
+                            setFiadoDueDate("");
+                            setIsNewClient(false);
+                          };
+                          return (
+                            <button
+                              key={m}
+                              onClick={() => selectMethod(m)}
+                              onKeyDown={(e) => {
+                                const btns = methodButtonsContainerRef.current?.querySelectorAll("button");
+                                if (e.key === "ArrowRight") {
+                                  e.preventDefault();
+                                  btns?.[(idx + 1) % allMethods.length]?.focus();
+                                } else if (e.key === "ArrowLeft") {
+                                  e.preventDefault();
+                                  btns?.[(idx - 1 + allMethods.length) % allMethods.length]?.focus();
+                                } else if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  selectMethod(m);
+                                }
+                              }}
+                              className={`py-1.5 text-xs font-bold rounded border transition-all focus:outline-none focus:ring-2 focus:ring-slate-400 ${currentEntryMethod === m ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-600 border-slate-300 hover:bg-slate-50"}`}
+                            >
+                              {m === "Dinheiro" ? "Din" : m === "Débito" ? "Déb" : m === "Crédito" ? "Cré" : m}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {/* Campo de valor */}
+                      <div>
+                        <label className="block text-xs font-bold text-slate-500 mb-1">
+                          Valor — {currentEntryMethod || "selecione um método acima"}
+                        </label>
+                        <input
+                          ref={paymentAmountRef}
+                          type="text"
+                          inputMode="decimal"
+                          className="w-full border-2 border-slate-300 p-2 rounded text-xl font-bold text-center focus:border-slate-600 focus:ring-2 focus:ring-slate-300 focus:outline-none"
+                          value={currentEntryAmount}
+                          onChange={(e) => setCurrentEntryAmount(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleAddEntry(); } }}
+                          placeholder="0,00"
+                        />
+                      </div>
+
+                      {/* Perfil de taxa (cartão) */}
+                      {currentEntryMethod !== "Dinheiro" && currentEntryMethod !== "Fiado" && currentEntryMethod && feeProfiles.length > 0 && (
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 mb-1">Perfil de Taxa</label>
+                          <select className="w-full border p-2 rounded text-sm" value={selectedProfileId} onChange={(e) => setSelectedProfileId(e.target.value)}>
+                            {feeProfiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                          </select>
+                        </div>
+                      )}
+
+                      {/* Parcelas (crédito) */}
+                      {currentEntryMethod === "Crédito" && (
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 mb-1">Parcelas</label>
+                          <select className="w-full border p-2 rounded text-sm" value={installments} onChange={(e) => setInstallments(Number(e.target.value))}>
+                            {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((i) => <option key={i} value={i}>{i}x</option>)}
+                          </select>
+                        </div>
+                      )}
+
+                      {/* Fiado */}
+                      {currentEntryMethod === "Fiado" && (
+                        <div className="space-y-2 bg-amber-50 p-2 rounded border border-amber-100">
+                          <div className="flex gap-2">
+                            <button onClick={() => setIsNewClient(false)} className={`flex-1 py-1 text-xs font-bold rounded ${!isNewClient ? "bg-amber-600 text-white" : "bg-white text-amber-600 border"}`}>Existente</button>
+                            <button onClick={() => setIsNewClient(true)} className={`flex-1 py-1 text-xs font-bold rounded ${isNewClient ? "bg-amber-600 text-white" : "bg-white text-amber-600 border"}`}>Novo</button>
+                          </div>
+                          {isNewClient ? (
+                            <input className="w-full border p-1 rounded text-sm" placeholder="Nome do Cliente" value={newClientName} onChange={(e) => setNewClientName(e.target.value)} />
+                          ) : (
+                            <select className="w-full border p-1 rounded text-sm" value={fiadoClientId} onChange={(e) => setFiadoClientId(e.target.value)}>
+                              <option value="">Selecione...</option>
+                              {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                            </select>
+                          )}
+                          <input type="date" className="w-full border p-1 rounded text-sm" value={fiadoDueDate} onChange={(e) => setFiadoDueDate(e.target.value)} />
+                        </div>
+                      )}
+
+                      <button
+                        onClick={handleAddEntry}
+                        disabled={!currentEntryMethod || !currentEntryAmount}
+                        className={`w-full py-2 rounded font-bold text-sm transition-all ${currentEntryMethod && currentEntryAmount ? "bg-slate-700 text-white hover:bg-slate-800" : "bg-slate-200 text-slate-400 cursor-not-allowed"}`}
+                      >
+                        + Adicionar — {currentEntryMethod || "método"}
+                      </button>
+                    </>
+                  ) : (
+                    <div className="flex items-center gap-2 p-3 bg-emerald-50 border border-emerald-200 rounded">
+                      <CheckCircle className="text-emerald-600 shrink-0" size={18} />
+                      <span className="text-sm font-bold text-emerald-700">Pagamento completo!</span>
+                    </div>
+                  )}
+
+                  {/* Botão Revisar Venda */}
+                  <button
+                    onClick={handleReview}
+                    disabled={remaining > 0.005 || paymentEntries.length === 0}
+                    className={`w-full py-3 rounded font-bold transition-all ${remaining <= 0.005 && paymentEntries.length > 0 ? "bg-emerald-600 text-white hover:bg-emerald-700 shadow-lg" : "bg-slate-200 text-slate-400 cursor-not-allowed"}`}
+                  >
+                    {remaining > 0.005 ? `Faltam ${formatCurrency(Math.max(0, remaining))}` : "Revisar Venda →"}
+                  </button>
+                </>
               )}
-              <button
-                onClick={handleReview}
-                className="w-full bg-slate-900 text-white py-3 rounded font-bold hover:bg-slate-800 mt-4"
-              >
-                Revisar Venda
-              </button>
             </>
           ) : (
             <div className="space-y-4 animate-in fade-in">
@@ -2369,13 +2532,13 @@ const PDV = ({
               <div className="grid grid-cols-2 gap-3">
                 <button
                   onClick={() => setModalStep("config")}
-                  className="py-3 border rounded font-bold text-slate-600 hover:bg-slate-50"
+                  className={`py-3 border rounded font-bold transition-all ${focusedConfirmOption === 0 ? "ring-4 ring-slate-300 border-slate-400 bg-slate-50 text-slate-700 scale-105" : "text-slate-600 hover:bg-slate-50"}`}
                 >
                   Voltar
                 </button>
                 <button
                   onClick={confirmSale}
-                  className="py-3 bg-emerald-600 text-white rounded font-bold hover:bg-emerald-700"
+                  className={`py-3 rounded font-bold transition-all text-white shadow-lg ${focusedConfirmOption === 1 ? "ring-4 ring-emerald-300 bg-emerald-700 scale-105" : "bg-emerald-600 hover:bg-emerald-700"}`}
                 >
                   Fechar Venda
                 </button>
@@ -5880,8 +6043,7 @@ const StoreApp = ({ onLogout, updateStore }) => {
           if (focusedModalOption === 0) setShowNonFiscalStep(true);
           else {
             handleEmitNFe(showCashierEmitModal.sale);
-            setShowCashierEmitModal({ open: false, sale: null });
-            setShowNonFiscalStep(false);
+            setShowNonFiscalStep(true);
           }
         } else {
           // Passo 2: Cupom Simples
@@ -6081,34 +6243,40 @@ const cleanUndefinedFields = (obj, path = '') => {
           "routing",
         );
 
-        if (routeData && sale.paymentMethod !== "Fiado") {
+        if (routeData) {
           const routeMap = {
             Dinheiro: "dinheiro",
             Pix: "pix",
             Crédito: "cartao_credito",
             Débito: "cartao_debito",
           };
-          const routeKey = routeMap[sale.paymentMethod];
-          const targetAccountId = routeData[routeKey];
+          // Suporta multi-pagamento: itera sobre paymentMethods se disponível
+          const entriesToRoute = sale.paymentMethods
+            ? sale.paymentMethods.filter((e) => e.method !== "Fiado")
+            : sale.paymentMethod !== "Fiado"
+              ? [{ method: sale.paymentMethod, amount: sale.net || sale.total, fee: 0 }]
+              : [];
 
-          if (targetAccountId) {
-            const netAmount = sale.net || sale.total;
-
-            batch.add("account_transactions", {
-              accountId: targetAccountId,
-              type: "IN",
-              amount: netAmount,
-              description: `VENDA PDV #${saleId.slice(-6)}`,
-              category: "Vendas",
-              date: new Date().toISOString(),
-              createdAt: serverTimestamp(), // ✨ Nativo do Firebase
-              userId: currentUser?.id || "anon",
-              userName: currentUser?.username || "Caixa",
-            });
-
-            batch.update("bank_accounts", targetAccountId, {
-              currentBalance: increment(netAmount), // ✨ Nativo do Firebase
-            });
+          for (const entry of entriesToRoute) {
+            const routeKey = routeMap[entry.method];
+            const targetAccountId = routeData[routeKey];
+            if (targetAccountId) {
+              const netAmount = entry.amount - (entry.fee || 0);
+              batch.add("account_transactions", {
+                accountId: targetAccountId,
+                type: "IN",
+                amount: netAmount,
+                description: `VENDA PDV #${saleId.slice(-6)}`,
+                category: "Vendas",
+                date: new Date().toISOString(),
+                createdAt: serverTimestamp(),
+                userId: currentUser?.id || "anon",
+                userName: currentUser?.username || "Caixa",
+              });
+              batch.update("bank_accounts", targetAccountId, {
+                currentBalance: increment(netAmount),
+              });
+            }
           }
         }
       }
@@ -6856,8 +7024,7 @@ const cleanUndefinedFields = (obj, path = '') => {
                       <button
                         onClick={() => {
                           handleEmitNFe(showCashierEmitModal.sale);
-                          setShowCashierEmitModal({ open: false, sale: null });
-                          setShowNonFiscalStep(false);
+                          setShowNonFiscalStep(true);
                         }}
                         className={`py-3 rounded font-bold transition-all text-white shadow-lg ${focusedModalOption === 1 ? "ring-4 ring-blue-300 bg-blue-700 transform scale-105" : "bg-blue-600 hover:bg-blue-700"}`}
                       >
