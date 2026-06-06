@@ -58,7 +58,7 @@ src/
 │
 ├── InventoryWMS.js                 # WMS — estoque, ajustes, transferências, lotes, análises
 ├── ClientsManager.js               # CRUD clientes/fornecedores — CPF/CNPJ, contato, stats
-├── BankAccountsManager.js          # Contas bancárias — saldos, transferências, histórico
+├── BankAccountsManager.js          # Contas bancárias — saldos, transferências, extrato com conciliação fiscal
 ├── CashClosingManager.js           # Fechamento de caixa diário — conferência, sangria
 ├── CaixaService.js                 # Sessões de caixa — abertura/fechamento, movimentações
 ├── PriceGroups.js                  # Grupos de preço com margens dinâmicas
@@ -84,7 +84,7 @@ src/
 | `clients` | Clientes e fornecedores com CPF/CNPJ |
 | `suppliers` | Dados de fornecedores |
 | `bank_accounts` | Contas bancárias da empresa |
-| `account_transactions` | Extrato bancário |
+| `account_transactions` | Extrato bancário — campo `reconciled: boolean` indica se a transação foi conciliada |
 | `financial_movements` | Despesas e receitas |
 | `financial_settings` | Roteamento de formas de pagamento por conta |
 | `caixa_sessoes` | Sessões de caixa abertas/fechadas |

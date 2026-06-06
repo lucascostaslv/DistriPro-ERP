@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  Building2, Wallet, Plus, ArrowUpRight, ArrowDownRight, 
-  Search, CheckCircle, X, Landmark, FileText, Trash2, Settings, Filter, User, ArrowLeftRight
+import {
+  Building2, Wallet, Plus, ArrowUpRight, ArrowDownRight,
+  Search, CheckCircle, X, Landmark, FileText, Trash2, Settings, Filter, User, ArrowLeftRight,
+  CheckSquare, Square
 } from 'lucide-react';
 import { useTenant } from './contexts/TenantContext'; 
 import { where } from 'firebase/firestore';
@@ -223,6 +224,22 @@ const BankAccountsManager = ({ showNotification }) => {
   const filteredTotal = filteredTransactions.reduce((acc, curr) => acc + (curr.type === 'IN' ? curr.amount : -curr.amount), 0);
   // --- FIM DOS FILTROS ---
 
+  const entries = filteredTransactions.filter(t => t.type === 'IN');
+  const exits = filteredTransactions.filter(t => t.type === 'OUT');
+  const totalEntries = entries.reduce((acc, t) => acc + t.amount, 0);
+  const totalExits = exits.reduce((acc, t) => acc + t.amount, 0);
+  const saldoPeriodo = totalEntries - totalExits;
+
+  const handleToggleReconciled = async (txn) => {
+    try {
+      await tenantDB.firestore.update('account_transactions', txn.id, {
+        reconciled: !txn.reconciled
+      });
+    } catch (error) {
+      showNotification('Erro ao atualizar conciliação.', 'error');
+    }
+  };
+
   const getAccountIcon = (type) => {
       if (type === 'CASH') return <Wallet size={24} className="text-emerald-600"/>;
       if (type === 'SAVINGS') return <Landmark size={24} className="text-blue-600"/>;
@@ -362,61 +379,100 @@ const BankAccountsManager = ({ showNotification }) => {
                         </div>
                     </div>
 
-                    {/* Tabela do Extrato */}
-                    <div className="flex-1 overflow-y-auto">
-                        <table className="w-full text-sm text-left">
-                            <thead className="bg-slate-100 text-slate-600 font-bold uppercase text-[10px] sticky top-0 shadow-sm">
-                                <tr>
-                                    <th className="p-3">Data</th>
-                                    <th className="p-3">Descrição / Origem</th>
-                                    <th className="p-3 text-center">Tipo</th>
-                                    <th className="p-3 text-right">Valor</th>
-                                </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-100">
-                                {filteredTransactions.length === 0 ? (
-                                    <tr>
-                                        <td colSpan={4} className="p-10 text-center text-slate-400">
-                                            Nenhuma movimentação encontrada para este filtro.
-                                        </td>
-                                    </tr>
+                    {/* Resumo do Período */}
+                    <div className="px-4 py-3 bg-slate-50 border-b flex gap-3">
+                        <div className="flex-1 bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-center">
+                            <p className="text-[10px] font-bold text-emerald-600 uppercase">Total Entradas</p>
+                            <p className="text-lg font-bold text-emerald-700">+{formatCurrency(totalEntries)}</p>
+                            <p className="text-[10px] text-emerald-500">{entries.length} transações</p>
+                        </div>
+                        <div className="flex-1 bg-red-50 border border-red-200 rounded-lg p-3 text-center">
+                            <p className="text-[10px] font-bold text-red-600 uppercase">Total Saídas</p>
+                            <p className="text-lg font-bold text-red-700">-{formatCurrency(totalExits)}</p>
+                            <p className="text-[10px] text-red-500">{exits.length} transações</p>
+                        </div>
+                        <div className={`flex-1 rounded-lg p-3 text-center border ${saldoPeriodo >= 0 ? 'bg-blue-50 border-blue-200' : 'bg-orange-50 border-orange-200'}`}>
+                            <p className="text-[10px] font-bold text-slate-500 uppercase">Saldo do Período</p>
+                            <p className={`text-lg font-bold ${saldoPeriodo >= 0 ? 'text-blue-700' : 'text-orange-700'}`}>{formatCurrency(saldoPeriodo)}</p>
+                            <p className="text-[10px] text-slate-400">{filteredTransactions.length} no total</p>
+                        </div>
+                    </div>
+
+                    {/* Duas colunas: Entradas | Saídas */}
+                    <div className="flex-1 overflow-hidden flex">
+                        {/* Coluna Entradas */}
+                        <div className="w-1/2 flex flex-col border-r border-slate-200">
+                            <div className="bg-emerald-600 text-white px-4 py-2 flex items-center justify-between">
+                                <span className="text-xs font-bold uppercase flex items-center gap-1">
+                                    <ArrowDownRight size={14}/> Entradas
+                                </span>
+                                <span className="text-xs font-bold">{formatCurrency(totalEntries)}</span>
+                            </div>
+                            <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
+                                {entries.length === 0 ? (
+                                    <p className="text-center text-slate-400 text-sm py-10">Nenhuma entrada no período.</p>
                                 ) : (
-                                    filteredTransactions.map(txn => (
-                                        <tr key={txn.id} className="hover:bg-slate-50 transition-colors">
-                                            <td className="p-3 text-xs text-slate-500">
-                                                {new Date(txn.date || txn.createdAt?.seconds * 1000).toLocaleDateString('pt-BR')}
-                                                <span className="block text-[9px] text-slate-400 mt-0.5">{new Date(txn.date || txn.createdAt?.seconds * 1000).toLocaleTimeString('pt-BR')}</span>
-                                            </td>
-                                            <td className="p-3">
-                                                <p className="font-bold text-slate-700">{txn.description}</p>
-                                                <div className="flex gap-2 items-center mt-1">
-                                                    <span className="text-[10px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded uppercase">{txn.category}</span>
-                                                    {txn.userName && (
-                                                        <span className="text-[10px] text-indigo-600 font-bold flex items-center gap-1">
-                                                            <User size={10}/> {txn.userName}
-                                                        </span>
-                                                    )}
+                                    entries.map(txn => (
+                                        <div key={txn.id} className={`p-3 flex items-start gap-2 hover:bg-emerald-50/40 transition-colors ${txn.reconciled ? 'bg-slate-50' : ''}`}>
+                                            <button
+                                                onClick={() => handleToggleReconciled(txn)}
+                                                className="mt-0.5 shrink-0 text-emerald-600 hover:text-emerald-800 transition-colors"
+                                                title={txn.reconciled ? 'Marcar como não conciliada' : 'Marcar como conciliada'}
+                                            >
+                                                {txn.reconciled ? <CheckSquare size={16}/> : <Square size={16}/>}
+                                            </button>
+                                            <div className="flex-1 min-w-0">
+                                                <p className={`text-sm font-bold truncate ${txn.reconciled ? 'line-through text-slate-400' : 'text-slate-700'}`}>{txn.description}</p>
+                                                <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                                                    <span className="text-[10px] text-slate-400">{new Date(txn.date || txn.createdAt?.seconds * 1000).toLocaleDateString('pt-BR')}</span>
+                                                    {txn.category && <span className="text-[10px] bg-slate-200 text-slate-600 px-1 rounded uppercase">{txn.category}</span>}
+                                                    {txn.userName && <span className="text-[10px] text-indigo-500 flex items-center gap-0.5"><User size={9}/>{txn.userName}</span>}
+                                                    {txn.reconciled && <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1 rounded font-bold">Conciliada</span>}
                                                 </div>
-                                            </td>
-                                            <td className="p-3 text-center">
-                                                {txn.type === 'IN' ? (
-                                                    <span className="bg-emerald-100 text-emerald-700 text-[10px] font-bold px-2 py-1 rounded-full flex items-center justify-center w-fit mx-auto gap-1">
-                                                        <ArrowDownRight size={12}/> ENTRADA
-                                                    </span>
-                                                ) : (
-                                                    <span className="bg-red-100 text-red-700 text-[10px] font-bold px-2 py-1 rounded-full flex items-center justify-center w-fit mx-auto gap-1">
-                                                        <ArrowUpRight size={12}/> SAÍDA
-                                                    </span>
-                                                )}
-                                            </td>
-                                            <td className={`p-3 text-right font-bold ${txn.type === 'IN' ? 'text-emerald-600' : 'text-red-600'}`}>
-                                                {txn.type === 'IN' ? '+' : '-'}{formatCurrency(txn.amount)}
-                                            </td>
-                                        </tr>
+                                            </div>
+                                            <span className="text-sm font-bold text-emerald-600 shrink-0">+{formatCurrency(txn.amount)}</span>
+                                        </div>
                                     ))
                                 )}
-                            </tbody>
-                        </table>
+                            </div>
+                        </div>
+
+                        {/* Coluna Saídas */}
+                        <div className="w-1/2 flex flex-col">
+                            <div className="bg-red-600 text-white px-4 py-2 flex items-center justify-between">
+                                <span className="text-xs font-bold uppercase flex items-center gap-1">
+                                    <ArrowUpRight size={14}/> Saídas
+                                </span>
+                                <span className="text-xs font-bold">{formatCurrency(totalExits)}</span>
+                            </div>
+                            <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
+                                {exits.length === 0 ? (
+                                    <p className="text-center text-slate-400 text-sm py-10">Nenhuma saída no período.</p>
+                                ) : (
+                                    exits.map(txn => (
+                                        <div key={txn.id} className={`p-3 flex items-start gap-2 hover:bg-red-50/40 transition-colors ${txn.reconciled ? 'bg-slate-50' : ''}`}>
+                                            <button
+                                                onClick={() => handleToggleReconciled(txn)}
+                                                className="mt-0.5 shrink-0 text-red-600 hover:text-red-800 transition-colors"
+                                                title={txn.reconciled ? 'Marcar como não conciliada' : 'Marcar como conciliada'}
+                                            >
+                                                {txn.reconciled ? <CheckSquare size={16}/> : <Square size={16}/>}
+                                            </button>
+                                            <div className="flex-1 min-w-0">
+                                                <p className={`text-sm font-bold truncate ${txn.reconciled ? 'line-through text-slate-400' : 'text-slate-700'}`}>{txn.description}</p>
+                                                <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                                                    <span className="text-[10px] text-slate-400">{new Date(txn.date || txn.createdAt?.seconds * 1000).toLocaleDateString('pt-BR')}</span>
+                                                    {txn.category && <span className="text-[10px] bg-slate-200 text-slate-600 px-1 rounded uppercase">{txn.category}</span>}
+                                                    {txn.userName && <span className="text-[10px] text-indigo-500 flex items-center gap-0.5"><User size={9}/>{txn.userName}</span>}
+                                                    {txn.reconciled && <span className="text-[10px] bg-red-100 text-red-700 px-1 rounded font-bold">Conciliada</span>}
+                                                </div>
+                                            </div>
+                                            <span className="text-sm font-bold text-red-600 shrink-0">-{formatCurrency(txn.amount)}</span>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        </div>
                     </div>
                 </>
             ) : (
