@@ -1,9 +1,11 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   TrendingUp,
   ShoppingCart,
   Filter,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   CheckCircle,
   Search,
   Truck,
@@ -42,6 +44,10 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
 
   // --- CARRINHO INVISÍVEL ---
   const [cart, setCart] = useState({});
+
+  // --- PAGINAÇÃO ---
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 20;
 
   // --- 1. CÁLCULO DE GIRO E SUGESTÃO ---
   const suggestionData = useMemo(() => {
@@ -139,6 +145,14 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
     supplierFilter,
     cart,
   ]);
+
+  useEffect(() => { setCurrentPage(1); }, [searchTerm, supplierFilter, daysAnalysis, daysCoverage]);
+
+  const totalPages = Math.ceil(suggestionData.length / itemsPerPage);
+  const paginatedData = useMemo(() => {
+    const start = (currentPage - 1) * itemsPerPage;
+    return suggestionData.slice(start, start + itemsPerPage);
+  }, [suggestionData, currentPage]);
 
   const handleExportPDF = () => {
     const doc = new jsPDF();
@@ -401,7 +415,7 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
       {/* --- LISTA DE PRODUTOS --- */}
       <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
         <div className="space-y-3">
-          {suggestionData.map((prod) => {
+          {paginatedData.map((prod) => {
             const isInCart = !!cart[prod.id];
             const cartItem = cart[prod.id];
             const isExpanded = expandedProductId === prod.id;
@@ -615,6 +629,32 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
             </div>
           )}
         </div>
+
+        {totalPages > 1 && (
+          <div className="mt-4 flex items-center justify-between bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
+            <p className="text-xs text-slate-500 font-medium">
+              Página <span className="font-bold text-slate-800">{currentPage}</span> de{" "}
+              <span className="font-bold text-slate-800">{totalPages}</span>
+              <span className="hidden sm:inline"> ({suggestionData.length} itens)</span>
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                disabled={currentPage === 1}
+                className="p-2 border border-slate-200 rounded-lg text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <ChevronLeft size={16} />
+              </button>
+              <button
+                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                disabled={currentPage === totalPages}
+                className="p-2 border border-slate-200 rounded-lg text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <ChevronRight size={16} />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* --- RODAPÉ FLUTUANTE --- */}

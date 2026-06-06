@@ -286,12 +286,15 @@ const InventoryWMS = ({
 
   // --- ESTADOS DE PAGINAÇÃO ---
   const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 50; // Quantidade de itens carregados por vez na tela
+  const itemsPerPage = 50;
+  const [analysisPage, setAnalysisPage] = useState(1);
+  const analysisItemsPerPage = 30;
+  const [auditListPage, setAuditListPage] = useState(1);
+  const auditListItemsPerPage = 50;
 
-  // Sempre que o usuário digitar na busca, volta para a página 1
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [searchTerm]); // Se você tiver um estado diferente para busca, ajuste o nome aqui
+  // Volta para página 1 quando o filtro muda
+  useEffect(() => { setCurrentPage(1); }, [searchTerm]);
+  useEffect(() => { setAnalysisPage(1); }, [deadStockDays]);
 
   // --- FUNÇÃO DE EXPORTAR PDF ---
   const handleExportPDF = () => {
@@ -348,6 +351,8 @@ const InventoryWMS = ({
   const [auditSearchTerm, setAuditSearchTerm] = useState("");
   const [auditFilterGroup, setAuditFilterGroup] = useState("");
   const [auditShowZero, setAuditShowZero] = useState(true);
+
+  useEffect(() => { setAuditListPage(1); }, [auditSearchTerm, auditFilterGroup, auditShowZero]);
 
   // Estados para gestão de Templates
   const [auditTemplates, setAuditTemplates] = useState([]);
@@ -793,6 +798,12 @@ const InventoryWMS = ({
     });
   }, [products, auditSearchTerm, auditFilterGroup, auditShowZero]);
 
+  const auditListTotalPages = Math.ceil(filteredAuditProducts.length / auditListItemsPerPage);
+  const paginatedAuditList = useMemo(() => {
+    const start = (auditListPage - 1) * auditListItemsPerPage;
+    return filteredAuditProducts.slice(start, start + auditListItemsPerPage);
+  }, [filteredAuditProducts, auditListPage]);
+
   // 2. Ações de Seleção
   const handleToggleAuditProduct = (product) => {
     if (auditSelection.find((p) => p.id === product.id)) {
@@ -950,7 +961,13 @@ const InventoryWMS = ({
         return days >= limitDays && (p.stock > 0 || getDisplayStock(p) > 0);
       })
       .sort((a, b) => (a.lastSale?.seconds || 0) - (b.lastSale?.seconds || 0));
-  }, [products, deadStockDays]); // Adicione deadStockDays na dependência
+  }, [products, deadStockDays]);
+
+  const analysisTotalPages = Math.ceil(deadStockProducts.length / analysisItemsPerPage);
+  const paginatedDeadStock = useMemo(() => {
+    const start = (analysisPage - 1) * analysisItemsPerPage;
+    return deadStockProducts.slice(start, start + analysisItemsPerPage);
+  }, [deadStockProducts, analysisPage]);
 
   // Lista para Cotação (Estoque < Mínimo) agrupada por Fornecedor
   // Substitua o useMemo quotationData por isso:
@@ -1094,7 +1111,7 @@ const InventoryWMS = ({
           <div
             className={`grid gap-3 transition-all ${saidaModo ? "grid-cols-2 md:grid-cols-3 flex-1" : "grid-cols-2 md:grid-cols-3 lg:grid-cols-4 w-full"}`}
           >
-            {filteredProducts.map((prod) => (
+            {paginatedProducts.map((prod) => (
               <StockCard
                 key={prod.id}
                 product={prod}
@@ -1399,7 +1416,7 @@ const InventoryWMS = ({
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {deadStockProducts.map((prod) => {
+              {paginatedDeadStock.map((prod) => {
                 const hasSale = !!prod.lastSale;
                 const days = hasSale ? getDaysDiff(prod.lastSale) : 0;
 
@@ -1446,6 +1463,31 @@ const InventoryWMS = ({
                   </div>
                 );
               })}
+            </div>
+          )}
+          {analysisTotalPages > 1 && (
+            <div className="mt-4 flex items-center justify-between bg-white p-3 rounded border border-slate-200 shadow-sm">
+              <p className="text-xs text-slate-500 font-medium">
+                Página <span className="font-bold text-slate-800">{analysisPage}</span> de{" "}
+                <span className="font-bold text-slate-800">{analysisTotalPages}</span>
+                <span className="hidden sm:inline"> ({deadStockProducts.length} itens)</span>
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setAnalysisPage((p) => Math.max(1, p - 1))}
+                  disabled={analysisPage === 1}
+                  className="p-2 border border-slate-200 rounded text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  <ChevronLeft size={16} />
+                </button>
+                <button
+                  onClick={() => setAnalysisPage((p) => Math.min(analysisTotalPages, p + 1))}
+                  disabled={analysisPage === analysisTotalPages}
+                  className="p-2 border border-slate-200 rounded text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  <ChevronRight size={16} />
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -3072,7 +3114,7 @@ const InventoryWMS = ({
                   </div>
                 </div>
                 <div className="flex-1 overflow-y-auto p-2">
-                  {filteredAuditProducts.map((p) => {
+                  {paginatedAuditList.map((p) => {
                     const isSelected = auditSelection.find(
                       (sel) => sel.id === p.id,
                     );
@@ -3099,6 +3141,29 @@ const InventoryWMS = ({
                     );
                   })}
                 </div>
+                {auditListTotalPages > 1 && (
+                  <div className="p-2 border-t flex items-center justify-between bg-white shrink-0">
+                    <span className="text-[10px] text-slate-500">
+                      {auditListPage}/{auditListTotalPages} ({filteredAuditProducts.length} itens)
+                    </span>
+                    <div className="flex gap-1">
+                      <button
+                        onClick={() => setAuditListPage((p) => Math.max(1, p - 1))}
+                        disabled={auditListPage === 1}
+                        className="p-1 border rounded text-slate-500 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        <ChevronLeft size={14} />
+                      </button>
+                      <button
+                        onClick={() => setAuditListPage((p) => Math.min(auditListTotalPages, p + 1))}
+                        disabled={auditListPage === auditListTotalPages}
+                        className="p-1 border rounded text-slate-500 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        <ChevronRight size={14} />
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Coluna Direita: Seleção e Templates */}
