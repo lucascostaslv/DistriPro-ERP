@@ -78,6 +78,7 @@ const ClientsManager = () => {
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingClient, setEditingClient] = useState(null);
+  const [cepLoading, setCepLoading] = useState(false);
   const [formData, setFormData] = useState({
     name: "",
     type: "PF",
@@ -96,7 +97,29 @@ const ClientsManager = () => {
 
   useEffect(() => {
     fetchClients();
-  }, [tenantDB]); // Atualiza se a loja/banco mudar
+  }, [tenantDB]);
+
+  const fetchCep = async (rawCep) => {
+    const cep = rawCep.replace(/\D/g, "");
+    if (cep.length !== 8) return;
+    setCepLoading(true);
+    try {
+      const res = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
+      const data = await res.json();
+      if (data.erro) return;
+      setFormData((prev) => ({
+        ...prev,
+        street: data.logradouro || prev.street,
+        neighborhood: data.bairro || prev.neighborhood,
+        city: data.localidade || prev.city,
+        state: data.uf || prev.state,
+      }));
+    } catch {
+      // silently fail — user can fill manually
+    } finally {
+      setCepLoading(false);
+    }
+  };
 
   const fetchClients = async () => {
     if (!tenantDB) return;
@@ -625,17 +648,22 @@ const ClientsManager = () => {
                         <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">
                           CEP
                         </label>
-                        <input
-                          className="w-full border p-2.5 rounded-lg text-sm"
-                          value={masks.cep(formData.zip_code)}
-                          onChange={(e) =>
-                            setFormData({
-                              ...formData,
-                              zip_code: e.target.value,
-                            })
-                          }
-                          placeholder="00000-000"
-                        />
+                        <div className="relative">
+                          <input
+                            className="w-full border p-2.5 rounded-lg text-sm pr-8"
+                            value={masks.cep(formData.zip_code)}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setFormData({ ...formData, zip_code: val });
+                              if (val.replace(/\D/g, "").length === 8) fetchCep(val);
+                            }}
+                            placeholder="00000-000"
+                            maxLength={9}
+                          />
+                          {cepLoading && (
+                            <div className="absolute right-2 top-2.5 animate-spin rounded-full h-4 w-4 border-b-2 border-indigo-500" />
+                          )}
+                        </div>
                       </div>
                       <div className="col-span-8 md:col-span-7">
                         <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">
