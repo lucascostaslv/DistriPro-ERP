@@ -1114,12 +1114,26 @@ const PDV = ({
   const [lossReason, setLossReason] = useState("");
   const [showHistory, setShowHistory] = useState(false);
 
-  // Estados da Sessão de Caixa (Etapa 4)
+  // Estados da Sessão de Caixa
   const [caixaSession, setCaixaSession] = useState(null);
   const [aberturaCaixaModalOpen, setAberturaCaixaModalOpen] = useState(false);
-  const [fechamentoCaixaModalOpen, setFechamentoCaixaModalOpen] =
-    useState(false);
+  const [fechamentoCaixaModalOpen, setFechamentoCaixaModalOpen] = useState(false);
   const [fundoTrocoInput, setFundoTrocoInput] = useState("");
+  const [availableRegisters, setAvailableRegisters] = useState([]);
+  const [selectedRegisterId, setSelectedRegisterId] = useState("");
+
+  // Estados do modal de fechamento completo
+  const [fechamentoStep, setFechamentoStep] = useState("summary"); // "summary" | "deposit"
+  const [sessionSales, setSessionSales] = useState([]);
+  const [sessionMovements, setSessionMovements] = useState([]);
+  const [isLoadingFechamento, setIsLoadingFechamento] = useState(false);
+  const [depositData, setDepositData] = useState({
+    doDeposit: false,
+    amount: "",
+    accountId: "",
+    observation: "",
+  });
+  const [bankAccountsForDeposit, setBankAccountsForDeposit] = useState([]);
 
   // Estados de Edição
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
@@ -1175,13 +1189,16 @@ const PDV = ({
   useEffect(() => {
     const loadSession = async () => {
       if (currentUser && tenantDB) {
-        const session = await CaixaService.checkOpenSession(
-          tenantDB,
-          currentUser.id,
-        );
+        const session = await CaixaService.checkOpenSession(tenantDB, currentUser.id);
         setCaixaSession(session);
-        // Se não tiver sessão, obriga a abrir o modal de abertura
         if (!session) {
+          // Carrega caixas disponíveis antes de abrir o modal
+          const regs = await CaixaService.getRegisters(tenantDB);
+          setAvailableRegisters(regs);
+          if (regs.length > 0) {
+            setSelectedRegisterId(regs[0].id);
+            setFundoTrocoInput(Number(regs[0].currentBalance || 0).toFixed(2));
+          }
           setAberturaCaixaModalOpen(true);
         }
       }
@@ -1225,8 +1242,13 @@ const PDV = ({
         F7: () => setSangriaModalOpen(true),
         F8: () => setShowComandas(true),
         F9: () => setShowDosePanel(true),
-        F10: () => setAberturaCaixaModalOpen(true),
-        F11: () => setFechamentoCaixaModalOpen(true),
+        F10: () => {
+          if (caixaSession) {
+            handleOpenFechamento();
+          } else {
+            handleOpenAbertura();
+          }
+        },
         F12: () => {
           // Verifica se o campo de busca já é o elemento ativo no navegador
           if (document.activeElement === searchInputRef.current) {
@@ -1241,7 +1263,7 @@ const PDV = ({
 
       if (
         actions[e.key] &&
-        (!isTyping || e.key === "F10" || e.key === "F11" || e.key === "F12" ||
+        (!isTyping || e.key === "F10" || e.key === "F12" ||
          (paymentModalOpen && modalStep === "config" && ["F1","F2","F3","F4","F5"].includes(e.key)))
       ) {
         actions[e.key]();
@@ -1513,10 +1535,10 @@ const PDV = ({
   const addToCart = (product, customQty = null) => {
     if (!caixaSession) {
       showNotification(
-        "Você precisa ABRIR O CAIXA (F10) antes de vender!",
+        "Abra o caixa antes de vender [F10].",
         "error",
       );
-      setAberturaCaixaModalOpen(true);
+      handleOpenAbertura();
       return;
     }
 
@@ -1711,6 +1733,11 @@ const PDV = ({
 
   const handlePaymentInit = (method) => {
     if (cart.length === 0) return showNotification("Carrinho vazio", "error");
+    if (!caixaSession) {
+      showNotification("Abra o caixa antes de realizar vendas [F10].", "error");
+      handleOpenAbertura();
+      return;
+    }
 
     // Se o modal já está aberto em modo normal, só troca o método da entrada atual
     if (paymentModalOpen && modalStep === "config" && paymentMethod !== "PERCA" && method !== "PERCA") {
@@ -1886,6 +1913,9 @@ const PDV = ({
       clientName: finalClientName,
       clientId: finalClientId,
       dueDate: fiadoEntry?.dueDate || null,
+      sessionId: caixaSession?.id || null,
+      caixaId: caixaSession?.caixaId || null,
+      caixaName: caixaSession?.caixaName || null,
     };
     setPendingSale(sale);
     setModalStep("confirm");
@@ -1898,6 +1928,121 @@ const PDV = ({
     setCart([]);
     setPaymentModalOpen(false);
     setPaymentEntries([]);
+  };
+
+  const handleOpenAbertura = async () => {
+    const regs = await CaixaService.getRegisters(tenantDB);
+    setAvailableRegisters(regs);
+    if (regs.length > 0) {
+      setSelectedRegisterId(regs[0].id);
+      setFundoTrocoInput(Number(regs[0].currentBalance || 0).toFixed(2));
+    }
+    setAberturaCaixaModalOpen(true);
+  };
+
+  const handleOpenFechamento = async () => {
+    if (!caixaSession) return;
+    setIsLoadingFechamento(true);
+    setFechamentoStep("summary");
+    setDepositData({ doDeposit: false, amount: "", accountId: "", observation: "" });
+    try {
+      const [salesData, movData, accsData] = await Promise.all([
+        tenantDB.firestore.getAll('sales', [tenantDB.firestore.utils.where('sessionId', '==', caixaSession.id)]),
+        tenantDB.firestore.getAll('caixa_movimentacoes', [tenantDB.firestore.utils.where('sessionId', '==', caixaSession.id)]),
+        tenantDB.firestore.getAll('bank_accounts'),
+      ]);
+      setSessionSales(salesData.filter(s => !s.isLoss));
+      setSessionMovements(movData);
+      setBankAccountsForDeposit(accsData);
+    } catch (e) {
+      showNotification("Erro ao carregar dados do caixa.", "error");
+    }
+    setIsLoadingFechamento(false);
+    setFechamentoCaixaModalOpen(true);
+  };
+
+  const printCaixaReport = (session, salesData, movData, withdrawalAmount, remainingAmount, compInfo) => {
+    const lineLength = 42;
+    const separator = "=".repeat(lineLength) + "\n";
+    const thinSep = "-".repeat(lineLength) + "\n";
+    const center = (text) => {
+      const pad = Math.max(0, Math.floor((lineLength - text.length) / 2));
+      return " ".repeat(pad) + text + "\n";
+    };
+
+    const fmtCur = (v) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(Number(v) || 0);
+    const fmtDate = (iso) => iso ? new Date(iso).toLocaleString("pt-BR") : "—";
+
+    const byMethod = {};
+    salesData.forEach((s) => {
+      if (s.paymentMethods) {
+        s.paymentMethods.forEach((pm) => {
+          byMethod[pm.method] = (byMethod[pm.method] || 0) + (pm.amount || 0);
+        });
+      } else if (s.paymentMethod) {
+        byMethod[s.paymentMethod] = (byMethod[s.paymentMethod] || 0) + (s.total || 0);
+      }
+    });
+
+    const sangrias = movData.filter(m => m.type === 'SANGRIA');
+    const totalSangrias = sangrias.reduce((a, b) => a + (b.amount || 0), 0);
+    const totalVendas = salesData.reduce((a, b) => a + (b.total || 0), 0);
+
+    let content = "";
+    content += center(compInfo?.name || "EMPRESA");
+    content += center("RELATÓRIO DE FECHAMENTO DE CAIXA");
+    content += separator;
+    content += `Caixa: ${session.caixaName || "Caixa"}\n`;
+    content += `Operador: ${session.userName}\n`;
+    content += `Abertura: ${fmtDate(session.openedAt)}\n`;
+    content += `Fechamento: ${fmtDate(new Date().toISOString())}\n`;
+    content += separator;
+    content += center("ENTRADAS POR FORMA DE PAGAMENTO");
+    content += thinSep;
+    Object.entries(byMethod).forEach(([method, total]) => {
+      const label = method.padEnd(20);
+      const value = fmtCur(total).padStart(lineLength - 20);
+      content += `${label}${value}\n`;
+    });
+    content += thinSep;
+    const totalLabel = "TOTAL VENDAS".padEnd(20);
+    const totalValue = fmtCur(totalVendas).padStart(lineLength - 20);
+    content += `${totalLabel}${totalValue}\n`;
+    content += separator;
+    if (sangrias.length > 0) {
+      content += center("SANGRIAS");
+      content += thinSep;
+      sangrias.forEach((s) => {
+        content += `${fmtDate(s.createdAt)}\n`;
+        content += `  ${(s.reason || "Sangria").substring(0, 28).padEnd(28)}${fmtCur(s.amount).padStart(lineLength - 28)}\n`;
+      });
+      content += thinSep;
+      content += `${"TOTAL SANGRIAS".padEnd(20)}${fmtCur(totalSangrias).padStart(lineLength - 20)}\n`;
+      content += separator;
+    }
+    content += `${"RETIRADA DO CAIXA".padEnd(20)}${fmtCur(withdrawalAmount).padStart(lineLength - 20)}\n`;
+    content += `${"SALDO RESIDUAL".padEnd(20)}${fmtCur(remainingAmount).padStart(lineLength - 20)}\n`;
+    content += separator;
+    content += center("GUARDE JUNTO COM O DINHEIRO");
+    content += "\n\n\n";
+
+    const iframe = document.createElement("iframe");
+    iframe.style.position = "fixed";
+    iframe.style.left = "-9999px";
+    iframe.style.width = "302px";
+    document.body.appendChild(iframe);
+    iframe.contentDocument.write(`
+      <html><head><style>
+        @page { size: 80mm auto; margin: 4mm; }
+        body { font-family: monospace; font-size: 11px; width: 72mm; }
+        pre { white-space: pre-wrap; margin: 0; }
+      </style></head><body><pre>${content}</pre></body></html>
+    `);
+    iframe.contentDocument.close();
+    setTimeout(() => {
+      iframe.contentWindow.print();
+      setTimeout(() => document.body.removeChild(iframe), 1000);
+    }, 300);
   };
 
   const handleSaveProduct = (e) => {
@@ -2078,6 +2223,15 @@ const PDV = ({
           </div>
 
           <div className="flex items-center gap-1">
+            {/* Indicador / botão do caixa */}
+            <button
+              onClick={() => caixaSession ? handleOpenFechamento() : handleOpenAbertura()}
+              title={caixaSession ? `Fechar caixa: ${caixaSession.caixaName || "Caixa"} [F10]` : "Abrir caixa [F10]"}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md font-bold text-xs border shadow-sm transition-colors ${caixaSession ? "bg-emerald-50 border-emerald-300 text-emerald-700 hover:bg-emerald-100" : "bg-red-50 border-red-300 text-red-600 hover:bg-red-100 animate-pulse"}`}
+            >
+              <Lock size={13} />
+              {caixaSession ? `${caixaSession.caixaName || "Aberto"} [F10]` : "Fechado [F10]"}
+            </button>
             <button
               onClick={() => setShowComandas(true)}
               className="bg-white border border-indigo-200 text-indigo-700 px-3 py-1.5 rounded-md font-bold hover:bg-indigo-50 flex items-center gap-1.5 text-xs shadow-sm"
@@ -2662,113 +2816,327 @@ const PDV = ({
           </button>
         </div>
       </Modal>
-      {/* MODAL DE ABERTURA DE CAIXA (F10) */}
+      {/* MODAL DE ABERTURA DE CAIXA */}
       <Modal
         isOpen={aberturaCaixaModalOpen}
-        onClose={() => {
-          if (caixaSession) setAberturaCaixaModalOpen(false);
-        }}
-        title="Abertura de Caixa (Sessão)"
+        onClose={() => setAberturaCaixaModalOpen(false)}
+        title="Abertura de Caixa"
       >
         <div className="space-y-4">
-          <div className="bg-indigo-50 border border-indigo-200 p-3 rounded text-indigo-800 text-sm">
-            <AlertTriangle size={16} className="inline mr-2" />
-            Você está abrindo o caixa para o operador:{" "}
-            <strong>{currentUser?.username}</strong>
+          <div className="bg-indigo-50 border border-indigo-200 p-3 rounded text-indigo-800 text-sm flex items-center gap-2">
+            <AlertTriangle size={16} />
+            Operador: <strong>{currentUser?.username}</strong>
           </div>
-          <div>
-            <label className="block text-xs font-bold text-slate-500 mb-1">
-              Fundo de Troco (R$ Inicial da Gaveta)
-            </label>
-            <input
-              type="number"
-              step="0.01"
-              className="w-full border p-3 rounded text-lg font-bold text-slate-800"
-              placeholder="0.00"
-              value={fundoTrocoInput}
-              onChange={(e) => setFundoTrocoInput(e.target.value)}
-              autoFocus
-            />
-          </div>
-          <button
-            onClick={async () => {
-              if (!fundoTrocoInput)
-                return showNotification(
-                  "Insira o valor do fundo de troco.",
-                  "error",
-                );
-              try {
-                const newSession = await CaixaService.openSession(
-                  tenantDB,
-                  currentUser.id,
-                  currentUser.username,
-                  fundoTrocoInput,
-                );
-                setCaixaSession(newSession);
-                setAberturaCaixaModalOpen(false);
-                showNotification(
-                  "Caixa aberto com sucesso! Boas vendas.",
-                  "success",
-                );
-              } catch (e) {
-                showNotification("Erro ao abrir o caixa.", "error");
-              }
-            }}
-            className="w-full py-3 rounded font-bold mt-2 text-white bg-emerald-600 hover:bg-emerald-700 transition-colors"
-          >
-            Confirmar Abertura
-          </button>
+
+          {availableRegisters.length === 0 ? (
+            <div className="text-center py-6 text-slate-500 text-sm">
+              <Lock size={32} className="mx-auto mb-2 text-slate-300" />
+              Nenhum caixa cadastrado. Acesse <strong>Configurações &gt; Caixas</strong> para adicionar.
+            </div>
+          ) : (
+            <>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Selecione o Caixa</label>
+                <select
+                  className="w-full border p-3 rounded text-sm font-bold bg-white"
+                  value={selectedRegisterId}
+                  onChange={(e) => {
+                    const reg = availableRegisters.find(r => r.id === e.target.value);
+                    setSelectedRegisterId(e.target.value);
+                    setFundoTrocoInput(reg ? Number(reg.currentBalance || 0).toFixed(2) : "0.00");
+                  }}
+                >
+                  {availableRegisters.map(r => (
+                    <option key={r.id} value={r.id}>{r.name}{r.description ? ` — ${r.description}` : ""}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">
+                  Dinheiro Inicial na Gaveta (R$)
+                  {availableRegisters.find(r => r.id === selectedRegisterId)?.currentBalance > 0 && (
+                    <span className="ml-2 text-amber-600 font-normal normal-case">← saldo residual do fechamento anterior</span>
+                  )}
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  className="w-full border p-3 rounded text-lg font-bold text-slate-800"
+                  placeholder="0.00"
+                  value={fundoTrocoInput}
+                  onChange={(e) => setFundoTrocoInput(e.target.value)}
+                  autoFocus
+                />
+              </div>
+
+              <button
+                onClick={async () => {
+                  if (!selectedRegisterId)
+                    return showNotification("Selecione um caixa.", "error");
+                  const reg = availableRegisters.find(r => r.id === selectedRegisterId);
+                  try {
+                    const newSession = await CaixaService.openSession(
+                      tenantDB,
+                      currentUser.id,
+                      currentUser.username,
+                      Number(fundoTrocoInput) || 0,
+                      selectedRegisterId,
+                      reg?.name || "Caixa",
+                    );
+                    setCaixaSession(newSession);
+                    setAberturaCaixaModalOpen(false);
+                    showNotification(`${reg?.name || "Caixa"} aberto! Boas vendas.`, "success");
+                  } catch (e) {
+                    showNotification("Erro ao abrir o caixa.", "error");
+                  }
+                }}
+                className="w-full py-3 rounded font-bold mt-2 text-white bg-emerald-600 hover:bg-emerald-700 transition-colors"
+              >
+                Confirmar Abertura
+              </button>
+            </>
+          )}
         </div>
       </Modal>
 
-      {/* MODAL DE FECHAMENTO DE CAIXA (F11) */}
+      {/* MODAL DE FECHAMENTO DE CAIXA */}
       <Modal
         isOpen={fechamentoCaixaModalOpen}
         onClose={() => setFechamentoCaixaModalOpen(false)}
-        title="Encerrar Sessão do Caixa"
+        title={fechamentoStep === "summary" ? `Fechamento — ${caixaSession?.caixaName || "Caixa"}` : "Depósito / Retirada"}
       >
-        <div className="space-y-4 text-center">
-          <Lock size={48} className="mx-auto text-slate-400 mb-2" />
-          <h3 className="font-bold text-lg text-slate-800">
-            Deseja realmente encerrar este caixa?
-          </h3>
-          <p className="text-sm text-slate-500">
-            Ao encerrar, o sistema consolidará todas as suas vendas e sangrias
-            para a conferência gerencial. Você será deslogado ou impedido de
-            vender até nova abertura.
-          </p>
-
-          <div className="grid grid-cols-2 gap-3 mt-4">
-            <button
-              onClick={() => setFechamentoCaixaModalOpen(false)}
-              className="py-3 border border-slate-300 rounded font-bold text-slate-600 hover:bg-slate-50"
-            >
-              Cancelar
-            </button>
-            <button
-              onClick={async () => {
-                try {
-                  // Aqui você consolida e fecha. Posteriormente, o CashClosingManager lerá os caixas com status 'fechado'.
-                  await CaixaService.closeSession(tenantDB, caixaSession.id, {
-                    saldoTeorico:
-                      totalCart /* Substituir por cálculos de apuração reais depois */,
-                  });
-                  setCaixaSession(null);
-                  setFechamentoCaixaModalOpen(false);
-                  showNotification(
-                    "Sessão encerrada. Relatório enviado à gerência.",
-                    "success",
-                  );
-                } catch (e) {
-                  showNotification("Erro ao fechar caixa.", "error");
-                }
-              }}
-              className="py-3 bg-red-600 text-white rounded font-bold hover:bg-red-700 shadow-lg"
-            >
-              Sim, Encerrar
-            </button>
+        {isLoadingFechamento ? (
+          <div className="py-12 text-center text-slate-400">
+            <Loader2 size={32} className="animate-spin mx-auto mb-2" />
+            Carregando dados da sessão...
           </div>
-        </div>
+        ) : fechamentoStep === "summary" ? (() => {
+          const byMethod = {};
+          sessionSales.forEach((s) => {
+            if (s.paymentMethods) {
+              s.paymentMethods.forEach((pm) => {
+                byMethod[pm.method] = (byMethod[pm.method] || 0) + (pm.amount || 0);
+              });
+            } else if (s.paymentMethod) {
+              byMethod[s.paymentMethod] = (byMethod[s.paymentMethod] || 0) + (s.total || 0);
+            }
+          });
+          const sangrias = sessionMovements.filter(m => m.type === 'SANGRIA');
+          const totalSangrias = sangrias.reduce((a, b) => a + (b.amount || 0), 0);
+          const totalVendas = sessionSales.reduce((a, b) => a + (b.total || 0), 0);
+          const totalDinheiro = byMethod["Dinheiro"] || 0;
+          const totalNaGaveta = (caixaSession?.initialBalance || 0) + totalDinheiro - totalSangrias;
+          const fmtCur = (v) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(Number(v) || 0);
+
+          return (
+            <div className="space-y-4">
+              <div className="bg-slate-50 rounded-lg border p-4 space-y-2">
+                <p className="text-xs font-bold text-slate-500 uppercase mb-2">Entradas por Forma de Pagamento</p>
+                {Object.entries(byMethod).length === 0 ? (
+                  <p className="text-sm text-slate-400 italic">Nenhuma venda nesta sessão.</p>
+                ) : Object.entries(byMethod).map(([method, total]) => (
+                  <div key={method} className="flex justify-between text-sm">
+                    <span className="font-medium text-slate-700">{method}</span>
+                    <span className="font-bold text-slate-800">{fmtCur(total)}</span>
+                  </div>
+                ))}
+                <div className="border-t pt-2 mt-2 flex justify-between font-bold">
+                  <span>Total Vendas</span>
+                  <span className="text-emerald-700">{fmtCur(totalVendas)}</span>
+                </div>
+              </div>
+
+              {sangrias.length > 0 && (
+                <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
+                  <p className="text-xs font-bold text-orange-700 uppercase mb-2">Sangrias</p>
+                  {sangrias.map((s, i) => (
+                    <div key={i} className="flex justify-between text-sm">
+                      <span className="text-slate-600 text-xs">{new Date(s.createdAt).toLocaleTimeString("pt-BR")} — {s.reason || "Sangria"}</span>
+                      <span className="font-bold text-orange-700">−{fmtCur(s.amount)}</span>
+                    </div>
+                  ))}
+                  <div className="border-t border-orange-200 pt-2 mt-2 flex justify-between text-sm font-bold">
+                    <span>Total Sangrias</span>
+                    <span className="text-orange-700">−{fmtCur(totalSangrias)}</span>
+                  </div>
+                </div>
+              )}
+
+              <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-4 flex justify-between items-center">
+                <div>
+                  <p className="text-xs font-bold text-indigo-700 uppercase">Dinheiro Estimado na Gaveta</p>
+                  <p className="text-xs text-indigo-500">Fundo inicial + vendas em dinheiro − sangrias</p>
+                </div>
+                <span className="text-2xl font-extrabold text-indigo-700">{fmtCur(totalNaGaveta)}</span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 mt-2">
+                <button
+                  onClick={() => setFechamentoCaixaModalOpen(false)}
+                  className="py-3 border border-slate-300 rounded font-bold text-slate-600 hover:bg-slate-50"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={() => setFechamentoStep("deposit")}
+                  className="py-3 bg-red-600 text-white rounded font-bold hover:bg-red-700 shadow-lg"
+                >
+                  Prosseguir com Fechamento
+                </button>
+              </div>
+            </div>
+          );
+        })() : (() => {
+          const byMethod = {};
+          sessionSales.forEach((s) => {
+            if (s.paymentMethods) {
+              s.paymentMethods.forEach((pm) => {
+                byMethod[pm.method] = (byMethod[pm.method] || 0) + (pm.amount || 0);
+              });
+            } else if (s.paymentMethod) {
+              byMethod[s.paymentMethod] = (byMethod[s.paymentMethod] || 0) + (s.total || 0);
+            }
+          });
+          const sangrias = sessionMovements.filter(m => m.type === 'SANGRIA');
+          const totalSangrias = sangrias.reduce((a, b) => a + (b.amount || 0), 0);
+          const totalDinheiro = byMethod["Dinheiro"] || 0;
+          const totalNaGaveta = (caixaSession?.initialBalance || 0) + totalDinheiro - totalSangrias;
+          const withdrawalAmount = depositData.doDeposit ? (Number(depositData.amount) || 0) : 0;
+          const remainingAmount = Math.max(0, totalNaGaveta - withdrawalAmount);
+          const fmtCur = (v) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(Number(v) || 0);
+          const isOthers = depositData.accountId === "__outros__";
+          const canConfirm = !depositData.doDeposit || (depositData.amount && (!isOthers || depositData.observation.trim()));
+
+          return (
+            <div className="space-y-4">
+              <div className="flex items-center gap-3 p-3 bg-slate-50 border rounded-lg cursor-pointer" onClick={() => setDepositData(d => ({ ...d, doDeposit: !d.doDeposit, amount: "", accountId: "", observation: "" }))}>
+                <input type="checkbox" checked={depositData.doDeposit} onChange={() => {}} className="w-5 h-5 text-indigo-600 rounded" />
+                <div>
+                  <p className="font-bold text-slate-700">Fazer retirada / depósito</p>
+                  <p className="text-xs text-slate-500">Registre o valor retirado da gaveta agora.</p>
+                </div>
+              </div>
+
+              {depositData.doDeposit && (
+                <div className="space-y-3 animate-in fade-in">
+                  <div>
+                    <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Valor Retirado (R$) *</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      max={totalNaGaveta}
+                      className="w-full border p-3 rounded text-lg font-bold"
+                      placeholder="0.00"
+                      value={depositData.amount}
+                      onChange={(e) => setDepositData(d => ({ ...d, amount: e.target.value }))}
+                      autoFocus
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Destino *</label>
+                    <select
+                      className="w-full border p-2.5 rounded text-sm bg-white font-bold"
+                      value={depositData.accountId}
+                      onChange={(e) => setDepositData(d => ({ ...d, accountId: e.target.value }))}
+                    >
+                      <option value="">Selecione...</option>
+                      {bankAccountsForDeposit.map(acc => (
+                        <option key={acc.id} value={acc.id}>{acc.name}</option>
+                      ))}
+                      <option value="__outros__">Outros (envelope, cofre, etc.)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-slate-500 uppercase block mb-1">
+                      Observação {isOthers ? <span className="text-red-500">*</span> : "(opcional)"}
+                    </label>
+                    <input
+                      className="w-full border p-2 rounded text-sm"
+                      placeholder={isOthers ? "Ex: Guardado no cofre da sala..." : ""}
+                      value={depositData.observation}
+                      onChange={(e) => setDepositData(d => ({ ...d, observation: e.target.value }))}
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div className="bg-slate-50 border rounded-lg p-3 space-y-1 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Dinheiro na gaveta</span>
+                  <span className="font-bold">{fmtCur(totalNaGaveta)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Retirada</span>
+                  <span className="font-bold text-red-600">−{fmtCur(withdrawalAmount)}</span>
+                </div>
+                <div className="flex justify-between border-t pt-1 font-bold">
+                  <span>Saldo residual (fica na gaveta)</span>
+                  <span className={remainingAmount > 0 ? "text-amber-600" : "text-slate-700"}>{fmtCur(remainingAmount)}</span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <button onClick={() => setFechamentoStep("summary")} className="py-3 border border-slate-300 rounded font-bold text-slate-600 hover:bg-slate-50">
+                  Voltar
+                </button>
+                <button
+                  disabled={!canConfirm}
+                  onClick={async () => {
+                    try {
+                      const closingData = {
+                        totalVendas: sessionSales.reduce((a, b) => a + (b.total || 0), 0),
+                        totalSangrias,
+                        withdrawalAmount,
+                        remainingBalance: remainingAmount,
+                        depositAccountId: depositData.doDeposit ? depositData.accountId : null,
+                        depositObservation: depositData.observation || null,
+                      };
+                      await CaixaService.closeSession(tenantDB, caixaSession.id, caixaSession.caixaId, closingData);
+
+                      // Registra depósito na conta bancária (se houver e não for "Outros")
+                      const targetAccountId = depositData.doDeposit && depositData.accountId && depositData.accountId !== "__outros__"
+                        ? depositData.accountId : null;
+                      if (targetAccountId && withdrawalAmount > 0) {
+                        await tenantDB.firestore.add('account_transactions', {
+                          accountId: targetAccountId,
+                          type: "IN",
+                          amount: withdrawalAmount,
+                          description: `Depósito de Caixa — ${caixaSession.caixaName || "Caixa"}`,
+                          category: "Depósito de Caixa",
+                          date: new Date().toISOString(),
+                          sessionId: caixaSession.id,
+                          userId: caixaSession.userId,
+                          userName: caixaSession.userName,
+                          observation: depositData.observation || null,
+                          createdAt: serverTimestamp(),
+                        });
+                        await tenantDB.firestore.update('bank_accounts', targetAccountId, {
+                          currentBalance: tenantDB.firestore.utils.increment(withdrawalAmount),
+                        });
+                      }
+
+                      printCaixaReport(caixaSession, sessionSales, sessionMovements, withdrawalAmount, remainingAmount, companyInfo);
+                      setCaixaSession(null);
+                      setFechamentoCaixaModalOpen(false);
+                      showNotification("Caixa fechado! Relatório impresso.", "success");
+                    } catch (e) {
+                      console.error(e);
+                      showNotification("Erro ao fechar caixa.", "error");
+                    }
+                  }}
+                  className={`py-3 rounded font-bold text-white shadow-lg transition-colors ${canConfirm ? "bg-red-600 hover:bg-red-700" : "bg-slate-300 cursor-not-allowed"}`}
+                >
+                  Confirmar Fechamento
+                </button>
+              </div>
+            </div>
+          );
+        })()}
       </Modal>
     </div>
   );
@@ -4129,7 +4497,38 @@ const Finance = ({
   bankAccounts = [],
   storeConfig,
 }) => {
+  const { tenantDB, currentUser } = useTenant();
   const [activeTab, setActiveTab] = useState("closure");
+
+  // Estados da sub-aba Relatórios de Caixa
+  const [cashRegisters, setCashRegisters] = useState([]);
+  const [cashSessions, setCashSessions] = useState([]);
+  const [cashReportBankAccounts, setCashReportBankAccounts] = useState([]);
+  const [selectedRegisterFilter, setSelectedRegisterFilter] = useState("all");
+  const [isLoadingCashReport, setIsLoadingCashReport] = useState(false);
+  const [cashReportStartDate, setCashReportStartDate] = useState(
+    new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split("T")[0]
+  );
+  const [cashReportEndDate, setCashReportEndDate] = useState(
+    new Date().toISOString().split("T")[0]
+  );
+  const [expandedSessionId, setExpandedSessionId] = useState(null);
+
+  useEffect(() => {
+    if (activeTab === "cashreport" && tenantDB) {
+      setIsLoadingCashReport(true);
+      Promise.all([
+        tenantDB.firestore.getAll('caixas'),
+        tenantDB.firestore.getAll('caixa_sessoes'),
+        tenantDB.firestore.getAll('bank_accounts'),
+      ]).then(([regs, sessions, accs]) => {
+        setCashRegisters(regs);
+        setCashSessions(sessions);
+        setCashReportBankAccounts(accs);
+        setIsLoadingCashReport(false);
+      }).catch(() => setIsLoadingCashReport(false));
+    }
+  }, [activeTab, tenantDB]);
   const [history, setHistory] = useState([]);
   const [viewSale, setViewSale] = useState(null);
   const [viewClosure, setViewClosure] = useState(null);
@@ -4209,6 +4608,12 @@ const Finance = ({
           className={`px-4 py-2 text-sm font-medium rounded whitespace-nowrap ${activeTab === "bank" ? "bg-slate-800 text-white" : "text-slate-500 hover:bg-slate-100"}`}
         >
           Contas Bancárias
+        </button>
+        <button
+          onClick={() => setActiveTab("cashreport")}
+          className={`px-4 py-2 text-sm font-medium rounded whitespace-nowrap ${activeTab === "cashreport" ? "bg-orange-600 text-white" : "text-slate-500 hover:bg-slate-100"}`}
+        >
+          Relatórios de Caixa
         </button>
       </div>
 
@@ -4506,6 +4911,165 @@ const Finance = ({
         </div>
       )}
 
+      {/* ABA RELATÓRIOS DE CAIXA */}
+      {activeTab === "cashreport" && (() => {
+        const fmtCur = (v) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(Number(v) || 0);
+        const filteredSessions = cashSessions
+          .filter(s => {
+            if (selectedRegisterFilter !== "all" && s.caixaId !== selectedRegisterFilter) return false;
+            if (currentUser?.role !== "admin" && s.userId !== currentUser?.id) return false;
+            if (s.openedAt) {
+              const d = s.openedAt.split("T")[0];
+              if (d < cashReportStartDate || d > cashReportEndDate) return false;
+            }
+            return true;
+          })
+          .sort((a, b) => new Date(b.openedAt) - new Date(a.openedAt));
+
+        const reloadCashReport = () => {
+          setIsLoadingCashReport(true);
+          Promise.all([
+            tenantDB.firestore.getAll('caixas'),
+            tenantDB.firestore.getAll('caixa_sessoes'),
+            tenantDB.firestore.getAll('bank_accounts'),
+          ]).then(([regs, sessions, accs]) => {
+            setCashRegisters(regs);
+            setCashSessions(sessions);
+            setCashReportBankAccounts(accs);
+            setIsLoadingCashReport(false);
+          }).catch(() => setIsLoadingCashReport(false));
+        };
+
+        return (
+          <div className="space-y-4">
+            {/* Barra de filtros */}
+            <div className="bg-white border rounded-lg p-4 flex flex-wrap gap-3 items-end">
+              <div>
+                <label className="text-xs font-bold text-slate-500 uppercase block mb-1">De</label>
+                <input type="date" className="border p-2 rounded text-sm" value={cashReportStartDate} onChange={e => setCashReportStartDate(e.target.value)} />
+              </div>
+              <div>
+                <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Até</label>
+                <input type="date" className="border p-2 rounded text-sm" value={cashReportEndDate} onChange={e => setCashReportEndDate(e.target.value)} />
+              </div>
+              <div>
+                <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Caixa</label>
+                <select className="border p-2 rounded text-sm bg-white min-w-[180px]" value={selectedRegisterFilter} onChange={e => setSelectedRegisterFilter(e.target.value)}>
+                  <option value="all">Todos</option>
+                  {cashRegisters.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+                </select>
+              </div>
+              <button onClick={reloadCashReport} className="px-4 py-2 bg-slate-100 hover:bg-slate-200 border rounded text-sm font-bold text-slate-600">
+                Atualizar
+              </button>
+            </div>
+
+            {isLoadingCashReport ? (
+              <div className="py-12 text-center text-slate-400"><Loader2 size={28} className="animate-spin mx-auto mb-2" />Carregando...</div>
+            ) : (
+              <div className="bg-white rounded border border-slate-200 shadow-sm overflow-hidden">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-slate-50 text-slate-500 uppercase text-xs">
+                    <tr>
+                      <th className="p-3 w-5"></th>
+                      <th className="p-3">Caixa</th>
+                      <th className="p-3">Operador</th>
+                      <th className="p-3">Abertura</th>
+                      <th className="p-3">Fechamento</th>
+                      <th className="p-3 text-right">Total Vendas</th>
+                      <th className="p-3 text-right">Retirada</th>
+                      <th className="p-3 text-right">Saldo Residual</th>
+                      <th className="p-3 text-center">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredSessions.length === 0 && (
+                      <tr><td colSpan={9} className="p-8 text-center text-slate-400 italic">Nenhuma sessão no período.</td></tr>
+                    )}
+                    {filteredSessions.map((session) => {
+                      const isExpanded = expandedSessionId === session.id;
+                      const accountName = session.depositAccountId === "__outros__"
+                        ? "Outros (cofre/envelope)"
+                        : cashReportBankAccounts.find(a => a.id === session.depositAccountId)?.name || null;
+
+                      return (
+                        <React.Fragment key={session.id}>
+                          <tr
+                            className={`cursor-pointer transition-colors ${isExpanded ? "bg-orange-50" : "hover:bg-slate-50"}`}
+                            onClick={() => setExpandedSessionId(isExpanded ? null : session.id)}
+                          >
+                            <td className="p-3 text-slate-400 text-center">
+                              {isExpanded ? <ChevronRight size={14} className="rotate-90 inline" /> : <ChevronRight size={14} className="inline" />}
+                            </td>
+                            <td className="p-3 font-bold text-slate-700">{session.caixaName || "—"}</td>
+                            <td className="p-3 text-slate-600">{session.userName}</td>
+                            <td className="p-3 text-slate-500 text-xs">{session.openedAt ? new Date(session.openedAt).toLocaleString("pt-BR") : "—"}</td>
+                            <td className="p-3 text-slate-500 text-xs">{session.closedAt ? new Date(session.closedAt).toLocaleString("pt-BR") : "—"}</td>
+                            <td className="p-3 text-right font-bold text-emerald-700">{fmtCur(session.totalVendas)}</td>
+                            <td className="p-3 text-right text-red-600 font-bold">{fmtCur(session.withdrawalAmount)}</td>
+                            <td className="p-3 text-right text-amber-600 font-bold">{fmtCur(session.remainingBalance)}</td>
+                            <td className="p-3 text-center">
+                              {session.status === "aberto"
+                                ? <span className="text-[10px] bg-emerald-100 text-emerald-700 border border-emerald-200 px-2 py-1 rounded-full font-bold">Aberto</span>
+                                : <span className="text-[10px] bg-slate-100 text-slate-500 border border-slate-200 px-2 py-1 rounded-full font-bold">Fechado</span>}
+                            </td>
+                          </tr>
+
+                          {isExpanded && (
+                            <tr className="bg-orange-50 border-b border-orange-100">
+                              <td colSpan={9} className="px-6 py-4">
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                                  <div className="bg-white rounded border border-orange-100 p-3">
+                                    <p className="text-xs font-bold text-orange-700 uppercase mb-2">Resumo Financeiro</p>
+                                    <div className="space-y-1 text-slate-600">
+                                      <div className="flex justify-between"><span>Fundo inicial:</span><span className="font-bold">{fmtCur(session.initialBalance)}</span></div>
+                                      <div className="flex justify-between"><span>Total vendas:</span><span className="font-bold text-emerald-700">{fmtCur(session.totalVendas)}</span></div>
+                                      <div className="flex justify-between"><span>Sangrias:</span><span className="font-bold text-orange-600">−{fmtCur(session.totalSangrias)}</span></div>
+                                      <div className="flex justify-between border-t pt-1 font-bold"><span>Retirado:</span><span className="text-red-600">−{fmtCur(session.withdrawalAmount)}</span></div>
+                                      <div className="flex justify-between font-bold"><span>Ficou na gaveta:</span><span className="text-amber-600">{fmtCur(session.remainingBalance)}</span></div>
+                                    </div>
+                                  </div>
+
+                                  <div className="bg-white rounded border border-orange-100 p-3">
+                                    <p className="text-xs font-bold text-orange-700 uppercase mb-2">Destino da Retirada</p>
+                                    {session.withdrawalAmount > 0 ? (
+                                      <div className="space-y-1 text-slate-600 text-sm">
+                                        <div className="flex gap-2 items-start">
+                                          <Landmark size={14} className="mt-0.5 text-slate-400 shrink-0" />
+                                          <span className="font-bold">{accountName || "Não especificado"}</span>
+                                        </div>
+                                        <div className="flex gap-2 items-start">
+                                          <span className="font-bold">{fmtCur(session.withdrawalAmount)}</span>
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <p className="text-slate-400 italic text-xs">Nenhuma retirada neste fechamento.</p>
+                                    )}
+                                  </div>
+
+                                  <div className="bg-white rounded border border-orange-100 p-3">
+                                    <p className="text-xs font-bold text-orange-700 uppercase mb-2">Observação</p>
+                                    {session.depositObservation ? (
+                                      <p className="text-slate-700 text-sm italic">"{session.depositObservation}"</p>
+                                    ) : (
+                                      <p className="text-slate-400 italic text-xs">Sem observação registrada.</p>
+                                    )}
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {/* MODAIS (MANTIDOS IGUAIS) */}
       <Modal
         isOpen={!!viewSale}
@@ -4706,6 +5270,10 @@ const SettingsManager = ({
   const [certStatusInfo, setCertStatusInfo] = useState(null);
 
   const [activeTab, setActiveTab] = useState("general");
+
+  // Estados da aba Caixas
+  const [registers, setRegisters] = useState([]);
+  const [newRegister, setNewRegister] = useState({ name: "", description: "" });
   const [newProfile, setNewProfile] = useState({
     name: "",
     origin: "0",
@@ -4883,6 +5451,38 @@ const SettingsManager = ({
     };
     loadData();
   }, [storeConfig, tenantDB]);
+
+  // Carrega caixas ao entrar na aba
+  useEffect(() => {
+    if (activeTab === "registers" && tenantDB) {
+      tenantDB.firestore.getAll('caixas').then(setRegisters).catch(console.error);
+    }
+  }, [activeTab, tenantDB]);
+
+  const handleAddRegister = async () => {
+    if (!newRegister.name.trim())
+      return showNotification("Digite um nome para o caixa.", "error");
+    try {
+      const doc = { name: newRegister.name.trim(), description: newRegister.description.trim(), currentBalance: 0 };
+      const id = await tenantDB.firestore.add('caixas', doc);
+      setRegisters([...registers, { id, ...doc }]);
+      setNewRegister({ name: "", description: "" });
+      showNotification("Caixa cadastrado!", "success");
+    } catch (e) {
+      showNotification("Erro ao cadastrar caixa.", "error");
+    }
+  };
+
+  const handleDeleteRegister = async (id) => {
+    if (!window.confirm("Excluir este caixa? Histórico de sessões não será apagado.")) return;
+    try {
+      await tenantDB.firestore.delete('caixas', id);
+      setRegisters(registers.filter(r => r.id !== id));
+      showNotification("Caixa removido.", "success");
+    } catch (e) {
+      showNotification("Erro ao remover caixa.", "error");
+    }
+  };
 
   // --- LOGICA CATEGORIAS ---
   const handleAddCategory = async () => {
@@ -5170,6 +5770,12 @@ const SettingsManager = ({
           className={`px-4 py-2 text-sm font-bold rounded-t-lg ${activeTab === "certificate" ? "bg-slate-800 text-white" : "bg-slate-100"}`}
         >
           Certificado
+        </button>
+        <button
+          onClick={() => setActiveTab("registers")}
+          className={`px-4 py-2 text-sm font-bold rounded-t-lg ${activeTab === "registers" ? "bg-orange-600 text-white" : "bg-slate-100"}`}
+        >
+          Caixas
         </button>
       </div>
 
@@ -5701,6 +6307,85 @@ const SettingsManager = ({
         </div>
       )}
 
+      {/* ABA CAIXAS */}
+      {activeTab === "registers" && (
+        <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
+          <h3 className="font-bold mb-4 flex items-center gap-2 text-orange-700">
+            <Lock size={20} /> Caixas Cadastrados
+          </h3>
+          <p className="text-sm text-slate-500 mb-5">
+            Cadastre os caixas físicos disponíveis na loja. O operador seleciona qual caixa está usando ao fazer a abertura.
+          </p>
+
+          <div className="bg-orange-50 p-4 rounded border border-orange-200 mb-6 flex flex-col md:flex-row gap-3 items-end">
+            <div className="flex-1">
+              <label className="text-xs font-bold text-orange-700 uppercase block mb-1">Nome do Caixa *</label>
+              <input
+                className="w-full border p-2 rounded text-sm"
+                placeholder="Ex: Caixa 1, Caixa Principal..."
+                value={newRegister.name}
+                onChange={(e) => setNewRegister({ ...newRegister, name: e.target.value })}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleAddRegister(); }}
+              />
+            </div>
+            <div className="flex-1">
+              <label className="text-xs font-bold text-orange-700 uppercase block mb-1">Descrição (opcional)</label>
+              <input
+                className="w-full border p-2 rounded text-sm"
+                placeholder="Ex: Balcão frente de loja..."
+                value={newRegister.description}
+                onChange={(e) => setNewRegister({ ...newRegister, description: e.target.value })}
+              />
+            </div>
+            <button
+              onClick={handleAddRegister}
+              className="bg-orange-600 text-white px-4 py-2 rounded font-bold h-[38px] hover:bg-orange-700 flex items-center gap-2"
+            >
+              <Plus size={16} /> Adicionar
+            </button>
+          </div>
+
+          <div className="border rounded overflow-hidden">
+            <table className="w-full text-sm text-left">
+              <thead className="bg-slate-50 uppercase text-xs text-slate-500">
+                <tr>
+                  <th className="p-3">Nome</th>
+                  <th className="p-3">Descrição</th>
+                  <th className="p-3 text-right">Saldo Residual</th>
+                  <th className="p-3 text-right">Ação</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {registers.map((reg) => (
+                  <tr key={reg.id} className="hover:bg-slate-50">
+                    <td className="p-3 font-bold text-slate-700">{reg.name}</td>
+                    <td className="p-3 text-slate-500 text-xs">{reg.description || "—"}</td>
+                    <td className="p-3 text-right font-mono text-slate-700">
+                      {new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(reg.currentBalance || 0)}
+                    </td>
+                    <td className="p-3 text-right">
+                      <button
+                        onClick={() => handleDeleteRegister(reg.id)}
+                        className="text-red-500 hover:bg-red-50 p-2 rounded"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {registers.length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="p-8 text-center text-slate-400 italic">
+                      Nenhum caixa cadastrado. Adicione pelo menos um para que os operadores possam abrir sessões.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {activeTab === "certificate" && (
         <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
           <h3 className="font-bold mb-4">Certificado Digital & Integração</h3>
@@ -6149,7 +6834,7 @@ const cleanUndefinedFields = (obj, path = '') => {
       const finalSale = {
         ...sale,
         id: saleId,
-        createdAt: serverTimestamp(), // ✨ Nativo do Firebase, sem prefixo 'utils'
+        createdAt: serverTimestamp(),
         userId: currentUser?.id || "anon",
         userName: currentUser?.username || "Sistema",
       };

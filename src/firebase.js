@@ -5,17 +5,14 @@ import {
 } from "firebase/firestore";
 import { getAuth } from "firebase/auth";
 
-// This is the config for your central "admin" database
-// that would store the configurations for all other stores.
-// In a real app, you would have a backend service to manage this securely.
 export const adminFirebaseConfig = {
-  apiKey: "AIzaSyBEhyislYrWz-4y_8EEQfxq8TJ2YqUjME4",
-  authDomain: "distri-proerp.firebaseapp.com",
-  projectId: "distri-proerp",
-  storageBucket: "distri-proerp.appspot.com",
-  messagingSenderId: "741629085924",
-  appId: "1:741629085924:web:26d151b47b774394a844f1",
-  measurementId: "G-YDH0W59Y89"
+  apiKey: process.env.REACT_APP_FIREBASE_API_KEY,
+  authDomain: process.env.REACT_APP_FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.REACT_APP_FIREBASE_PROJECT_ID,
+  storageBucket: process.env.REACT_APP_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.REACT_APP_FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.REACT_APP_FIREBASE_APP_ID,
+  measurementId: process.env.REACT_APP_FIREBASE_MEASUREMENT_ID,
 };
 
 // Initialize the main admin app. We give it a unique name to avoid conflicts.
