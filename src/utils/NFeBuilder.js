@@ -93,15 +93,28 @@ export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = 
             const qtd = Number(item.quantity || item.qty);
             const vUnit = Number(item.unitPrice || item.price);
             const vTotal = Number(item.total || (qtd * vUnit));
-            const cfopCode = Number(taxes.cfop || (targetModel === '65' ? "5102" : "5102"));
+            const cfopCode = Number(taxes.cfop || "5102");
             const hasIPI = taxes.vIPI > 0;
+
+            // PIS/COFINS: usa o CST do perfil tributário (nunca hardcode "07")
+            const cstPisCofins = taxes.cst_pis_cofins || '49';
+            const buildPisCofinsBock = (cst, rate, value) => {
+                if (cst === '01' && rate > 0) {
+                    // Tributável com alíquota — envia base de cálculo e valor
+                    return { "CodSituacaoTributaria": cst, "BaseCalculo": vTotal, "Aliquota": rate, "Valor": value };
+                }
+                // CST 04 (monofásico), 07 (isento), 49 (outras), 06, 99 → alíquota zero
+                return { "CodSituacaoTributaria": cst };
+            };
+            const pisBlock  = buildPisCofinsBock(cstPisCofins, taxes.pis_rate  || 0, taxes.vPIS  || 0);
+            const cofinsBlock = buildPisCofinsBock(cstPisCofins, taxes.cofins_rate || 0, taxes.vCOFINS || 0);
 
             return {
                 "NItemPed": index + 1,
                 "CodProdutoServico": item.id ? String(item.id).substring(0, 20) : "ITEM"+index,
                 "NmProduto": item.name.substring(0, 120),
                 "NCM": ncmRaw,
-                "CEST": cestRaw.length > 0 ? cestRaw : null, 
+                "CEST": cestRaw.length > 0 ? cestRaw : null,
                 "CFOP": cfopCode,
                 "UnidadeComercial": item.unit || "UN",
                 "Quantidade": qtd,
@@ -115,15 +128,15 @@ export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = 
 
                 "Imposto": {
                     "ICMS": {
-                        "CodSituacaoTributaria": taxes.csosn || "102", 
-                        "AliquotaICMS": 0, 
+                        "CodSituacaoTributaria": taxes.csosn || "102",
+                        "AliquotaICMS": 0,
                         "AliquotaCredito": 0
                     },
-                    "PIS": { "CodSituacaoTributaria": "07" },
-                    "COFINS": { "CodSituacaoTributaria": "07" },
+                    "PIS": pisBlock,
+                    "COFINS": cofinsBlock,
                     "IPI": {
-                        "CodEnquadramento": "999", 
-                        "CodSituacaoTributaria": hasIPI ? "50" : "53", 
+                        "CodEnquadramento": "999",
+                        "CodSituacaoTributaria": hasIPI ? "50" : "53",
                         "Aliquota": hasIPI ? taxes.pIPI : 0,
                         "ValorIPI": hasIPI ? taxes.vIPI : 0
                     }

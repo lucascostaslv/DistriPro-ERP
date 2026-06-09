@@ -57,12 +57,29 @@ export const calculateItemTaxes = (product, client, companyInfo, taxProfile) => 
         log(`CFOP calculado automaticamente: ${taxes.cfop}`);
     }
 
-    // Outros campos
+    // Outros campos do ICMS
     taxes.csosn = taxProfile.cst_nfe || '102';
-    taxes.cst_pis_cofins = taxProfile.cst_pis_cofins || '49';
     taxes.origin = String(taxProfile.origin || product.origin || '0');
 
-    // IPI (Se configurado no produto)
+    // PIS/COFINS — repassa CST e alíquotas do perfil para o NFeBuilder
+    taxes.cst_pis_cofins = taxProfile.cst_pis_cofins || '49';
+    taxes.is_monofasico   = taxProfile.is_monofasico ?? (taxes.cst_pis_cofins === '04');
+    taxes.pis_rate        = Number(taxProfile.pis_rate   || 0);
+    taxes.cofins_rate     = Number(taxProfile.cofins_rate || 0);
+
+    // Calcula valores de PIS/COFINS apenas quando CST 01 (tributável)
+    if (taxes.cst_pis_cofins === '01' && taxes.pis_rate > 0) {
+        taxes.vPIS    = Number((totalValue * taxes.pis_rate    / 100).toFixed(2));
+        taxes.vCOFINS = Number((totalValue * taxes.cofins_rate / 100).toFixed(2));
+        log(`PIS ${taxes.pis_rate}% = R$${taxes.vPIS} | COFINS ${taxes.cofins_rate}% = R$${taxes.vCOFINS}`);
+    } else {
+        // Monofásico (04), isento (07), outras (49): PIS/COFINS = 0
+        taxes.vPIS    = 0;
+        taxes.vCOFINS = 0;
+        if (taxes.is_monofasico) log('PIS/COFINS monofásico: alíquota zero (CST 04)');
+    }
+
+    // IPI (se configurado no produto)
     if (product.ipiRate > 0) {
         taxes.vIPI = Number((totalValue * (product.ipiRate / 100)).toFixed(2));
         taxes.pIPI = product.ipiRate;

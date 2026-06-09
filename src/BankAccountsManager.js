@@ -2,13 +2,26 @@ import React, { useState, useEffect } from 'react';
 import {
   Building2, Wallet, Plus, ArrowUpRight, ArrowDownRight,
   Search, CheckCircle, X, Landmark, FileText, Trash2, Settings, Filter, User, ArrowLeftRight,
-  CheckSquare, Square
+  CheckSquare, Square, Edit2
 } from 'lucide-react';
 import { useTenant } from './contexts/TenantContext'; 
 import { where } from 'firebase/firestore';
 // Importações limpas do Firebase apenas para as transações atômicas e filtros
 
 const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
+
+// Strings de data-only (ex: '2026-05-10') são interpretadas pelo JS como UTC midnight,
+// causando shift de 1 dia em fusos negativos (UTC-3 BR). Tratar como horário local.
+const parseTxnDate = (dateVal) => {
+    if (!dateVal) return null;
+    if (typeof dateVal === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateVal)) {
+        return new Date(dateVal + 'T12:00:00');
+    }
+    return new Date(dateVal);
+};
+
+const toLocalDateStr = (d) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 const BankAccountsManager = ({ showNotification }) => {
   const { tenantDB, currentUser } = useTenant();
@@ -211,9 +224,9 @@ const BankAccountsManager = ({ showNotification }) => {
       let passStart = true;
       let passEnd = true;
       
-      // Padroniza a data para comparar
-      const tDateObj = t.date ? new Date(t.date) : (t.createdAt?.seconds ? new Date(t.createdAt.seconds * 1000) : new Date());
-      const tDateStr = tDateObj.toISOString().split('T')[0];
+      // Usa horário local para comparar (evita shift de fuso UTC-3)
+      const tDateObj = t.date ? parseTxnDate(t.date) : (t.createdAt?.seconds ? new Date(t.createdAt.seconds * 1000) : new Date());
+      const tDateStr = toLocalDateStr(tDateObj);
 
       if (dateFilter.start) passStart = tDateStr >= dateFilter.start;
       if (dateFilter.end) passEnd = tDateStr <= dateFilter.end;
@@ -237,6 +250,84 @@ const BankAccountsManager = ({ showNotification }) => {
       });
     } catch (error) {
       showNotification('Erro ao atualizar conciliação.', 'error');
+    }
+  };
+
+  // --- EDIÇÃO DE TRANSAÇÃO ---
+  const [editTxnModal, setEditTxnModal] = useState(null); // null | { txn, form }
+
+  const openEditTxn = (txn) => {
+    const dateStr = txn.date
+      ? (typeof txn.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(txn.date)
+          ? txn.date
+          : toLocalDateStr(new Date(txn.date)))
+      : toLocalDateStr(new Date(txn.createdAt?.seconds * 1000));
+
+    setEditTxnModal({
+      txn,
+      form: {
+        description: txn.description || '',
+        amount: String(txn.amount ?? ''),
+        date: dateStr,
+        category: txn.category || '',
+        type: txn.type || 'OUT',
+      },
+    });
+  };
+
+  const handleSaveEditedTxn = async () => {
+    if (!editTxnModal) return;
+    const { txn, form } = editTxnModal;
+
+    const newAmount = parseFloat(String(form.amount).replace(',', '.'));
+    if (isNaN(newAmount) || newAmount <= 0) {
+      return showNotification('Valor inválido.', 'error');
+    }
+
+    try {
+      const batch = tenantDB.firestore.batch();
+
+      // Reverte o impacto antigo e aplica o novo no saldo da conta
+      const oldEffect = txn.type === 'IN' ? txn.amount : -txn.amount;
+      const newEffect = form.type === 'IN' ? newAmount : -newAmount;
+      const balanceDelta = newEffect - oldEffect;
+
+      batch.update('account_transactions', txn.id, {
+        description: form.description.trim(),
+        amount: newAmount,
+        date: form.date,
+        category: form.category.trim(),
+        type: form.type,
+      });
+
+      if (balanceDelta !== 0) {
+        batch.update('bank_accounts', txn.accountId, {
+          currentBalance: tenantDB.firestore.utils.increment(balanceDelta),
+        });
+      }
+
+      await batch.commit();
+      showNotification('Transação atualizada.', 'success');
+      setEditTxnModal(null);
+    } catch (error) {
+      showNotification('Erro ao atualizar transação.', 'error');
+    }
+  };
+
+  const handleDeleteTransaction = async (txn) => {
+    if (!window.confirm(`Excluir transação "${txn.description}" de ${formatCurrency(txn.amount)}? O saldo da conta será revertido.`)) return;
+    try {
+      const batch = tenantDB.firestore.batch();
+      batch.delete('account_transactions', txn.id);
+      // Reverte o impacto no saldo da conta
+      const delta = txn.type === 'IN' ? -txn.amount : txn.amount;
+      batch.update('bank_accounts', txn.accountId, {
+        currentBalance: tenantDB.firestore.utils.increment(delta)
+      });
+      await batch.commit();
+      showNotification('Transação excluída e saldo revertido.', 'success');
+    } catch (error) {
+      showNotification('Erro ao excluir transação.', 'error');
     }
   };
 
@@ -424,13 +515,17 @@ const BankAccountsManager = ({ showNotification }) => {
                                             <div className="flex-1 min-w-0">
                                                 <p className={`text-sm font-bold truncate ${txn.reconciled ? 'line-through text-slate-400' : 'text-slate-700'}`}>{txn.description}</p>
                                                 <div className="flex flex-wrap items-center gap-1 mt-0.5">
-                                                    <span className="text-[10px] text-slate-400">{new Date(txn.date || txn.createdAt?.seconds * 1000).toLocaleDateString('pt-BR')}</span>
+                                                    <span className="text-[10px] text-slate-400">{(txn.date ? parseTxnDate(txn.date) : new Date(txn.createdAt?.seconds * 1000)).toLocaleDateString('pt-BR')}</span>
                                                     {txn.category && <span className="text-[10px] bg-slate-200 text-slate-600 px-1 rounded uppercase">{txn.category}</span>}
                                                     {txn.userName && <span className="text-[10px] text-indigo-500 flex items-center gap-0.5"><User size={9}/>{txn.userName}</span>}
                                                     {txn.reconciled && <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1 rounded font-bold">Conciliada</span>}
                                                 </div>
                                             </div>
-                                            <span className="text-sm font-bold text-emerald-600 shrink-0">+{formatCurrency(txn.amount)}</span>
+                                            <div className="flex items-center gap-1 shrink-0">
+                                                <span className="text-sm font-bold text-emerald-600">+{formatCurrency(txn.amount)}</span>
+                                                <button onClick={() => openEditTxn(txn)} className="text-slate-300 hover:text-indigo-500 transition-colors p-0.5" title="Editar transação"><Edit2 size={13}/></button>
+                                                <button onClick={() => handleDeleteTransaction(txn)} className="text-slate-300 hover:text-red-500 transition-colors p-0.5" title="Excluir transação"><Trash2 size={13}/></button>
+                                            </div>
                                         </div>
                                     ))
                                 )}
@@ -461,13 +556,17 @@ const BankAccountsManager = ({ showNotification }) => {
                                             <div className="flex-1 min-w-0">
                                                 <p className={`text-sm font-bold truncate ${txn.reconciled ? 'line-through text-slate-400' : 'text-slate-700'}`}>{txn.description}</p>
                                                 <div className="flex flex-wrap items-center gap-1 mt-0.5">
-                                                    <span className="text-[10px] text-slate-400">{new Date(txn.date || txn.createdAt?.seconds * 1000).toLocaleDateString('pt-BR')}</span>
+                                                    <span className="text-[10px] text-slate-400">{(txn.date ? parseTxnDate(txn.date) : new Date(txn.createdAt?.seconds * 1000)).toLocaleDateString('pt-BR')}</span>
                                                     {txn.category && <span className="text-[10px] bg-slate-200 text-slate-600 px-1 rounded uppercase">{txn.category}</span>}
                                                     {txn.userName && <span className="text-[10px] text-indigo-500 flex items-center gap-0.5"><User size={9}/>{txn.userName}</span>}
                                                     {txn.reconciled && <span className="text-[10px] bg-red-100 text-red-700 px-1 rounded font-bold">Conciliada</span>}
                                                 </div>
                                             </div>
-                                            <span className="text-sm font-bold text-red-600 shrink-0">-{formatCurrency(txn.amount)}</span>
+                                            <div className="flex items-center gap-1 shrink-0">
+                                                <span className="text-sm font-bold text-red-600">-{formatCurrency(txn.amount)}</span>
+                                                <button onClick={() => openEditTxn(txn)} className="text-slate-300 hover:text-indigo-500 transition-colors p-0.5" title="Editar transação"><Edit2 size={13}/></button>
+                                                <button onClick={() => handleDeleteTransaction(txn)} className="text-slate-300 hover:text-red-500 transition-colors p-0.5" title="Excluir transação"><Trash2 size={13}/></button>
+                                            </div>
                                         </div>
                                     ))
                                 )}
@@ -482,6 +581,107 @@ const BankAccountsManager = ({ showNotification }) => {
                 </div>
             )}
         </div>
+
+        {/* MODAL: EDITAR TRANSAÇÃO */}
+        {editTxnModal && (
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden">
+                    <div className="flex justify-between items-center p-4 border-b bg-slate-50">
+                        <h2 className="font-bold text-slate-800 flex items-center gap-2">
+                            <Edit2 size={17} className="text-indigo-600"/> Editar Transação
+                        </h2>
+                        <button onClick={() => setEditTxnModal(null)} className="text-slate-400 hover:text-slate-600"><X size={20}/></button>
+                    </div>
+
+                    <div className="p-4 space-y-3">
+                        {/* Tipo */}
+                        <div>
+                            <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Tipo</label>
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={() => setEditTxnModal(p => ({ ...p, form: { ...p.form, type: 'IN' } }))}
+                                    className={`flex-1 py-2 rounded font-bold text-sm border transition-colors ${editTxnModal.form.type === 'IN' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-slate-500 border-slate-200 hover:border-emerald-400'}`}
+                                >
+                                    Entrada (+)
+                                </button>
+                                <button
+                                    onClick={() => setEditTxnModal(p => ({ ...p, form: { ...p.form, type: 'OUT' } }))}
+                                    className={`flex-1 py-2 rounded font-bold text-sm border transition-colors ${editTxnModal.form.type === 'OUT' ? 'bg-red-600 text-white border-red-600' : 'bg-white text-slate-500 border-slate-200 hover:border-red-400'}`}
+                                >
+                                    Saída (-)
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Descrição */}
+                        <div>
+                            <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Descrição</label>
+                            <input
+                                className="w-full border rounded p-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+                                value={editTxnModal.form.description}
+                                onChange={e => setEditTxnModal(p => ({ ...p, form: { ...p.form, description: e.target.value } }))}
+                            />
+                        </div>
+
+                        {/* Valor + Data lado a lado */}
+                        <div className="grid grid-cols-2 gap-3">
+                            <div>
+                                <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Valor (R$)</label>
+                                <input
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    className="w-full border rounded p-2 text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
+                                    value={editTxnModal.form.amount}
+                                    onChange={e => setEditTxnModal(p => ({ ...p, form: { ...p.form, amount: e.target.value } }))}
+                                />
+                            </div>
+                            <div>
+                                <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Data</label>
+                                <input
+                                    type="date"
+                                    className="w-full border rounded p-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+                                    value={editTxnModal.form.date}
+                                    onChange={e => setEditTxnModal(p => ({ ...p, form: { ...p.form, date: e.target.value } }))}
+                                />
+                            </div>
+                        </div>
+
+                        {/* Categoria */}
+                        <div>
+                            <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Categoria</label>
+                            <input
+                                className="w-full border rounded p-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+                                value={editTxnModal.form.category}
+                                onChange={e => setEditTxnModal(p => ({ ...p, form: { ...p.form, category: e.target.value } }))}
+                                placeholder="Ex: Salário, Aluguel..."
+                            />
+                        </div>
+
+                        {/* Aviso de ajuste de saldo */}
+                        {(() => {
+                            const oldEffect = editTxnModal.txn.type === 'IN' ? editTxnModal.txn.amount : -editTxnModal.txn.amount;
+                            const newAmt = parseFloat(String(editTxnModal.form.amount).replace(',', '.')) || 0;
+                            const newEffect = editTxnModal.form.type === 'IN' ? newAmt : -newAmt;
+                            const delta = newEffect - oldEffect;
+                            if (delta === 0) return null;
+                            return (
+                                <p className={`text-xs rounded p-2 ${delta > 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
+                                    Saldo da conta será ajustado em <strong>{delta > 0 ? '+' : ''}{formatCurrency(delta)}</strong>
+                                </p>
+                            );
+                        })()}
+                    </div>
+
+                    <div className="p-4 border-t bg-slate-50 flex justify-end gap-2">
+                        <button onClick={() => setEditTxnModal(null)} className="px-4 py-2 text-slate-600 font-bold hover:bg-slate-200 rounded text-sm">Cancelar</button>
+                        <button onClick={handleSaveEditedTxn} className="px-6 py-2 bg-indigo-600 text-white rounded font-bold text-sm hover:bg-indigo-700">
+                            Salvar
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )}
 
         {/* MODAIS (NOVA CONTA, ROTEAMENTO E TRANSFERÊNCIA) */}
         {isModalOpen && (

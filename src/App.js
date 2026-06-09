@@ -84,6 +84,7 @@ import ComandaManager from "./ComandaManager";
 import { downloadSmart } from "./EntradaNotas/FiscalInvoices";
 import BankAccountsManager from "./BankAccountsManager";
 import CashClosingManager from "./CashClosingManager";
+import TaxRulesManager from "./TaxRulesManager";
 import DoseManager from "./DoseManager";
 import { CaixaService } from "./CaixaService";
 
@@ -717,15 +718,22 @@ const SuperAdminDashboard = ({ onLogout, showNotification }) => {
 
 // --- RECEIPT UTILS ---
 export const printReceipt = (sale, companyInfo) => {
-  const padStart = (str, len, char = " ") => String(str).padStart(len, char);
-
-  const lineLength = 48;
-  const separator = "-".repeat(lineLength) + "\n";
+  const LEFT_MARGIN = "  "; // 2 espaços: desloca o conteúdo para direita, evitando zona morta da impressora
+  const lineLength = 44; // largura útil após margem esquerda (48 - 2 espaços - 2 de padding = ~44)
+  const separator = LEFT_MARGIN + "-".repeat(lineLength) + "\n";
 
   const center = (text) => {
-    const textStr = String(text);
+    const textStr = String(text).substring(0, lineLength);
     const padding = Math.floor((lineLength - textStr.length) / 2);
-    return " ".repeat(padding > 0 ? padding : 0) + textStr + "\n";
+    return LEFT_MARGIN + " ".repeat(padding > 0 ? padding : 0) + textStr + "\n";
+  };
+
+  const line = (text) => LEFT_MARGIN + text + "\n";
+
+  const rightAlign = (label, value) => {
+    const maxVal = lineLength - label.length;
+    const valStr = String(value).padStart(maxVal > 0 ? maxVal : 1, " ");
+    return LEFT_MARGIN + label + valStr + "\n";
   };
 
   let receiptContent = "";
@@ -743,30 +751,31 @@ export const printReceipt = (sale, companyInfo) => {
   receiptContent += center("CUPOM NAO FISCAL");
   receiptContent += separator;
 
-  receiptContent += `DATA: ${new Date(sale.date).toLocaleString("pt-BR")}\n`;
-  receiptContent += `CLIENTE: ${sale.clientName || "Consumidor Final"}\n`;
+  receiptContent += line(`DATA: ${new Date(sale.date).toLocaleString("pt-BR")}`);
+  receiptContent += line(`CLIENTE: ${sale.clientName || "Consumidor Final"}`);
   receiptContent += separator;
 
   sale.items.forEach((item) => {
+    const totalItemVal = item.price * item.qty;
+    const totalStr = `R$${totalItemVal.toFixed(2)}`;
     const qtyStr = `${item.qty}x `;
-    const totalStr = (item.price * item.qty).toFixed(2);
-    const maxNameLen = lineLength - qtyStr.length - totalStr.length;
-    const nameStr = item.name.substring(0, maxNameLen).padEnd(maxNameLen, " ");
-    receiptContent += `${qtyStr}${nameStr}${totalStr}\n`;
+    const maxNameLen = lineLength - qtyStr.length - totalStr.length - 1;
+    const nameStr = item.name.substring(0, maxNameLen > 0 ? maxNameLen : 1).padEnd(maxNameLen > 0 ? maxNameLen : 1, " ");
+    receiptContent += LEFT_MARGIN + qtyStr + nameStr + " " + totalStr + "\n";
+    if (item.qty > 1) {
+      const unitLabel = `   @ R$${item.price.toFixed(2)} un.`;
+      receiptContent += LEFT_MARGIN + unitLabel + "\n";
+    }
   });
 
   receiptContent += separator;
 
-  const totalItems = `QTD. ITENS:`;
-  const totalItemsValue = `${sale.items.reduce((acc, item) => acc + item.qty, 0)}`;
-  receiptContent += `${totalItems}${padStart(totalItemsValue, lineLength - totalItems.length)}\n`;
-
-  const totalValue = `TOTAL R$:`;
-  const totalFormatted = sale.total.toFixed(2);
-  receiptContent += `${totalValue}${padStart(totalFormatted, lineLength - totalValue.length)}\n`;
+  const totalQty = sale.items.reduce((acc, item) => acc + item.qty, 0);
+  receiptContent += rightAlign("QTD. ITENS:", totalQty);
+  receiptContent += rightAlign("TOTAL R$:", sale.total.toFixed(2));
 
   receiptContent += separator;
-  receiptContent += `PAGAMENTO: ${sale.paymentMethod}${sale.installments > 1 ? ` (${sale.installments}x)` : ""}\n`;
+  receiptContent += line(`PAGAMENTO: ${sale.paymentMethod}${sale.installments > 1 ? ` (${sale.installments}x)` : ""}`);
   receiptContent += separator;
   receiptContent += center("OBRIGADO PELA PREFERENCIA!");
   receiptContent += "\n\n";
@@ -779,7 +788,7 @@ export const printReceipt = (sale, companyInfo) => {
         @media print {
           @page {
             margin: 0;
-            size: 80mm auto; /* Largura térmica padrão, altura automática pelo conteúdo */
+            size: 80mm auto;
           }
           body, * {
             color: #000000 !important;
@@ -797,13 +806,13 @@ export const printReceipt = (sale, companyInfo) => {
           font-family: 'Courier New', Courier, monospace;
           font-size: 11px;
           font-weight: 600;
-          line-height: 1.15;
+          line-height: 1.2;
           margin: 0;
           padding: 2px 4px;
           width: 80mm;
           box-sizing: border-box;
           overflow-x: hidden;
-          white-space: pre-wrap; /* Evita overflow horizontal */
+          white-space: pre;
         }
       </style>
     </head>
@@ -1646,10 +1655,9 @@ const PDV = ({
   const totalCart = cart.reduce((acc, item) => acc + item.price * item.qty, 0);
   const totalCost = cart.reduce((acc, item) => {
     const product = products.find((p) => p.id === (item.originalId || item.id));
-    const unitCost = product ? product.cost : 0;
-    const factor =
-      product?.itemType === "pack" ? product.conversionFactor || 1 : 1;
-    return acc + unitCost * item.qty * factor;
+    // product.cost para packs já é o custo total do pacote (não multiplicar por conversionFactor)
+    const unitCost = product ? (product.cost || 0) : 0;
+    return acc + unitCost * item.qty;
   }, 0);
   const totalPaid = paymentEntries.reduce((s, e) => s + e.amount, 0);
   const remaining = Math.round((totalCart - totalPaid) * 100) / 100;
@@ -3347,16 +3355,35 @@ const ExpenseHistory = ({ transactions, categories }) => {
   );
 
   const handleDeleteExpense = async (id) => {
-    // Apenas confirmação simples, sem senha
-    if (
-      !window.confirm(
-        "Tem certeza que deseja excluir este registro financeiro?",
-      )
-    )
-      return;
+    if (!window.confirm("Tem certeza que deseja excluir este registro financeiro?")) return;
 
     try {
-      await tenantDB.firestore.delete("financial_movements", id);
+      // Busca o registro para saber o accountId/description e limpar o account_transaction órfão
+      const expense = (transactions || []).find((t) => t.id === id);
+      const batch = tenantDB.firestore.batch();
+      batch.delete("financial_movements", id);
+
+      // Remove o account_transaction vinculado (se existir), evitando entradas órfãs no extrato
+      if (expense?.accountId) {
+        const allTxns = await tenantDB.firestore.getAll("account_transactions");
+        const linkedTxn = allTxns.find(
+          (t) =>
+            t.accountId === expense.accountId &&
+            t.amount === expense.amount &&
+            t.date === expense.date &&
+            (t.description === `DESPESA: ${expense.description}` ||
+              t.description === `PGTO DESPESA: ${expense.description}`),
+        );
+        if (linkedTxn) {
+          batch.delete("account_transactions", linkedTxn.id);
+          // Reverte o saldo da conta bancária
+          batch.update("bank_accounts", expense.accountId, {
+            currentBalance: tenantDB.firestore.utils.increment(expense.amount),
+          });
+        }
+      }
+
+      await batch.commit();
       alert("Registro excluído com sucesso.");
     } catch (e) {
       console.error(e);
@@ -4069,10 +4096,16 @@ const FinancialReport = ({
   );
 
   // 5. Resultados
-  // Lucro Bruto = Receita - (CMV Teórico ou Compras) - Taxas - Percas
-  // Nota: Para DRE gerencial simples, usaremos Compras como aproximação de CMV se não tivermos CMV real calculado por venda
-  // Mas como temos o 'cost' na venda, podemos fazer um DRE mais preciso:
-  const costOfGoodsSold = validSales.reduce((acc, s) => acc + (s.cost || 0), 0);
+  // CMV calculado por item (mais preciso que sale.cost que pode incluir bug de conversionFactor para packs)
+  const costOfGoodsSold = validSales.reduce((acc, s) => {
+    if (s.items && s.items.length > 0) {
+      return acc + s.items.reduce(
+        (iAcc, item) => iAcc + (Number(item.costPrice || item.cost) || 0) * (Number(item.qty) || 0),
+        0
+      );
+    }
+    return acc + (s.cost || 0);
+  }, 0);
 
   const grossProfit = revenue - costOfGoodsSold - fees - lossesCost;
   const netProfit = grossProfit - opExpenses;
@@ -6247,126 +6280,9 @@ const SettingsManager = ({
         </div>
       )}
 
-      {/* ABA PERFIS FISCAIS e CERTIFICADO (MANTENHA IGUAL) */}
+      {/* ABA PERFIS FISCAIS */}
       {activeTab === "tax_profiles" && (
-        <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
-          {/* ... Conteúdo da aba perfis ... */}
-          <h3 className="font-bold mb-4 flex items-center gap-2">
-            <Tags size={20} /> Gerenciar Perfis Fiscais
-          </h3>
-          <div className="bg-emerald-50 p-4 rounded border border-emerald-100 mb-6 grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
-            <div className="md:col-span-3">
-              <label className="text-xs font-bold text-emerald-700">
-                Nome (Ex: Cerveja ST)
-              </label>
-              <input
-                className="w-full border p-2 rounded text-sm uppercase"
-                value={newProfile.name}
-                onChange={(e) =>
-                  setNewProfile({ ...newProfile, name: e.target.value })
-                }
-              />
-            </div>
-            <div className="md:col-span-2">
-              <label className="text-xs font-bold text-emerald-700">
-                Origem
-              </label>
-              <select
-                className="w-full border p-2 rounded text-sm"
-                value={newProfile.origin}
-                onChange={(e) =>
-                  setNewProfile({ ...newProfile, origin: e.target.value })
-                }
-              >
-                <option value="0">0 - Nacional</option>
-                <option value="1">1 - Importado</option>
-              </select>
-            </div>
-            <div className="md:col-span-3">
-              <label className="text-xs font-bold text-emerald-700">
-                CSOSN (Simples)
-              </label>
-              <select
-                className="w-full border p-2 rounded text-sm"
-                value={newProfile.cst_nfe}
-                onChange={(e) =>
-                  setNewProfile({ ...newProfile, cst_nfe: e.target.value })
-                }
-              >
-                <option value="102">102 - Tributado</option>
-                <option value="500">500 - ST (Subst. Trib)</option>
-                <option value="900">900 - Outros</option>
-              </select>
-            </div>
-            <div className="md:col-span-2">
-              <label className="text-xs font-bold text-emerald-700">
-                CFOP (Estadual)
-              </label>
-              <input
-                className="w-full border p-2 rounded text-sm font-bold text-center"
-                value={newProfile.cfop}
-                onChange={(e) =>
-                  setNewProfile({ ...newProfile, cfop: e.target.value })
-                }
-                placeholder="Ex: 5405"
-              />
-            </div>
-            <div className="md:col-span-2">
-              <button
-                onClick={handleAddProfile}
-                className="w-full bg-emerald-600 text-white p-2 rounded font-bold hover:bg-emerald-700 text-sm h-[38px]"
-              >
-                Adicionar
-              </button>
-            </div>
-          </div>
-          <div className="border rounded overflow-hidden">
-            <table className="w-full text-sm text-left">
-              <thead className="bg-slate-50 uppercase text-xs text-slate-500">
-                <tr>
-                  <th className="p-3">Nome</th>
-                  <th className="p-3 text-center">Origem</th>
-                  <th className="p-3 text-center">CSOSN</th>
-                  <th className="p-3 text-center bg-yellow-50 text-yellow-800">
-                    CFOP
-                  </th>
-                  <th className="p-3 text-right">Ação</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {taxProfiles.map((p) => (
-                  <tr key={p.id} className="hover:bg-slate-50">
-                    <td className="p-3 font-bold text-slate-700">{p.name}</td>
-                    <td className="p-3 text-center">{p.origin}</td>
-                    <td className="p-3 text-center">
-                      <span className="bg-slate-200 px-2 py-1 rounded text-xs font-mono">
-                        {p.cst_nfe}
-                      </span>
-                    </td>
-                    <td className="p-3 text-center bg-yellow-50 font-bold text-yellow-900">
-                      {p.cfop_state || "-"}
-                    </td>
-                    <td className="p-3 text-right">
-                      <button
-                        onClick={() => handleDeleteProfile(p.id)}
-                        className="text-red-400 hover:text-red-600"
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-                {taxProfiles.length === 0 && (
-                  <tr>
-                    <td colSpan={5} className="p-8 text-center text-slate-400">
-                      Nenhum perfil cadastrado.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <TaxRulesManager showNotification={showNotification} />
       )}
 
       {/* ABA CAIXAS */}
