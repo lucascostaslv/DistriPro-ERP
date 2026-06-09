@@ -1,0 +1,59 @@
+LIBERAÇÃO DE MÓDULOS — GUIA DE TESTE
+=====================================
+
+ONDE ACESSAR
+------------
+Login como Gerente → Configurações (engrenagem) → aba "Liberação de Módulos"
+
+
+MÓDULOS DISPONÍVEIS
+-------------------
+Dashboard       — Painel com DRE e indicadores
+PDV & Vendas    — Ponto de venda
+Estoque (WMS)   — Gestão de estoque
+Parceiros       — Clientes e fornecedores
+Notas & Gastos  — Entrada de NF e despesas
+Contas a Receber— Controle de fiado
+Financeiro      — Extrato bancário e relatórios
+Precificação    — Grupos de preço
+Configurações   — Bloqueado para Caixa (sempre)
+
+
+PASSO A PASSO DO TESTE
+----------------------
+
+1. CONFIGURAR POR FUNÇÃO (grupo inteiro)
+   - Clique na aba "Por Função"
+   - Clique em qualquer módulo na linha "Caixa / Operador" para ligar/desligar
+   - Clique "Salvar" no canto do grupo
+   - Resultado: todos os usuários com função Caixa herdam essa configuração
+
+2. CONFIGURAR POR USUÁRIO (exceção individual)
+   - Clique na aba "Por Usuário (Exceções)"
+   - Selecione um usuário no dropdown
+   - Desmarque "Usar padrão do grupo" para ativar edição individual
+   - Ligue/desligue os módulos desejados
+   - Clique "Salvar"
+   - Resultado: só aquele usuário tem as permissões diferentes do grupo
+
+3. REMOVER EXCEÇÃO DE UM USUÁRIO
+   - Selecione o usuário → marque novamente "Usar padrão do grupo" → Salvar
+   - O usuário volta a seguir as permissões do grupo
+
+4. TESTAR O BLOQUEIO
+   - Faça login com um usuário Caixa
+   - Módulos sem permissão não aparecem no menu lateral
+   - Se tentar acessar diretamente, aparece tela "Acesso Negado"
+
+
+REGRAS FIXAS (não alteráveis)
+------------------------------
+- Gerente sempre tem acesso a Configurações
+- Caixa nunca tem acesso a Configurações
+- Sem permissões salvas = comportamento padrão (Gerente vê tudo, Caixa vê PDV + Estoque)
+
+
+HISTÓRICO
+---------
+Cada alteração fica registrada no painel "Histórico de Alterações"
+com nome do responsável, data e hora.

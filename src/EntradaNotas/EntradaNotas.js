@@ -66,6 +66,25 @@ const DenseSelect = (props) => (
   </select>
 );
 
+// Busca produto por código respeitando prioridade: barcode exato > cbaCode exato; entre empates não-pack > pack.
+// Isso evita que um produto "caixa" (pack) sobrescreva a "unidade" (não-pack) quando ambos têm o mesmo código.
+const findProductByCode = (products, code) => {
+    if (!code || !products) return null;
+    const s = String(code).trim();
+    // 1ª prioridade: barcode exato, não-pack
+    let found = products.find(p => String(p.barcode).trim() === s && p.itemType !== 'pack');
+    if (found) return found;
+    // 2ª prioridade: barcode exato, qualquer tipo
+    found = products.find(p => String(p.barcode).trim() === s);
+    if (found) return found;
+    // 3ª prioridade: cbaCode exato, não-pack
+    found = products.find(p => String(p.cbaCode).trim() === s && p.itemType !== 'pack');
+    if (found) return found;
+    // 4ª prioridade: cbaCode exato, qualquer tipo
+    found = products.find(p => String(p.cbaCode).trim() === s);
+    return found || null;
+};
+
 // --- APP PRINCIPAL ---
 export default function EntradaNotas({ storeConfig, onClose, products: globalProducts }) {
   const { tenantDB } = useTenant();
@@ -417,7 +436,7 @@ const handleSaveSupplier = async () => {
 
           // 4. Código de Barras (Busca automática de produto existente)
           if (field === 'barcode' && value.length > 3) {
-              const existing = products.find(p => p.barcode === value || p.cbaCode === value);
+              const existing = findProductByCode(products, value);
               if (existing) {
                   updates.isNew = false;
                   updates.productId = existing.id;
@@ -437,7 +456,7 @@ const handleSaveSupplier = async () => {
           if (field === 'systemSku' || field === 'barcode') {
               const code = String(value).trim();
               if (code.length >= 3) {
-                  const match = products.find(p => String(p.barcode) === code || String(p.cbaCode) === code);
+                  const match = findProductByCode(products, code);
                   if (match) {
                       updates.productId = match.id;
                       updates.productName = match.name;
@@ -601,9 +620,8 @@ const handleSaveSupplier = async () => {
         const uCom = getTagContent(prod, "uCom");
         const validCode = (cEAN && cEAN !== "SEM GTIN") ? cEAN : cProd;
         
-        let existingProd = products.find(p => String(p.barcode) === validCode || String(p.cbaCode) === validCode);
+        let existingProd = findProductByCode(products, validCode);
         if (!existingProd) {
-             // ✨ Blindagem: (p.name || "") e (xProd || "")
              existingProd = products.find(p => (p.name || "").toUpperCase().trim() === (xProd || "").toUpperCase().trim());
         }
 

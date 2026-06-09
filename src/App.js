@@ -50,6 +50,7 @@ import {
   Utensils,
   Wine,
   Landmark,
+  Shield,
 } from "lucide-react";
 import {
   collection,
@@ -87,6 +88,11 @@ import CashClosingManager from "./CashClosingManager";
 import TaxRulesManager from "./TaxRulesManager";
 import DoseManager from "./DoseManager";
 import { CaixaService } from "./CaixaService";
+import AccountsReceivable from "./AccountsReceivable";
+import ModulePermissionsManager, {
+  ALL_MODULES,
+  DEFAULT_GROUP_PERMS,
+} from "./ModulePermissionsManager";
 
 import { TenantProvider, useTenant } from "./contexts/TenantContext";
 
@@ -119,19 +125,16 @@ const getDisplayStock = (product, allProducts) => {
   const itemType = product.itemType || "unit";
 
   if (itemType === "unit") {
-    return product.stock || 0;
+    const available = (product.stock || 0) - (product.reserved_stock || 0);
+    return Math.max(0, available);
   }
   if (itemType === "pack") {
-    // Busca o pai pelo ID para calcular quantas caixas virtuais existem
     const unitProduct = allProducts.find((p) => p.id === product.parentId);
-    // Se não achar o pai ou o fator for inválido, retorna 0
-    if (!unitProduct || !unitProduct.stock || !product.conversionFactor)
-      return 0;
-
-    // Arredonda para baixo (Ex: 11 latas / 12 = 0.91 -> 0 caixas)
-    return Math.floor(unitProduct.stock / product.conversionFactor);
+    if (!unitProduct || !unitProduct.stock || !product.conversionFactor) return 0;
+    const availableUnits = (unitProduct.stock || 0) - (unitProduct.reserved_stock || 0);
+    return Math.floor(Math.max(0, availableUnits) / product.conversionFactor);
   }
-  return product.stock || 0;
+  return Math.max(0, (product.stock || 0) - (product.reserved_stock || 0));
 };
 
 // --- COMPONENTS ---
@@ -846,7 +849,7 @@ export const printReceipt = (sale, companyInfo) => {
 
 // --- MODULES ---
 
-const Dashboard = ({ sales, products, bankAccounts = [] }) => {
+const Dashboard = ({ sales, products, bankAccounts = [], onGoToReceivables }) => {
   // Estado para fechar o alerta de cobrança (Item 2)
   const [showDueAlert, setShowDueAlert] = useState(true);
 
@@ -909,25 +912,31 @@ const Dashboard = ({ sales, products, bankAccounts = [] }) => {
             <div>
               <h3 className="font-bold text-amber-800">Cobranças para Hoje!</h3>
               <p className="text-sm text-amber-700">
-                Existem {dueToday.length} contas de clientes marcadas para
-                pagamento hoje.
+                Existem {dueToday.length} contas de clientes marcadas para pagamento hoje.
               </p>
               <div className="mt-2 text-sm font-medium text-amber-900 bg-amber-100 p-2 rounded">
                 {dueToday.slice(0, 3).map((s) => (
-                  <div key={s.id}>
-                    • {s.clientName} - {formatCurrency(s.total)}
+                  <div
+                    key={s.id}
+                    className={onGoToReceivables ? "cursor-pointer hover:text-amber-700 underline" : ""}
+                    onClick={() => onGoToReceivables && onGoToReceivables(s.id)}
+                  >
+                    • {s.clientName} — {formatCurrency(s.total)}
                   </div>
                 ))}
-                {dueToday.length > 3 && (
-                  <div>...e mais {dueToday.length - 3}.</div>
-                )}
+                {dueToday.length > 3 && <div>...e mais {dueToday.length - 3}.</div>}
               </div>
+              {onGoToReceivables && (
+                <button
+                  onClick={() => onGoToReceivables()}
+                  className="mt-2 text-xs text-amber-700 underline font-bold hover:text-amber-900"
+                >
+                  Ver todos em Contas a Receber →
+                </button>
+              )}
             </div>
           </div>
-          <button
-            onClick={() => setShowDueAlert(false)}
-            className="text-amber-400 hover:text-amber-700 p-1"
-          >
+          <button onClick={() => setShowDueAlert(false)} className="text-amber-400 hover:text-amber-700 p-1">
             <X size={20} />
           </button>
         </div>
@@ -4107,6 +4116,25 @@ const FinancialReport = ({
     return acc + (s.cost || 0);
   }, 0);
 
+  // Diagnóstico: top produtos por CMV para detectar custos inflados por import de nota
+  const cmvByProduct = {};
+  validSales.forEach(s => {
+    if (!s.items) return;
+    s.items.forEach(item => {
+      const cost = Number(item.costPrice || item.cost) || 0;
+      const qty = Number(item.qty) || 0;
+      const total = cost * qty;
+      const key = item.name || item.id || 'Desconhecido';
+      if (!cmvByProduct[key]) cmvByProduct[key] = { name: key, totalCost: 0, totalQty: 0, unitCost: cost };
+      cmvByProduct[key].totalCost += total;
+      cmvByProduct[key].totalQty += qty;
+    });
+  });
+  const topCmvItems = Object.values(cmvByProduct)
+    .sort((a, b) => b.totalCost - a.totalCost)
+    .slice(0, 8);
+  const hasSuspiciousCmv = costOfGoodsSold > revenue * 1.5 && revenue > 0;
+
   const grossProfit = revenue - costOfGoodsSold - fees - lossesCost;
   const netProfit = grossProfit - opExpenses;
 
@@ -4395,6 +4423,27 @@ const FinancialReport = ({
                 -{formatCurrency(costOfGoodsSold)}
               </span>
             </div>
+            {hasSuspiciousCmv && (
+              <div className="bg-amber-50 border border-amber-300 rounded p-2 text-xs mt-1">
+                <p className="font-bold text-amber-800 flex items-center gap-1 mb-1">
+                  <AlertTriangle size={12} /> CMV anormal detectado — top produtos por custo:
+                </p>
+                <table className="w-full text-[11px]">
+                  <thead><tr className="text-amber-700 uppercase"><th className="text-left">Produto</th><th className="text-right">Custo unit.</th><th className="text-right">Qtd</th><th className="text-right">Total CMV</th></tr></thead>
+                  <tbody>
+                    {topCmvItems.map((it, i) => (
+                      <tr key={i} className={it.unitCost > 500 ? "text-red-700 font-bold" : "text-slate-700"}>
+                        <td className="py-0.5 pr-2 truncate max-w-[120px]">{it.name}</td>
+                        <td className="text-right">{formatCurrency(it.unitCost)}</td>
+                        <td className="text-right">{it.totalQty}</td>
+                        <td className="text-right">{formatCurrency(it.totalCost)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <p className="text-amber-700 mt-1">Produtos em vermelho têm custo unitário suspeito (&gt;R$ 500). Corrija no Estoque.</p>
+              </div>
+            )}
             <div className="flex justify-between text-sm">
               <span>(-) Taxas (Cartão/Pix)</span>
               <span className="text-red-500">-{formatCurrency(fees)}</span>
@@ -4775,112 +4824,114 @@ const Finance = ({
             <table className="w-full text-left text-sm">
               <thead className="bg-slate-50 text-slate-500 uppercase text-xs font-semibold">
                 <tr>
-                  <th className="p-4">Data/Hora</th>
-                  <th className="p-4">Cliente</th>
-                  <th className="p-4">Pagamento</th>
-                  <th className="p-4 text-center">NFe</th>
-                  <th className="p-4">Total</th>
-                  <th className="p-4 text-right">Ações</th>
+                  <th className="p-3">#</th>
+                  <th className="p-3">Data/Hora</th>
+                  <th className="p-3">Cliente</th>
+                  <th className="p-3">Pagamento</th>
+                  <th className="p-3 text-center">Status</th>
+                  <th className="p-3">Total</th>
+                  <th className="p-3 text-right">Ações</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {filteredSalesHistory.map((s) => (
-                  <tr key={s.id} className="hover:bg-slate-50">
-                    <td className="p-4 text-xs">
-                      <span className="font-bold block">
-                        {new Date(s.date).toLocaleDateString()}
-                      </span>
-                      <span className="text-slate-400">
-                        {new Date(s.date).toLocaleTimeString().slice(0, 5)}
-                      </span>
-                    </td>
-                    <td className="p-4 font-medium">{s.clientName}</td>
-                    <td className="p-4">
-                      <span
-                        className={`text-[10px] px-2 py-1 rounded font-bold ${s.paymentMethod === "PERCA" ? "bg-red-100 text-red-700" : "bg-slate-100 text-slate-600"}`}
-                      >
-                        {s.paymentMethod}{" "}
-                        {s.installments > 1 && `(${s.installments}x)`}
-                      </span>
-                    </td>
-                    <td className="p-4 text-center">
-                      {/* ÍCONE DE STATUS NFE */}
-                      {s.nfeStatus === "AUTORIZADA" ? (
-                        <span
-                          className="inline-flex items-center justify-center w-6 h-6 bg-green-100 text-green-600 rounded-full"
-                          title="Nota Emitida"
-                        >
-                          <CheckCircle size={14} />
+                {filteredSalesHistory.map((s) => {
+                  const isLoss = s.isLoss || s.paymentMethod === "PERCA";
+                  const isFiado = s.paymentMethod === "Fiado";
+                  const nfeOk = s.nfeStatus === "AUTORIZADA";
+                  const nfeRej = s.nfeStatus === "REJEITADA";
+                  return (
+                    <tr key={s.id} className={`hover:bg-slate-50 ${isLoss ? 'bg-red-50/40' : ''}`}>
+                      <td className="p-3 font-mono text-xs text-slate-400">#{String(s.id).slice(-6)}</td>
+                      <td className="p-3 text-xs">
+                        <span className="font-bold block">{new Date(s.date).toLocaleDateString('pt-BR')}</span>
+                        <span className="text-slate-400">{new Date(s.date).toLocaleTimeString('pt-BR').slice(0,5)}</span>
+                      </td>
+                      <td className="p-3 font-medium text-sm">{s.clientName || '—'}</td>
+                      <td className="p-3">
+                        <span className={`text-[10px] px-2 py-1 rounded font-bold ${
+                          isLoss ? 'bg-red-100 text-red-700' :
+                          isFiado ? 'bg-amber-100 text-amber-700' :
+                          'bg-slate-100 text-slate-600'}`}>
+                          {s.paymentMethod}{s.installments > 1 && ` (${s.installments}x)`}
                         </span>
-                      ) : s.nfeStatus === "REJEITADA" ? (
-                        <span
-                          className="inline-flex items-center justify-center w-6 h-6 bg-red-100 text-red-600 rounded-full"
-                          title="Nota Rejeitada"
-                        >
-                          <AlertTriangle size={14} />
-                        </span>
-                      ) : (
-                        <span
-                          className="inline-flex items-center justify-center w-6 h-6 bg-slate-100 text-slate-300 rounded-full"
-                          title="Sem Nota"
-                        >
-                          -
-                        </span>
-                      )}
-                    </td>
-                    <td className="p-4 font-bold text-slate-800">
-                      {formatCurrency(s.total)}
-                    </td>
-                    <td className="p-4 text-right flex justify-end gap-2">
-                      <button
-                        onClick={() => setViewSale(s)}
-                        className="text-indigo-600 hover:bg-indigo-50 p-2 rounded"
-                        title="Ver Detalhes"
-                      >
-                        <Eye size={18} />
-                      </button>
-                      {s.nfeStatus === "AUTORIZADA" ? (
-                        <button
-                          onClick={async () => {
-                            // Busca o PDF do banco em vez de reemitir
-                            const { data } = await supabase
-                              .from("fiscal_invoices")
-                              .select("pdf_base64, nfe_number")
-                              .eq("sale_id", String(s.id))
-                              .single();
-                            if (data?.pdf_base64) {
-                              downloadSmart(
-                                data.pdf_base64,
-                                `NFe-${data.nfe_number}`,
-                              );
-                            } else {
-                              alert("PDF não encontrado para esta nota.");
-                            }
-                          }}
-                          className="p-2 rounded text-green-600 bg-green-50 hover:bg-green-100 transition-colors"
-                          title="Baixar PDF da Nota Autorizada"
-                        >
-                          <Download size={18} />
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => onEmitNFe && onEmitNFe(s)}
-                          className="p-2 rounded text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
-                          title={
-                            s.nfeStatus === "REJEITADA"
-                              ? "Tentar Reemitir"
-                              : "Emitir Nota Fiscal"
-                          }
-                        >
-                          <FileText size={18} />
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      <td className="p-3 text-center">
+                        {nfeOk ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-[10px] font-bold">
+                            <CheckCircle size={10} /> NF-e OK
+                          </span>
+                        ) : nfeRej ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold">
+                            <AlertTriangle size={10} /> Rejeitada
+                          </span>
+                        ) : isFiado ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold">
+                            Fiado
+                          </span>
+                        ) : isLoss ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold">
+                            Perca
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10px] font-bold">
+                            Pago
+                          </span>
+                        )}
+                      </td>
+                      <td className="p-3 font-bold text-slate-800">{formatCurrency(s.total)}</td>
+                      <td className="p-3 text-right">
+                        <div className="flex justify-end gap-1">
+                          {/* Detalhes */}
+                          <button onClick={() => setViewSale(s)} className="p-1.5 rounded text-indigo-600 hover:bg-indigo-50" title="Ver Detalhes">
+                            <Eye size={16} />
+                          </button>
+                          {/* Reimprimir cupom não fiscal */}
+                          {onPrintReceipt && (
+                            <button onClick={() => onPrintReceipt(s)} className="p-1.5 rounded text-slate-500 hover:bg-slate-100" title="Reimprimir Cupom Não Fiscal">
+                              <Printer size={16} />
+                            </button>
+                          )}
+                          {/* NF-e / reemissão */}
+                          {nfeOk ? (
+                            <button
+                              onClick={async () => {
+                                const { data } = await supabase.from("fiscal_invoices").select("pdf_base64, nfe_number").eq("sale_id", String(s.id)).single();
+                                if (data?.pdf_base64) downloadSmart(data.pdf_base64, `NFe-${data.nfe_number}`);
+                                else alert("PDF não encontrado para esta nota.");
+                              }}
+                              className="p-1.5 rounded text-green-600 bg-green-50 hover:bg-green-100"
+                              title="Baixar PDF NF-e"
+                            >
+                              <Download size={16} />
+                            </button>
+                          ) : (
+                            !isLoss && (
+                              <>
+                                <button
+                                  onClick={() => onEmitNFe && onEmitNFe(s, '65')}
+                                  className="p-1.5 rounded text-purple-500 hover:bg-purple-50"
+                                  title={nfeRej ? "Reemitir NFC-e" : "Emitir NFC-e (Cupom)"}
+                                >
+                                  <FileText size={16} />
+                                </button>
+                                <button
+                                  onClick={() => onEmitNFe && onEmitNFe(s, '55')}
+                                  className="p-1.5 rounded text-blue-500 hover:bg-blue-50"
+                                  title={nfeRej ? "Reemitir NF-e" : "Emitir NF-e (Nota)"}
+                                >
+                                  <FileText size={16} />
+                                </button>
+                              </>
+                            )
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
                 {filteredSalesHistory.length === 0 && (
                   <tr>
-                    <td colSpan="6" className="p-8 text-center text-slate-400">
+                    <td colSpan="7" className="p-8 text-center text-slate-400">
                       Nenhuma venda encontrada com estes filtros.
                     </td>
                   </tr>
@@ -5872,6 +5923,12 @@ const SettingsManager = ({
         >
           Caixas
         </button>
+        <button
+          onClick={() => setActiveTab("module_permissions")}
+          className={`px-4 py-2 text-sm font-bold rounded-t-lg ${activeTab === "module_permissions" ? "bg-violet-600 text-white" : "bg-slate-100"}`}
+        >
+          Liberação de Módulos
+        </button>
       </div>
 
       {/* ABA GERAL (MANTENHA O CÓDIGO EXISTENTE AQUI) */}
@@ -6283,6 +6340,12 @@ const SettingsManager = ({
       {/* ABA PERFIS FISCAIS */}
       {activeTab === "tax_profiles" && (
         <TaxRulesManager showNotification={showNotification} />
+      )}
+
+      {activeTab === "module_permissions" && (
+        <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
+          <ModulePermissionsManager showNotification={showNotification} />
+        </div>
       )}
 
       {/* ABA CAIXAS */}
@@ -6873,6 +6936,8 @@ const StoreApp = ({ onLogout, updateStore }) => {
   const { currentStore: store, currentUser, tenantDB } = useTenant();
 
   const [activeModule, setActiveModule] = useState("pdv");
+  const [highlightReceivableId, setHighlightReceivableId] = useState(null);
+  const [transactionsInitialTab, setTransactionsInitialTab] = useState("entry");
   const [notification, setNotification] = useState(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
@@ -6960,6 +7025,41 @@ const StoreApp = ({ onLogout, updateStore }) => {
 
     return () => unsubscribe();
   }, [store?.id]);
+
+  // --- PERMISSÕES DE MÓDULO ---
+  const [modulePermsData, setModulePermsData] = useState({});
+
+  useEffect(() => {
+    if (!tenantDB) return;
+    tenantDB.firestore.getAll("module_permissions").then((docs) => {
+      const map = {};
+      for (const d of docs) map[d.id] = d;
+      setModulePermsData(map);
+    }).catch(() => {});
+  }, [tenantDB]);
+
+  const canAccess = useCallback(
+    (moduleId) => {
+      if (moduleId === "settings" && currentUser?.role === "admin") return true;
+      if (Object.keys(modulePermsData).length === 0) {
+        if (currentUser?.role === "admin") return true;
+        return moduleId === "pdv" || moduleId === "inventory";
+      }
+      const userKey = `user_${currentUser?.id}`;
+      const userDoc = modulePermsData[userKey];
+      if (userDoc?.modules && moduleId in userDoc.modules) {
+        return !!userDoc.modules[moduleId];
+      }
+      const groupKey = `group_${currentUser?.role}`;
+      const groupDoc = modulePermsData[groupKey];
+      if (groupDoc?.modules && moduleId in groupDoc.modules) {
+        return !!groupDoc.modules[moduleId];
+      }
+      if (currentUser?.role === "admin") return true;
+      return moduleId === "pdv" || moduleId === "inventory";
+    },
+    [modulePermsData, currentUser]
+  );
 
   // --- LISTENERS DO BANCO DE DADOS (USANDO TENANT DB) ---
   useEffect(() => {
@@ -7083,8 +7183,132 @@ const cleanUndefinedFields = (obj, path = '') => {
     return res;
 };
 
+  // Cria título em Contas a Receber (sem baixa de estoque definitiva)
+  const handleNewFiadoSale = async (sale) => {
+    try {
+      const batch = tenantDB.firestore.batch();
+      const { increment: inc, serverTimestamp: sts } = tenantDB.firestore.utils || {};
+      const receivableId = tenantDB.firestore.generateId('receivables');
+
+      batch.set('receivables', receivableId, {
+        id: receivableId,
+        clientId: sale.clientId || null,
+        clientName: sale.clientName || 'Consumidor Final',
+        saleDate: new Date().toISOString().split('T')[0],
+        dueDate: sale.dueDate || null,
+        amount: sale.total,
+        items: (sale.items || []).map(i => ({ id: i.id || i.originalId, name: i.name, qty: i.qty, price: i.price, cost: i.cost || 0 })),
+        reservedItems: (sale.items || []).map(i => ({ productId: i.originalId || i.id, qty: i.qty })),
+        paymentMethod: 'Fiado',
+        status: 'ABERTO',
+        sessionId: sale.sessionId || null,
+        history: [{ action: 'CRIADO', date: new Date().toISOString(), user: currentUser?.username || 'PDV' }],
+        createdAt: sts ? sts() : new Date().toISOString(),
+        createdBy: currentUser?.id || 'anon',
+      });
+
+      // Reserva estoque (não baixa definitivo)
+      sale.items.forEach(item => {
+        const prod = products.find(p => p.id === (item.originalId || item.id));
+        if (prod) {
+          if (prod.itemType === 'pack' && prod.parentId && prod.conversionFactor) {
+            const qtyToReserve = item.qty * prod.conversionFactor;
+            batch.update('products', prod.parentId, { reserved_stock: inc ? inc(qtyToReserve) : (prod.reserved_stock || 0) + qtyToReserve });
+          } else {
+            batch.update('products', prod.id, { reserved_stock: inc ? inc(item.qty) : (prod.reserved_stock || 0) + item.qty });
+          }
+        }
+      });
+
+      await batch.commit();
+      showNotification(`Fiado registrado para ${sale.clientName || 'cliente'}. Venda em Contas a Receber.`, 'info');
+    } catch (e) {
+      showNotification('Erro ao registrar fiado: ' + e.message, 'error');
+    }
+  };
+
+  // Finaliza venda fiada após confirmação de pagamento
+  const handleFinalizeFiadoSale = async (receivable, paymentMethod) => {
+    try {
+      const batch = tenantDB.firestore.batch();
+      const { increment: inc, serverTimestamp: sts } = tenantDB.firestore.utils || {};
+      const saleId = tenantDB.firestore.generateId('sales');
+      const now = new Date();
+
+      batch.set('sales', saleId, {
+        id: saleId,
+        date: now.toISOString(),
+        items: receivable.items || [],
+        total: receivable.amount,
+        cost: 0,
+        paymentMethod: paymentMethod,
+        clientId: receivable.clientId || null,
+        clientName: receivable.clientName || 'Consumidor Final',
+        receivableId: receivable.id,
+        createdAt: sts ? sts() : now.toISOString(),
+        userId: currentUser?.id || 'anon',
+        userName: currentUser?.username || 'Sistema',
+      });
+
+      // Baixa definitiva de estoque e devolve reserva
+      (receivable.reservedItems || []).forEach(ri => {
+        if (ri.productId && ri.qty) {
+          const prod = products.find(p => p.id === ri.productId);
+          batch.update('products', ri.productId, {
+            stock: inc ? inc(-ri.qty) : Math.max(0, (prod?.stock || 0) - ri.qty),
+            reserved_stock: inc ? inc(-ri.qty) : Math.max(0, (prod?.reserved_stock || 0) - ri.qty),
+          });
+        }
+      });
+
+      // Lançamento financeiro
+      const finId = tenantDB.firestore.generateId('financial_movements');
+      batch.set('financial_movements', finId, {
+        type: 'INCOME', category: 'Vendas',
+        description: `Recebimento Fiado #${receivable.id.slice(-6)} — ${receivable.clientName}`,
+        amount: receivable.amount,
+        date: now.toISOString().split('T')[0],
+        paymentMethod,
+        receivableId: receivable.id,
+        saleId,
+        userId: currentUser?.id || 'anon',
+        createdAt: sts ? sts() : now.toISOString(),
+      });
+
+      // Roteamento bancário
+      const routeData = await tenantDB.firestore.getById('financial_settings', 'routing');
+      if (routeData) {
+        const routeMap = { Dinheiro: 'dinheiro', Pix: 'pix', Crédito: 'cartao_credito', Débito: 'cartao_debito' };
+        const routeKey = routeMap[paymentMethod];
+        const targetAccountId = routeData[routeKey];
+        if (targetAccountId) {
+          batch.add('account_transactions', {
+            accountId: targetAccountId, type: 'IN', amount: receivable.amount,
+            description: `FIADO RECEBIDO #${receivable.id.slice(-6)} — ${receivable.clientName}`,
+            category: 'Vendas', date: now.toISOString(),
+            createdAt: sts ? sts() : now.toISOString(),
+          });
+          batch.update('bank_accounts', targetAccountId, { currentBalance: inc ? inc(receivable.amount) : 0 });
+        }
+      }
+
+      await batch.commit();
+    } catch (e) {
+      showNotification('Erro ao finalizar: ' + e.message, 'error');
+      throw e;
+    }
+  };
+
   // Função de Venda (com baixa de estoque e COMANDA)
   const handleNewSale = async (sale) => {
+    // Vendas fiadas vão para Contas a Receber, não para o fluxo normal
+    const isFiado = sale.paymentMethod === 'Fiado' ||
+      (sale.paymentMethods && sale.paymentMethods.some(e => e.method === 'Fiado' && e.amount >= sale.total * 0.99));
+    if (isFiado) {
+      await handleNewFiadoSale(sale);
+      return;
+    }
+
     try {
       const appId = String(store.id);
       const { data: nfeConfig } = await tenantDB.supabase
@@ -7746,30 +7970,33 @@ const cleanUndefinedFields = (obj, path = '') => {
         </div>
 
         <nav className="flex-1 py-4 space-y-1 overflow-y-auto overflow-x-hidden no-scrollbar">
-          {/* PAINEL (Só Admin) */}
-          {currentUser?.role === "admin" && (
+          {canAccess("dashboard") && (
             <MenuButton id="dashboard" icon={BarChart3} label="Dashboard" />
           )}
-
-          {/* PDV (Todos) */}
-          <MenuButton id="pdv" icon={ShoppingCart} label="PDV & Vendas" />
-
-          {/* ESTOQUE (Todos, mas Caixa vê limitado lá dentro depois) */}
-          <MenuButton id="inventory" icon={Package} label="Estoque (WMS)" />
-
-          {/* RESTO (Só Admin) */}
-          {currentUser?.role === "admin" && (
-            <>
-              <MenuButton id="clients" icon={Users} label="Parceiros" />
-              <MenuButton
-                id="transactions"
-                icon={ClipboardList}
-                label="Notas & Gastos"
-              />
-              <MenuButton id="finance" icon={DollarSign} label="Financeiro" />
-              <MenuButton id="priceGroups" icon={Tags} label="Precificação" />
-              <MenuButton id="settings" icon={Settings} label="Configurações" />
-            </>
+          {canAccess("pdv") && (
+            <MenuButton id="pdv" icon={ShoppingCart} label="PDV & Vendas" />
+          )}
+          {canAccess("inventory") && (
+            <MenuButton id="inventory" icon={Package} label="Estoque (WMS)" />
+          )}
+          {canAccess("clients") && (
+            <MenuButton id="clients" icon={Users} label="Parceiros" />
+          )}
+          {canAccess("transactions") && (
+            <MenuButton
+              id="transactions"
+              icon={ClipboardList}
+              label="Entradas & Contas"
+            />
+          )}
+          {canAccess("finance") && (
+            <MenuButton id="finance" icon={DollarSign} label="Financeiro" />
+          )}
+          {canAccess("priceGroups") && (
+            <MenuButton id="priceGroups" icon={Tags} label="Precificação" />
+          )}
+          {canAccess("settings") && (
+            <MenuButton id="settings" icon={Settings} label="Configurações" />
           )}
         </nav>
 
@@ -7847,15 +8074,40 @@ const cleanUndefinedFields = (obj, path = '') => {
 
         <div className="flex-1 overflow-auto p-4 md:p-6 bg-slate-100">
           <div className="max-w-7xl mx-auto animate-in fade-in duration-300">
-            {activeModule === "dashboard" && (
+            {!canAccess(activeModule) && (
+              <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4 text-center">
+                <div className="w-20 h-20 bg-red-100 rounded-full flex items-center justify-center">
+                  <Shield className="text-red-500" size={36} />
+                </div>
+                <h2 className="text-2xl font-bold text-slate-700">
+                  Acesso Negado
+                </h2>
+                <p className="text-slate-500 max-w-sm">
+                  Você não tem permissão para acessar este módulo. Fale com o
+                  administrador do sistema.
+                </p>
+                <button
+                  onClick={() => setActiveModule("pdv")}
+                  className="mt-2 px-5 py-2 bg-indigo-600 text-white rounded-lg font-bold hover:bg-indigo-700"
+                >
+                  Ir para o PDV
+                </button>
+              </div>
+            )}
+            {canAccess(activeModule) && activeModule === "dashboard" && (
               <Dashboard
                 sales={realtimeSales}
                 products={products}
                 bankAccounts={bankAccounts}
                 storeConfig={store}
+                onGoToReceivables={(id) => {
+                  setHighlightReceivableId(id || null);
+                  setTransactionsInitialTab("receivable");
+                  setActiveModule("transactions");
+                }}
               />
             )}
-            {activeModule === "pdv" && (
+            {canAccess(activeModule) && activeModule === "pdv" && (
               <PDV
                 products={products}
                 groups={store.priceGroups || []}
@@ -7900,28 +8152,31 @@ const cleanUndefinedFields = (obj, path = '') => {
                 storeConfig={store}
               />
             )}
-            {activeModule === "clients" && (
+            {canAccess(activeModule) && activeModule === "clients" && (
               <ClientsManager
                 storeConfig={store}
                 showNotification={showNotification}
               />
             )}
-            {activeModule === "transactions" && (
+            {canAccess(activeModule) && activeModule === "transactions" && (
               <Transactions
                 products={products}
                 priceGroups={store.priceGroups || []}
                 onSaveEntry={() => {}}
-                storeConfig={store} // <--- ADICIONAR ESTA LINHA
+                storeConfig={store}
                 currentUser={currentUser}
+                initialTab={transactionsInitialTab}
+                onFinalizeSale={handleFinalizeFiadoSale}
+                highlightId={highlightReceivableId}
               />
             )}
-            {activeModule === "priceGroups" && (
+            {canAccess(activeModule) && activeModule === "priceGroups" && (
               <PriceGroups
                 products={products}
                 showNotification={showNotification}
               />
             )}
-            {activeModule === "finance" && (
+            {canAccess(activeModule) && activeModule === "finance" && (
               <Finance
                 sales={realtimeSales}
                 transactions={realtimeTransactions}
@@ -7940,7 +8195,7 @@ const cleanUndefinedFields = (obj, path = '') => {
                 bankAccounts={bankAccounts}
               />
             )}
-            {activeModule === "inventory" && (
+            {canAccess(activeModule) && activeModule === "inventory" && (
               <InventoryWMS
                 storeConfig={store}
                 products={products}
@@ -7949,7 +8204,7 @@ const cleanUndefinedFields = (obj, path = '') => {
                 showNotification={showNotification}
               />
             )}
-            {activeModule === "settings" && (
+            {canAccess(activeModule) && activeModule === "settings" && (
               <SettingsManager
                 users={store.users}
                 setUsers={(u) => updateStore({ ...store, users: u })}

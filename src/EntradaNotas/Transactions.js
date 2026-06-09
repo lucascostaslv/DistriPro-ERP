@@ -1,16 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { PlusCircle, FileText, ScrollText, Minus, Save, X, Calendar, DollarSign, Tag, CheckSquare, Landmark} from 'lucide-react';
-import EntradaNotas from './EntradaNotas'; 
+import { PlusCircle, FileText, ScrollText, Minus, Save, X, Calendar, DollarSign, Tag, CheckSquare, Landmark, ClipboardList } from 'lucide-react';
+import EntradaNotas from './EntradaNotas';
 import AccountsPayable from './AccountsPayable';
-import FiscalInvoices from './FiscalInvoices'; 
-import { useTenant } from '../contexts/TenantContext'; 
+import FiscalInvoices from './FiscalInvoices';
+import AccountsReceivable from '../AccountsReceivable';
+import { useTenant } from '../contexts/TenantContext';
 
 const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
 
-const Transactions = ({ showNotification, products }) => {
+const Transactions = ({ showNotification, products, initialTab, onFinalizeSale, highlightId }) => {
   const { tenantDB, currentUser, currentStore } = useTenant();
 
-  const [activeTab, setActiveTab] = useState('entry'); // Controle das abas restaurado!
+  const [activeTab, setActiveTab] = useState(initialTab || 'entry');
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
   
   const [categories, setCategories] = useState([]);
@@ -146,6 +147,9 @@ const Transactions = ({ showNotification, products }) => {
           <button onClick={() => setActiveTab('payable')} className={`px-6 py-4 font-bold text-sm flex items-center gap-2 ${activeTab === 'payable' ? 'border-b-2 border-red-600 text-red-600' : 'text-slate-500 hover:bg-slate-50'}`}>
               <Calendar size={18}/> Contas a Pagar
           </button>
+          <button onClick={() => setActiveTab('receivable')} className={`px-6 py-4 font-bold text-sm flex items-center gap-2 ${activeTab === 'receivable' ? 'border-b-2 border-green-600 text-green-600' : 'text-slate-500 hover:bg-slate-50'}`}>
+              <ClipboardList size={18}/> Contas a Receber
+          </button>
           <button onClick={() => setActiveTab('invoices')} className={`px-6 py-4 font-bold text-sm flex items-center gap-2 ${activeTab === 'invoices' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-slate-500 hover:bg-slate-50'}`}>
               <FileText size={18}/> Notas Fiscais
           </button>
@@ -160,6 +164,13 @@ const Transactions = ({ showNotification, products }) => {
           {/* O storeConfig continua sendo passado provisoriamente para EntradaNotas e Invoices para não quebrá-los */}
           {activeTab === 'entry' && <EntradaNotas storeConfig={currentStore} showNotification={showNotification} products={products}/>}
           {activeTab === 'payable' && <AccountsPayable products={products} />}
+          {activeTab === 'receivable' && (
+            <AccountsReceivable
+              showNotification={showNotification}
+              onFinalizeSale={onFinalizeSale}
+              highlightId={highlightId}
+            />
+          )}
           {activeTab === 'invoices' && <FiscalInvoices storeConfig={currentStore} currentUser={currentUser} showNotification={showNotification || alert}/>}
       </div>
 
