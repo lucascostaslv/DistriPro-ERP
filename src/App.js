@@ -71,6 +71,7 @@ import {
 import forge from "node-forge";
 import logo from "./img/LOGO-MAQUINA-PNG.png";
 import logoWhite from "./img/logo-maquina-texto-branco.png";
+import logoDistripro from "./img/logo-distripro.png";
 import * as firebase from "./firebase";
 import EntradaNotas from "./EntradaNotas/EntradaNotas";
 import Transactions from "./EntradaNotas/Transactions";
@@ -318,10 +319,7 @@ const LoginScreen = ({ onLogin, onSuperAdminLogin, showNotification }) => {
     <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
       <div className="bg-white w-full max-w-md rounded-lg shadow-2xl p-8">
         <div className="text-center mb-8">
-          <div className="inline-flex p-4 bg-indigo-100 rounded-full text-indigo-600 mb-4">
-            <Package size={32} />
-          </div>
-          <h1 className="text-2xl font-bold text-slate-800">DistriPro ERP</h1>
+          <img src={logoDistripro} alt="DistriPro" className="h-24 w-auto mx-auto mb-4 object-contain" />
           <p className="text-slate-500">Acesso ao Sistema</p>
         </div>
 
@@ -2753,10 +2751,19 @@ const PDV = ({
                     {s.items.length} itens
                   </div>
                 </div>
-                <div className="text-right">
+                <div className="flex items-center gap-2">
                   <span className="text-[10px] bg-slate-100 px-2 py-1 rounded font-bold text-slate-600">
                     {s.paymentMethod}
                   </span>
+                  {!s.isLoss && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); printReceipt(s, companyInfo); }}
+                      className="p-1.5 rounded text-slate-500 hover:bg-slate-100"
+                      title="Reimprimir Cupom"
+                    >
+                      <Printer size={15} />
+                    </button>
+                  )}
                 </div>
               </div>
             ))}
@@ -7948,25 +7955,32 @@ const cleanUndefinedFields = (obj, path = '') => {
           )}
         </button>
 
-        <div
-          className={`p-4 border-b border-slate-800 flex flex-col items-center justify-center transition-all duration-300 ${isSidebarCollapsed ? "h-20" : "h-32"}`}
-        >
-          {isSidebarCollapsed ? (
-            <div className="p-2 bg-indigo-600 rounded-lg animate-in fade-in zoom-in duration-300">
-              <Package className="text-white" size={24} />
-            </div>
-          ) : (
-            <div className="flex flex-col items-center animate-in fade-in slide-in-from-left duration-300">
-              <div className="flex items-center gap-2 text-xl font-bold text-white">
-                <Package className="text-indigo-500" />
-                <span>DistriPro</span>
-                <Beer className="text-amber-500" size={20} />
+        <div className={`relative border-b border-slate-700/50 flex items-center justify-center overflow-hidden transition-all duration-300 ${isSidebarCollapsed ? "h-20" : "h-36"}`}>
+          {/* glow de fundo */}
+          <div className="absolute inset-0 bg-gradient-to-b from-indigo-950/60 to-slate-900/0 pointer-events-none" />
+          <div className="absolute top-0 left-1/2 -translate-x-1/2 w-40 h-20 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
+
+          <div className="relative w-full">
+            {isSidebarCollapsed ? (
+              <div className="w-12 h-12 overflow-hidden flex items-center justify-center mx-auto">
+                <img
+                  src={logoDistripro}
+                  alt="D"
+                  className="h-full w-auto max-w-none"
+                  style={{ transform: "scale(2.2) translateX(-22%)", filter: "invert(1)" }}
+                />
               </div>
-              <span className="text-xs bg-indigo-600 px-1.5 py-0.5 rounded text-white mt-2">
-                ERP Enterprise
-              </span>
-            </div>
-          )}
+            ) : (
+              <div className="w-full flex items-center justify-center py-3">
+                <img
+                  src={logoDistripro}
+                  alt="DistriPro"
+                  className="h-16 w-auto object-contain"
+                  style={{ filter: "invert(1)" }}
+                />
+              </div>
+            )}
+          </div>
         </div>
 
         <nav className="flex-1 py-4 space-y-1 overflow-y-auto overflow-x-hidden no-scrollbar">

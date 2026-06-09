@@ -49,8 +49,33 @@ export default function AccountsReceivable({ showNotification, onFinalizeSale, h
     if (!tenantDB) return;
     setLoading(true);
     try {
-      const data = await tenantDB.firestore.getAll('receivables');
-      setReceivables(data || []);
+      const [newRecs, fiadoSales] = await Promise.all([
+        tenantDB.firestore.getAll('receivables'),
+        tenantDB.firestore.getAll('sales', [
+          tenantDB.firestore.utils.where('paymentMethod', '==', 'Fiado'),
+        ]),
+      ]);
+
+      const legacyRecs = fiadoSales
+        .filter(s =>
+          s.fiadoStatus !== 'RECEBIDO' &&
+          s.fiadoStatus !== 'CANCELADO' &&
+          (s.total || 0) > 0
+        )
+        .map(s => ({
+          id: `legacy_${s.id}`,
+          _legacy: true,
+          _saleId: s.id,
+          clientName: s.clientName || 'Consumidor Final',
+          amount: s.total || 0,
+          dueDate: s.dueDate || null,
+          status: s.fiadoStatus || 'ABERTO',
+          saleDate: s.date?.split?.('T')[0] || null,
+          items: s.items || [],
+          history: [],
+        }));
+
+      setReceivables([...(newRecs || []), ...legacyRecs]);
     } catch (e) {
       showNotification('Erro ao carregar: ' + e.message, 'error');
     }
@@ -92,24 +117,28 @@ export default function AccountsReceivable({ showNotification, onFinalizeSale, h
     if (!rec) return;
     try {
       const now = new Date().toISOString();
-      const log = [...(rec.history || []), {
-        action: 'RECEBIDO',
-        date: now,
-        user: currentUser?.username || 'Sistema',
-        note: `Recebido via ${receiveMethod}`,
-      }];
 
-      await tenantDB.firestore.update('receivables', rec.id, {
-        status: 'RECEBIDO',
-        receivedAt: now,
-        receivedAmount: rec.amount,
-        paymentMethod: receiveMethod,
-        history: log,
-      });
-
-      // Finaliza a venda definitiva no sistema
-      if (onFinalizeSale) {
-        await onFinalizeSale(rec, receiveMethod);
+      if (rec._legacy) {
+        await tenantDB.firestore.update('sales', rec._saleId, {
+          fiadoStatus: 'RECEBIDO',
+          fiadoReceivedAt: now,
+          fiadoPaymentMethod: receiveMethod,
+        });
+      } else {
+        const log = [...(rec.history || []), {
+          action: 'RECEBIDO',
+          date: now,
+          user: currentUser?.username || 'Sistema',
+          note: `Recebido via ${receiveMethod}`,
+        }];
+        await tenantDB.firestore.update('receivables', rec.id, {
+          status: 'RECEBIDO',
+          receivedAt: now,
+          receivedAmount: rec.amount,
+          paymentMethod: receiveMethod,
+          history: log,
+        });
+        if (onFinalizeSale) await onFinalizeSale(rec, receiveMethod);
       }
 
       showNotification(`Recebimento de ${fmt(rec.amount)} confirmado!`, 'success');
@@ -125,14 +154,18 @@ export default function AccountsReceivable({ showNotification, onFinalizeSale, h
     if (!editDueDate) return showNotification('Data obrigatória', 'error');
     const rec = editModal.rec;
     const now = new Date().toISOString();
-    const log = [...(rec.history || []), {
-      action: 'VENCIMENTO_ALTERADO',
-      date: now,
-      user: currentUser?.username || 'Sistema',
-      note: `Vencimento: ${fmtDate(rec.dueDate)} → ${fmtDate(editDueDate)}`,
-    }];
     try {
-      await tenantDB.firestore.update('receivables', rec.id, { dueDate: editDueDate, history: log });
+      if (rec._legacy) {
+        await tenantDB.firestore.update('sales', rec._saleId, { dueDate: editDueDate });
+      } else {
+        const log = [...(rec.history || []), {
+          action: 'VENCIMENTO_ALTERADO',
+          date: now,
+          user: currentUser?.username || 'Sistema',
+          note: `Vencimento: ${fmtDate(rec.dueDate)} → ${fmtDate(editDueDate)}`,
+        }];
+        await tenantDB.firestore.update('receivables', rec.id, { dueDate: editDueDate, history: log });
+      }
       showNotification('Vencimento atualizado.', 'success');
       setEditModal(null);
       load();
@@ -154,7 +187,11 @@ export default function AccountsReceivable({ showNotification, onFinalizeSale, h
       note: `${penaltyType === 'percent' ? `${val}%` : fmt(val)} → novo valor: ${fmt(newAmount)}`,
     }];
     try {
-      await tenantDB.firestore.update('receivables', rec.id, { amount: newAmount, history: log });
+      if (rec._legacy) {
+        await tenantDB.firestore.update('sales', rec._saleId, { total: newAmount });
+      } else {
+        await tenantDB.firestore.update('receivables', rec.id, { amount: newAmount, history: log });
+      }
       showNotification(`Multa aplicada. Novo valor: ${fmt(newAmount)}`, 'success');
       setEditModal(null);
       load();
@@ -164,29 +201,32 @@ export default function AccountsReceivable({ showNotification, onFinalizeSale, h
   // ── CANCELAR TÍTULO ────────────────────────────────────────────────────────
   const handleCancel = async () => {
     const rec = editModal.rec;
-    if (!window.confirm(`Cancelar título de ${fmt(rec.amount)} para ${rec.clientName}? O estoque reservado será devolvido.`)) return;
+    if (!window.confirm(`Cancelar título de ${fmt(rec.amount)} para ${rec.clientName}?`)) return;
     const now = new Date().toISOString();
-    const log = [...(rec.history || []), {
-      action: 'CANCELADO',
-      date: now,
-      user: currentUser?.username || 'Sistema',
-    }];
     try {
-      await tenantDB.firestore.update('receivables', rec.id, { status: 'CANCELADO', history: log });
-      // Devolve estoque reservado
-      if (rec.reservedItems && rec.reservedItems.length > 0) {
-        const batch = tenantDB.firestore.batch();
-        const { increment } = tenantDB.firestore.utils || {};
-        rec.reservedItems.forEach(ri => {
-          if (ri.productId && ri.qty) {
-            batch.update('products', ri.productId, {
-              reserved_stock: increment ? increment(-ri.qty) : 0,
-            });
-          }
-        });
-        await batch.commit();
+      if (rec._legacy) {
+        await tenantDB.firestore.update('sales', rec._saleId, { fiadoStatus: 'CANCELADO' });
+      } else {
+        const log = [...(rec.history || []), {
+          action: 'CANCELADO',
+          date: now,
+          user: currentUser?.username || 'Sistema',
+        }];
+        await tenantDB.firestore.update('receivables', rec.id, { status: 'CANCELADO', history: log });
+        if (rec.reservedItems && rec.reservedItems.length > 0) {
+          const batch = tenantDB.firestore.batch();
+          const { increment } = tenantDB.firestore.utils || {};
+          rec.reservedItems.forEach(ri => {
+            if (ri.productId && ri.qty) {
+              batch.update('products', ri.productId, {
+                reserved_stock: increment ? increment(-ri.qty) : 0,
+              });
+            }
+          });
+          await batch.commit();
+        }
       }
-      showNotification('Título cancelado e estoque liberado.', 'success');
+      showNotification('Título cancelado.', 'success');
       setEditModal(null);
       load();
     } catch (e) { showNotification('Erro: ' + e.message, 'error'); }
