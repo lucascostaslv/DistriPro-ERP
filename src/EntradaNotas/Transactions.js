@@ -66,6 +66,16 @@ const Transactions = ({ showNotification, products, initialTab, onFinalizeSale, 
           return;
       }
 
+      if (calculatedStatus === 'PAGO' && expenseForm.accountId) {
+          const selectedAccount = bankAccounts.find(a => a.id === expenseForm.accountId);
+          const currentBalance = Number(selectedAccount?.currentBalance) || 0;
+          if (currentBalance < amountNum) {
+              const msg = `Saldo insuficiente em "${selectedAccount?.name || 'conta selecionada'}". Saldo atual: ${formatCurrency(currentBalance)}, despesa: ${formatCurrency(amountNum)}.`;
+              if (showNotification) showNotification(msg, 'error'); else alert(msg);
+              return;
+          }
+      }
+
       try {
           const batch = tenantDB.firestore.batch(); 
 

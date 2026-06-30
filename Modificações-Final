@@ -1,0 +1,11 @@
+Apagar os dados do dashboard, resetar. Menos os produtos.
+Limpar a quantidade dos itens do estoque, apenas a quantidade.
+Nas finanças, tirar lucro liquido a audioria.
+No relatório, dados vindo NAN.
+Apenas permitir cadastro de despesas, caso o saldo seja superior ou igual, alertar caso contrário.
+Adicionar novo modulo para reajuste de saldo, sem que seja atrelado uma transferência, para inserir valores sem registro.
+
+------------------------
+Cadastrar a nova api de emissão de notas **Bling**
+Refatorar tudo, pegar as funcionalidades e fazer tudo de novo, refatorado.
+

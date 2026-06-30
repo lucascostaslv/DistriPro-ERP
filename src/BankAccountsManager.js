@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   Building2, Wallet, Plus, ArrowUpRight, ArrowDownRight,
   Search, CheckCircle, X, Landmark, FileText, Trash2, Settings, Filter, User, ArrowLeftRight,
-  CheckSquare, Square, Edit2
+  CheckSquare, Square, Edit2, SlidersHorizontal
 } from 'lucide-react';
 import { useTenant } from './contexts/TenantContext'; 
 import { where } from 'firebase/firestore';
@@ -47,6 +47,11 @@ const BankAccountsManager = ({ showNotification }) => {
   const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
   const [transferData, setTransferData] = useState({ fromAccountId: '', toAccountId: '', amount: '', description: '' });
   const [isProcessingTransfer, setIsProcessingTransfer] = useState(false);
+
+  // Estados do Modal de Reajuste de Saldo (correção direta, sem registro no extrato)
+  const [isAdjustModalOpen, setIsAdjustModalOpen] = useState(false);
+  const [adjustData, setAdjustData] = useState({ accountId: '', newBalance: '' });
+  const [isProcessingAdjust, setIsProcessingAdjust] = useState(false);
 
   // 1. Carregar Configurações de Roteamento (Usando a DAL)
   useEffect(() => {
@@ -213,6 +218,35 @@ const BankAccountsManager = ({ showNotification }) => {
       }
   };
 
+  // 6. Reajuste direto de saldo (correção pontual, NÃO gera transferência nem lançamento no extrato)
+  const handleAdjustBalance = async () => {
+      if (isProcessingAdjust) return;
+      const { accountId, newBalance } = adjustData;
+
+      if (!accountId) return showNotification('Selecione a conta.', 'error');
+      if (newBalance === '') return showNotification('Informe o novo saldo.', 'error');
+
+      const newBalanceNum = Number(newBalance);
+      if (isNaN(newBalanceNum)) return showNotification('Valor inválido.', 'error');
+
+      setIsProcessingAdjust(true);
+      try {
+          // Atualiza somente o saldo da conta, sem criar transferência ou lançamento no extrato
+          await tenantDB.firestore.update('bank_accounts', accountId, {
+              currentBalance: newBalanceNum
+          });
+
+          showNotification('Saldo reajustado com sucesso!', 'success');
+          setIsAdjustModalOpen(false);
+          setAdjustData({ accountId: '', newBalance: '' });
+      } catch (error) {
+          console.error(error);
+          showNotification('Erro ao reajustar saldo.', 'error');
+      } finally {
+          setIsProcessingAdjust(false);
+      }
+  };
+
   // --- INÍCIO DOS FILTROS ATUALIZADOS ---
   const [operatorFilter, setOperatorFilter] = useState('');
   const [dateFilter, setDateFilter] = useState({ start: '', end: '' }); // <-- NOVO ESTADO DE DATA
@@ -362,12 +396,19 @@ const BankAccountsManager = ({ showNotification }) => {
                         >
                             <Plus size={18}/>
                         </button>
-                        <button 
+                        <button
                             onClick={() => setIsTransferModalOpen(true)}
                             className="bg-slate-100 text-slate-600 p-2 rounded hover:bg-slate-200 transition-colors"
                             title="Transferir entre contas"
                         >
                             <ArrowLeftRight size={18}/>
+                        </button>
+                        <button
+                            onClick={() => setIsAdjustModalOpen(true)}
+                            className="bg-amber-50 text-amber-600 p-2 rounded hover:bg-amber-100 transition-colors"
+                            title="Reajuste de Saldo"
+                        >
+                            <SlidersHorizontal size={18}/>
                         </button>
                     </div>
                 </div>
@@ -869,6 +910,61 @@ const BankAccountsManager = ({ showNotification }) => {
                             className={`px-6 py-2 text-white rounded font-bold text-sm flex items-center gap-2 ${isProcessingTransfer ? 'bg-slate-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'}`}
                         >
                             <ArrowLeftRight size={16}/> {isProcessingTransfer ? 'Processando...' : 'Confirmar Transferência'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {isAdjustModalOpen && (
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+                    <div className="flex justify-between items-center p-4 border-b bg-slate-50">
+                        <h2 className="font-bold text-slate-800 flex items-center gap-2">
+                            <SlidersHorizontal size={18} className="text-amber-600"/> Reajuste de Saldo
+                        </h2>
+                        <button onClick={() => setIsAdjustModalOpen(false)} className="text-slate-400 hover:text-slate-600"><X size={20}/></button>
+                    </div>
+
+                    <div className="p-4 space-y-4">
+                        <p className="text-xs text-slate-500 bg-amber-50 border border-amber-200 rounded p-2">
+                            Corrige o saldo da conta diretamente, sem gerar transferência nem lançamento no extrato. Use apenas para ajustes pontuais (ex: divergência de saldo inicial).
+                        </p>
+
+                        <div>
+                            <label className="text-xs font-bold text-slate-500 uppercase">Conta</label>
+                            <select
+                                className="w-full border p-2 rounded text-sm mt-1 focus:ring-2 focus:ring-amber-500 outline-none bg-white"
+                                value={adjustData.accountId}
+                                onChange={e => setAdjustData({...adjustData, accountId: e.target.value})}
+                            >
+                                <option value="">-- Selecione --</option>
+                                {accounts.map(acc => (
+                                    <option key={acc.id} value={acc.id}>{acc.name} (Saldo Atual: {formatCurrency(acc.currentBalance)})</option>
+                                ))}
+                            </select>
+                        </div>
+
+                        <div>
+                            <label className="text-xs font-bold text-slate-500 uppercase">Novo Saldo Correto (R$)</label>
+                            <input
+                                type="number" step="0.01"
+                                className="w-full border p-2 rounded text-sm mt-1 focus:ring-2 focus:ring-amber-500 outline-none"
+                                placeholder="0.00"
+                                value={adjustData.newBalance}
+                                onChange={e => setAdjustData({...adjustData, newBalance: e.target.value})}
+                            />
+                        </div>
+                    </div>
+
+                    <div className="p-4 border-t bg-slate-50 flex justify-end gap-2">
+                        <button onClick={() => setIsAdjustModalOpen(false)} className="px-4 py-2 text-slate-600 font-bold hover:bg-slate-200 rounded text-sm">Cancelar</button>
+                        <button
+                            onClick={handleAdjustBalance}
+                            disabled={isProcessingAdjust}
+                            className={`px-6 py-2 text-white rounded font-bold text-sm flex items-center gap-2 ${isProcessingAdjust ? 'bg-slate-400 cursor-not-allowed' : 'bg-amber-600 hover:bg-amber-700'}`}
+                        >
+                            <SlidersHorizontal size={16}/> {isProcessingAdjust ? 'Salvando...' : 'Confirmar Reajuste'}
                         </button>
                     </div>
                 </div>
