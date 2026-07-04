@@ -3,7 +3,7 @@ import {
   FileText, Search, Filter, Download, Ban, 
   Edit3, Printer, AlertTriangle, CheckCircle, Calendar, Trash2
 } from 'lucide-react';
-import { NFeService } from '../utils/NFeService';
+import { BlingService } from '../utils/BlingService';
 import { useTenant } from '../contexts/TenantContext';
 
 // Função auxiliar para baixar Base64
@@ -127,26 +127,23 @@ const FiscalInvoices = ({ storeConfig, showNotification, currentUser}) => {
 
   useEffect(() => { fetchInvoices(); }, [tenantDB]); // Recarrega se mudar a loja
 
-  // Função auxiliar para interpretar a resposta da API BrasilNFe
+  // Função auxiliar para interpretar a resposta da API do Bling
   const handleApiResponse = (response, successTitle, errorTitle) => {
-    const hasErrorField = response.Error !== null && response.Error !== undefined;
-    const isRejection = response.DsMotivo && response.DsMotivo.toLowerCase().includes('rejeicao');
-    
-    if (hasErrorField || isRejection) {
+    if (response?.error) {
         setFeedbackData({
             type: 'error',
             title: errorTitle,
-            message: response.Error || response.DsMotivo || 'A SEFAZ rejeitou a solicitação.',
-            details: `Cód: ${response.CodStatusRespostaSefaz || response.Status}`
+            message: response.error.message || response.error.description || 'O Bling rejeitou a solicitação.',
+            details: response.error.fields ? JSON.stringify(response.error.fields) : null
         });
         return false;
-    } 
+    }
 
     setFeedbackData({
         type: 'success',
         title: successTitle,
-        message: response.DsMotivo || 'Operação realizada com sucesso!',
-        details: response.DsEvento ? `Evento: ${response.DsEvento}` : null
+        message: 'Operação realizada com sucesso!',
+        details: null
     });
     return true;
   };
@@ -154,49 +151,27 @@ const FiscalInvoices = ({ storeConfig, showNotification, currentUser}) => {
   const executeAction = async () => {
     if (!actionModal) return;
     const { type, invoice } = actionModal;
-    
-    const { data: config } = await tenantDB.supabase.query('fiscal_settings').single();
 
-    if (!config?.api_token) return showNotification('Token não configurado.', 'error');
-    const currentEnv = config.environment || 'HOMOLOG';
+    if (!invoice.bling_nfe_id) {
+        return setFeedbackData({ type: 'error', title: 'Ação indisponível', message: 'Esta nota não possui o ID do Bling associado (emitida antes da integração atual?).' });
+    }
+
+    const { data: blingConfig } = await tenantDB.supabase.query('fiscal_bling_settings').single();
+    if (!blingConfig?.connected) return showNotification('Bling não conectado.', 'error');
 
     if (justification.length < 15) return showNotification('Mínimo 15 caracteres.', 'warning');
 
     try {
-        let result;
+        const accessToken = await BlingService.ensureValidToken(tenantDB, blingConfig);
+        const tipoDocumento = invoice.nfe_model === '55' ? 'nfe' : 'nfce';
 
         if (type === 'CANCEL') {
-            let protocolToUse = invoice.nfe_protocol;
-            if (!protocolToUse && invoice.xml_content) {
-                try {
-                    const xmlStr = atob(invoice.xml_content.includes(',') ? invoice.xml_content.split(',')[1] : invoice.xml_content);
-                    const match = xmlStr.match(/<nProt>(\d+)<\/nProt>/);
-                    if (match && match[1]) protocolToUse = match[1];
-                } catch (e) {}
-            }
-
-            if (!protocolToUse) {
-                setFeedbackData({ type: 'error', title: 'Impossível Cancelar', message: 'Protocolo não encontrado.', details: 'Nota sem protocolo no banco ou XML.' });
-                return;
-            }
-            
             showNotification('Processando cancelamento...', 'info');
-            result = await NFeService.cancel(config.api_token, invoice.nfe_key, protocolToUse, justification);
-            
+            const result = await BlingService.cancelarNota(tipoDocumento, accessToken, invoice.bling_nfe_id, justification);
+
             const success = handleApiResponse(result, 'Nota Cancelada!', 'Falha no Cancelamento');
             if (success) {
-
                 await tenantDB.supabase.update('fiscal_invoices', invoice.id, { status: 'CANCELADA' });
-            }
-        } 
-        else if (type === 'CORRECT') {
-            showNotification('Enviando correção...', 'info');
-            result = await NFeService.correct(config.api_token, invoice.nfe_key, justification, currentEnv);
-            
-            const success = handleApiResponse(result, 'CC-e Registrada!', 'Falha na Correção');
-            if (success) {
-
-                await tenantDB.supabase.update('fiscal_invoices', invoice.id, { has_correction: true });
             }
         }
 
@@ -393,16 +368,19 @@ const FiscalInvoices = ({ storeConfig, showNotification, currentUser}) => {
                             <div className="flex justify-end gap-1">
                                 {/* Ações Fiscais (Só se Autorizada e não cancelada) */}
                                 {inv.status && (inv.status.includes('Autorizado') || inv.status === 'AUTORIZADA') && !inv.status.includes('CANCEL') && (
-                                    <>
-                                        <button onClick={() => setActionModal({type:'CORRECT', invoice:inv})} className="p-2 text-blue-600 hover:bg-blue-50 rounded border border-transparent hover:border-blue-100" title="Carta de Correção"><Edit3 size={16}/></button>
-                                        <button onClick={() => setActionModal({type:'CANCEL', invoice:inv})} className="p-2 text-red-600 hover:bg-red-50 rounded border border-transparent hover:border-red-100" title="Cancelar Nota"><Ban size={16}/></button>
-                                    </>
+                                    <button onClick={() => setActionModal({type:'CANCEL', invoice:inv})} className="p-2 text-red-600 hover:bg-red-50 rounded border border-transparent hover:border-red-100" title="Cancelar Nota"><Ban size={16}/></button>
                                 )}
                                 {/* Downloads */}
                                 <div className="w-px h-6 bg-slate-200 mx-1"></div>
-                                <button onClick={() => downloadSmart(inv.pdf_base64, `NFe-${inv.nfe_number}`)} className="p-2 text-slate-600 hover:bg-slate-100 rounded" title="Baixar Documento">
-                                    <Printer size={16}/>
-                                </button>
+                                {inv.link_danfe || inv.link_pdf ? (
+                                    <a href={inv.link_danfe || inv.link_pdf} target="_blank" rel="noopener noreferrer" className="p-2 text-slate-600 hover:bg-slate-100 rounded" title="Abrir DANFE/PDF">
+                                        <Printer size={16}/>
+                                    </a>
+                                ) : (
+                                    <button onClick={() => downloadSmart(inv.pdf_base64, `NFe-${inv.nfe_number}`)} className="p-2 text-slate-600 hover:bg-slate-100 rounded" title="Baixar Documento">
+                                        <Printer size={16}/>
+                                    </button>
+                                )}
                                 <button onClick={() => downloadSmart(inv.xml_content, `NFe-${inv.nfe_number}.xml`)} className="p-2 text-slate-600 hover:bg-slate-100 rounded" title="Baixar XML">
                                     <Download size={16}/>
                                 </button>

@@ -61,7 +61,7 @@ export const calculateItemTaxes = (product, client, companyInfo, taxProfile) => 
     taxes.csosn = taxProfile.cst_nfe || '102';
     taxes.origin = String(taxProfile.origin || product.origin || '0');
 
-    // PIS/COFINS — repassa CST e alíquotas do perfil para o NFeBuilder
+    // PIS/COFINS — repassa CST e alíquotas do perfil tributário
     taxes.cst_pis_cofins = taxProfile.cst_pis_cofins || '49';
     taxes.is_monofasico   = taxProfile.is_monofasico ?? (taxes.cst_pis_cofins === '04');
     taxes.pis_rate        = Number(taxProfile.pis_rate   || 0);
