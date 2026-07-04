@@ -25,7 +25,6 @@ import {
   Eye,
   ClipboardList,
   PieChart,
-  Save,
   UserPlus,
   Printer,
   Lock,
@@ -43,7 +42,6 @@ import {
   ChevronLeft,
   ChevronRight,
   MapPin,
-  Boxes,
   Upload,
   Loader2,
   Send,
@@ -68,7 +66,6 @@ import {
   addDoc,
   deleteDoc,
 } from "firebase/firestore";
-import forge from "node-forge";
 import logo from "./img/LOGO-MAQUINA-PNG.png";
 import logoWhite from "./img/logo-maquina-texto-branco.png";
 import logoDistripro from "./img/logo-distripro.png";
@@ -80,8 +77,8 @@ import { supabase } from "./supabaseClient";
 import InventoryWMS from "./InventoryWMS";
 import ClientsManager from "./ClientsManager";
 import { calculateItemTaxes } from "./utils/TaxCalculator";
-import { buildNFePayload } from "./utils/NFeBuilder";
-import { NFeService } from "./utils/NFeService";
+import { buildBlingNotaPayload } from "./utils/BlingPayloadBuilder";
+import { BlingService } from "./utils/BlingService";
 import ComandaManager from "./ComandaManager";
 import { downloadSmart } from "./EntradaNotas/FiscalInvoices";
 import BankAccountsManager from "./BankAccountsManager";
@@ -96,6 +93,8 @@ import ModulePermissionsManager, {
 } from "./ModulePermissionsManager";
 
 import { TenantProvider, useTenant } from "./contexts/TenantContext";
+import BlingIntegrationPanel from "./BlingIntegrationPanel";
+import MaintenancePanel from "./MaintenancePanel";
 
 function Root() {
   return (
@@ -377,6 +376,7 @@ const LoginScreen = ({ onLogin, onSuperAdminLogin, showNotification }) => {
 
 // --- SUPER ADMIN DASHBOARD ---
 const SuperAdminDashboard = ({ onLogout, showNotification }) => {
+  const { setCurrentStore } = useTenant();
   const [stores, setStores] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [visiblePasswords, setVisiblePasswords] = useState({});
@@ -385,6 +385,19 @@ const SuperAdminDashboard = ({ onLogout, showNotification }) => {
   const [saSettings, setSaSettings] = useState({ username: "", password: "" });
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [managingStore, setManagingStore] = useState(null);
+  const [managingTab, setManagingTab] = useState("bling");
+
+  const openStoreManagement = (store) => {
+    setManagingStore(store);
+    setManagingTab("bling");
+    setCurrentStore({ id: store.id });
+  };
+
+  const closeStoreManagement = () => {
+    setManagingStore(null);
+    setCurrentStore(null);
+  };
 
   const fetchData = useCallback(async () => {
     setIsLoading(true);
@@ -429,6 +442,18 @@ const SuperAdminDashboard = ({ onLogout, showNotification }) => {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // Reabre automaticamente o painel de Integração/Manutenção da loja que estava sendo
+  // configurada, caso o carregamento tenha sido causado pelo redirect de página inteira
+  // do fluxo OAuth do Bling (veja handleBlingCallback em App).
+  useEffect(() => {
+    if (stores.length === 0) return;
+    const reopenId = sessionStorage.getItem("bling_reopen_store_id");
+    if (!reopenId) return;
+    sessionStorage.removeItem("bling_reopen_store_id");
+    const store = stores.find((s) => String(s.id) === String(reopenId));
+    if (store) openStoreManagement(store);
+  }, [stores]);
 
   const togglePasswordVisibility = (userId) => {
     setVisiblePasswords((prev) => ({ ...prev, [userId]: !prev[userId] }));
@@ -551,6 +576,13 @@ const SuperAdminDashboard = ({ onLogout, showNotification }) => {
                     >
                       {store.active ? "Ativa" : "Inativa"}
                     </span>
+                    <button
+                      onClick={() => openStoreManagement(store)}
+                      className="p-1.5 rounded text-white bg-indigo-600 hover:bg-indigo-700"
+                      title="Integração Bling / Manutenção"
+                    >
+                      <Settings size={16} />
+                    </button>
                     <button
                       onClick={() => handleToggleStoreStatus(store)}
                       className={`p-1.5 rounded text-white ${store.active ? "bg-red-600 hover:bg-red-700" : "bg-emerald-600 hover:bg-emerald-700"}`}
@@ -711,6 +743,36 @@ const SuperAdminDashboard = ({ onLogout, showNotification }) => {
               {isSaving ? "Salvando..." : "Salvar Alterações"}
             </button>
           </div>
+        </div>
+      </Modal>
+
+      {/* Modal de Gestão da Loja: Integração Bling / Manutenção — restrito ao Super Admin */}
+      <Modal
+        isOpen={!!managingStore}
+        onClose={closeStoreManagement}
+        title={`${managingStore?.name || "Loja"} — Integração / Manutenção`}
+      >
+        <div className="text-slate-800 max-h-[70vh] overflow-y-auto">
+          <div className="flex gap-2 border-b pb-1 mb-4">
+            <button
+              onClick={() => setManagingTab("bling")}
+              className={`px-4 py-2 text-sm font-bold rounded-t-lg ${managingTab === "bling" ? "bg-slate-800 text-white" : "bg-slate-100"}`}
+            >
+              Integração Fiscal (Bling)
+            </button>
+            <button
+              onClick={() => setManagingTab("maintenance")}
+              className={`px-4 py-2 text-sm font-bold rounded-t-lg ${managingTab === "maintenance" ? "bg-red-600 text-white" : "bg-slate-100"}`}
+            >
+              Manutenção
+            </button>
+          </div>
+          {managingStore && managingTab === "bling" && (
+            <BlingIntegrationPanel showNotification={showNotification} />
+          )}
+          {managingStore && managingTab === "maintenance" && (
+            <MaintenancePanel showNotification={showNotification} />
+          )}
         </div>
       </Modal>
     </div>
@@ -5343,9 +5405,6 @@ const SettingsManager = ({
 }) => {
   const { tenantDB, currentUser } = useTenant();
 
-  const [showCertPassword, setShowCertPassword] = useState(false);
-  const [certStatusInfo, setCertStatusInfo] = useState(null);
-
   const [activeTab, setActiveTab] = useState("general");
 
   // Estados da aba Caixas
@@ -5399,16 +5458,6 @@ const SettingsManager = ({
   // NOVO: ESTADOS DE CATEGORIAS
   const [categories, setCategories] = useState([]);
   const [newCategory, setNewCategory] = useState("");
-
-  const [certData, setCertData] = useState({
-    password: "",
-    api_token: "",
-    environment: "HOMOLOG",
-    fileName: "",
-    base64: "",
-    csc_id: "",
-    csc_token: "",
-  });
 
   const [formData, setFormData] = useState({
     name: companyInfo?.name || "",
@@ -5520,21 +5569,6 @@ const SettingsManager = ({
           "fiscal_tax_profiles",
         );
         if (profiles) setTaxProfiles(profiles);
-
-        const { data: certSettings } = await tenantDB.supabase
-          .query("fiscal_settings")
-          .single();
-        if (certSettings) {
-          setCertData({
-            password: certSettings.cert_password || "",
-            api_token: certSettings.api_token || "",
-            environment: certSettings.environment || "HOMOLOG",
-            fileName: certSettings.cert_base64 ? "Certificado Salvo" : "",
-            base64: certSettings.cert_base64 || "",
-            csc_id: certSettings.csc_id || "",
-            csc_token: certSettings.csc_token || "",
-          });
-        }
       } catch (err) {
         console.error(err);
       }
@@ -5694,79 +5728,6 @@ const SettingsManager = ({
     }
   };
 
-  // 2. SALVAR CERTIFICADO
-  const handleSaveCertSettings = async () => {
-    try {
-      if (certData.base64) {
-        // Envia para a API da BrasilNFe
-        await NFeService.updateCertificate(
-          certData.api_token,
-          certData.password,
-          certData.base64,
-        );
-      }
-
-      // Prepara o payload injetando o store_id automaticamente via Contexto
-      const payload = tenantDB.supabase.withStoreId({
-        cert_password: certData.password,
-        api_token: certData.api_token,
-        environment: certData.environment,
-        csc_id: certData.csc_id,
-        csc_token: certData.csc_token,
-        ...(certData.base64 ? { cert_base64: certData.base64 } : {}),
-      });
-
-      const { error } = await supabase
-        .from("fiscal_settings")
-        .upsert(payload, { onConflict: "firebase_store_id" });
-      if (error) throw error;
-
-      setCertData((prev) => ({ ...prev, base64: "" }));
-      showNotification("Configurações salvas com sucesso!", "success");
-    } catch (e) {
-      showNotification(`Erro: ${e.message}`, "error");
-    }
-  };
-
-  // ✅ INSIRA ESTE BLOCO NO LUGAR DA FUNÇÃO ANTIGA:
-
-  // Efeito que tenta decodificar o certificado localmente sempre que a base64 ou a senha mudarem
-  useEffect(() => {
-    const verifyLocalCert = () => {
-      // Se ainda não carregou do banco ou não tem senha, não faz nada
-      if (!certData.base64 || !certData.password) return;
-
-      try {
-        const der = forge.util.decode64(certData.base64);
-        const asn1 = forge.asn1.fromDer(der);
-        const p12 = forge.pkcs12.pkcs12FromAsn1(asn1, false, certData.password);
-        const bags = p12.getBags({ bagType: forge.pki.oids.certBag });
-        const certBag = bags[forge.pki.oids.certBag]?.[0];
-
-        if (certBag && certBag.cert) {
-          const cert = certBag.cert;
-          setCertStatusInfo({
-            Expirado: new Date() > cert.validity.notAfter,
-            DtExpiracao: cert.validity.notAfter,
-            Subject:
-              cert.subject.attributes.find((a) => a.shortName === "CN")
-                ?.value || "Empresa Identificada",
-            status: 1,
-          });
-        }
-      } catch (error) {
-        // Se falhar (ex: senha errada no banco), mostramos o erro visualmente
-        setCertStatusInfo({
-          Expirado: true,
-          Error: "Não foi possível ler o certificado salvo.",
-          status: 0,
-        });
-      }
-    };
-
-    verifyLocalCert();
-  }, [certData.base64, certData.password]); // Monitora os dados do banco/estado
-
   // 3. PERFIS TRIBUTÁRIOS (Adicionar e Remover)
   const handleAddProfile = async () => {
     if (!newProfile.name) return showNotification("Nome obrigatório", "error");
@@ -5880,100 +5841,6 @@ const SettingsManager = ({
   // --- MANUTENÇÃO / RESTAURAÇÃO DO BANCO ---
   // Coleções "operacionais" elegíveis para reset. 'products' e 'comandas' NUNCA entram
   // nesta lista propositalmente: produtos e comandas devem permanecer intactos.
-  const RESETTABLE_COLLECTIONS = [
-    { id: "sales", label: "Vendas" },
-    { id: "financial_movements", label: "Despesas / Receitas Lançadas" },
-    { id: "account_transactions", label: "Extrato das Contas Bancárias" },
-    { id: "caixa_sessoes", label: "Sessões de Caixa" },
-    { id: "caixa_movimentacoes", label: "Movimentações de Caixa (Sangrias)" },
-    { id: "cash_closings", label: "Histórico de Fechamentos de Caixa" },
-    { id: "fiscal_invoices", label: "Notas Fiscais Emitidas (NF-e/NFC-e)" },
-  ];
-
-  const [selectedResetCollections, setSelectedResetCollections] = useState([]);
-  const [resetConfirmText, setResetConfirmText] = useState("");
-  const [isResettingDashboard, setIsResettingDashboard] = useState(false);
-  const [isClearingStock, setIsClearingStock] = useState(false);
-
-  const toggleResetCollection = (id) => {
-    setSelectedResetCollections((prev) =>
-      prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id],
-    );
-  };
-
-  // Apaga em lotes de 450 (limite do Firestore é 500 operações por batch)
-  const deleteCollectionInBatches = async (collectionName) => {
-    const docs = await tenantDB.firestore.getAll(collectionName);
-    for (let i = 0; i < docs.length; i += 450) {
-      const chunk = docs.slice(i, i + 450);
-      const batch = tenantDB.firestore.batch();
-      chunk.forEach((d) => batch.delete(collectionName, d.id));
-      await batch.commit();
-    }
-    return docs.length;
-  };
-
-  const handleResetDashboard = async () => {
-    if (currentUser?.role !== "admin") return;
-    if (selectedResetCollections.length === 0) {
-      return showNotification("Selecione ao menos uma coleção para resetar.", "error");
-    }
-    if (resetConfirmText !== "RESETAR") {
-      return showNotification('Digite "RESETAR" para confirmar.', "error");
-    }
-    if (
-      !window.confirm(
-        `Tem certeza? Isso vai apagar PERMANENTEMENTE os dados de: ${selectedResetCollections.join(", ")}.\n\nProdutos e Comandas NÃO serão afetados. Esta ação não pode ser desfeita.`,
-      )
-    )
-      return;
-
-    setIsResettingDashboard(true);
-    try {
-      let totalDeleted = 0;
-      for (const collectionId of selectedResetCollections) {
-        totalDeleted += await deleteCollectionInBatches(collectionId);
-      }
-      showNotification(`Reset concluído! ${totalDeleted} registro(s) removido(s).`, "success");
-      setSelectedResetCollections([]);
-      setResetConfirmText("");
-    } catch (e) {
-      console.error(e);
-      showNotification("Erro ao resetar dados: " + e.message, "error");
-    } finally {
-      setIsResettingDashboard(false);
-    }
-  };
-
-  // Zera SOMENTE o campo de quantidade em estoque dos produtos.
-  // O produto em si (nome, preço, NCM, código de barras etc.) é mantido intacto.
-  const handleClearStockQuantities = async () => {
-    if (currentUser?.role !== "admin") return;
-    if (
-      !window.confirm(
-        "Isso vai zerar a QUANTIDADE EM ESTOQUE de todos os produtos. Os produtos em si (cadastro, preço, NCM etc.) serão mantidos. Confirma?",
-      )
-    )
-      return;
-
-    setIsClearingStock(true);
-    try {
-      const allProducts = await tenantDB.firestore.getAll("products");
-      for (let i = 0; i < allProducts.length; i += 450) {
-        const chunk = allProducts.slice(i, i + 450);
-        const batch = tenantDB.firestore.batch();
-        chunk.forEach((p) => batch.update("products", p.id, { stock: 0 }));
-        await batch.commit();
-      }
-      showNotification(`Estoque zerado em ${allProducts.length} produto(s).`, "success");
-    } catch (e) {
-      console.error(e);
-      showNotification("Erro ao zerar estoque: " + e.message, "error");
-    } finally {
-      setIsClearingStock(false);
-    }
-  };
-
   return (
     <div className="space-y-6 pb-8">
       <div className="flex gap-2 border-b pb-1 overflow-x-auto">
@@ -6002,12 +5869,6 @@ const SettingsManager = ({
           Perfis Tributários
         </button>
         <button
-          onClick={() => setActiveTab("certificate")}
-          className={`px-4 py-2 text-sm font-bold rounded-t-lg ${activeTab === "certificate" ? "bg-slate-800 text-white" : "bg-slate-100"}`}
-        >
-          Certificado
-        </button>
-        <button
           onClick={() => setActiveTab("registers")}
           className={`px-4 py-2 text-sm font-bold rounded-t-lg ${activeTab === "registers" ? "bg-orange-600 text-white" : "bg-slate-100"}`}
         >
@@ -6019,14 +5880,6 @@ const SettingsManager = ({
         >
           Liberação de Módulos
         </button>
-        {currentUser?.role === "admin" && (
-          <button
-            onClick={() => setActiveTab("maintenance")}
-            className={`px-4 py-2 text-sm font-bold rounded-t-lg ${activeTab === "maintenance" ? "bg-red-600 text-white" : "bg-slate-100"}`}
-          >
-            Manutenção
-          </button>
-        )}
       </div>
 
       {/* ABA GERAL (MANTENHA O CÓDIGO EXISTENTE AQUI) */}
@@ -6446,84 +6299,6 @@ const SettingsManager = ({
         </div>
       )}
 
-      {/* ABA MANUTENÇÃO / RESTAURAÇÃO DO BANCO */}
-      {activeTab === "maintenance" && currentUser?.role === "admin" && (
-        <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in space-y-8">
-          <div className="bg-amber-50 border border-amber-200 rounded p-4 flex items-start gap-3">
-            <AlertTriangle size={20} className="text-amber-600 shrink-0 mt-0.5" />
-            <p className="text-sm text-amber-800">
-              Área restrita a administradores. As ações abaixo são <strong>permanentes e não podem ser desfeitas</strong>.
-              Produtos e Comandas nunca são excluídos por essas ferramentas.
-            </p>
-          </div>
-
-          {/* Bloco 1: Reset de dados operacionais */}
-          <div>
-            <h3 className="font-bold mb-1 flex items-center gap-2 text-red-700">
-              <Trash2 size={20} /> Reset de Dados do Dashboard
-            </h3>
-            <p className="text-sm text-slate-500 mb-4">
-              Selecione quais coleções deseja apagar permanentemente. Produtos e Comandas estão sempre protegidos e nunca aparecem nesta lista.
-            </p>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-4">
-              {RESETTABLE_COLLECTIONS.map((c) => (
-                <label
-                  key={c.id}
-                  className="flex items-center gap-2 p-3 border rounded cursor-pointer hover:bg-slate-50"
-                >
-                  <input
-                    type="checkbox"
-                    className="w-4 h-4"
-                    checked={selectedResetCollections.includes(c.id)}
-                    onChange={() => toggleResetCollection(c.id)}
-                  />
-                  <span className="text-sm font-medium text-slate-700">{c.label}</span>
-                </label>
-              ))}
-            </div>
-
-            <div className="bg-red-50 border border-red-200 rounded p-4 space-y-3">
-              <label className="text-xs font-bold text-red-700 uppercase block">
-                Digite RESETAR para confirmar
-              </label>
-              <input
-                className="w-full max-w-xs border p-2 rounded text-sm"
-                value={resetConfirmText}
-                onChange={(e) => setResetConfirmText(e.target.value)}
-                placeholder="RESETAR"
-              />
-              <button
-                onClick={handleResetDashboard}
-                disabled={isResettingDashboard || resetConfirmText !== "RESETAR" || selectedResetCollections.length === 0}
-                className="bg-red-600 text-white px-6 py-2 rounded font-bold hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
-              >
-                {isResettingDashboard ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
-                {isResettingDashboard ? "Apagando..." : "Apagar Dados Selecionados"}
-              </button>
-            </div>
-          </div>
-
-          {/* Bloco 2: Zerar apenas quantidade em estoque */}
-          <div className="border-t pt-6">
-            <h3 className="font-bold mb-1 flex items-center gap-2 text-slate-800">
-              <Boxes size={20} className="text-slate-600" /> Zerar Quantidade em Estoque
-            </h3>
-            <p className="text-sm text-slate-500 mb-4">
-              Zera apenas o campo de quantidade em estoque de cada produto. O cadastro do produto (nome, preço, NCM, código de barras etc.) é mantido intacto.
-            </p>
-            <button
-              onClick={handleClearStockQuantities}
-              disabled={isClearingStock}
-              className="bg-slate-800 text-white px-6 py-2 rounded font-bold hover:bg-slate-900 disabled:opacity-40 flex items-center gap-2"
-            >
-              {isClearingStock ? <Loader2 size={16} className="animate-spin" /> : <Boxes size={16} />}
-              {isClearingStock ? "Zerando..." : "Zerar Estoque de Todos os Produtos"}
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* ABA CAIXAS */}
       {activeTab === "registers" && (
         <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
@@ -6641,177 +6416,6 @@ const SettingsManager = ({
                 )}
               </tbody>
             </table>
-          </div>
-        </div>
-      )}
-
-      {activeTab === "certificate" && (
-        <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
-          <h3 className="font-bold mb-4">Certificado Digital & Integração</h3>
-
-          {/* FEEDBACK VISUAL DE STATUS */}
-          {certStatusInfo && (
-            <div
-              className={`mb-6 p-4 rounded-lg border ${certStatusInfo.Expirado ? "bg-red-50 border-red-200 text-red-800" : "bg-emerald-50 border-emerald-200 text-emerald-800"} animate-in slide-in-from-top-2`}
-            >
-              <h4 className="font-bold flex items-center gap-2 text-base">
-                {certStatusInfo.Expirado ? (
-                  <AlertTriangle size={20} />
-                ) : (
-                  <CheckCircle size={20} />
-                )}
-                {certStatusInfo.Expirado
-                  ? "Certificado Expirado ou Inválido!"
-                  : "Certificado Válido e Ativo!"}
-              </h4>
-              <div className="mt-3 text-sm grid grid-cols-1 md:grid-cols-2 gap-3 bg-white/50 p-3 rounded">
-                <p>
-                  <strong>Vencimento:</strong>{" "}
-                  <span
-                    className={
-                      certStatusInfo.Expirado ? "text-red-600 font-bold" : ""
-                    }
-                  >
-                    {certStatusInfo.DtExpiracao
-                      ? new Date(certStatusInfo.DtExpiracao).toLocaleDateString(
-                          "pt-BR",
-                        )
-                      : "Desconhecido"}
-                  </span>
-                </p>
-                <p>
-                  <strong>Status:</strong>{" "}
-                  {certStatusInfo.status === 1
-                    ? "1 (Operacional)"
-                    : certStatusInfo.status}
-                </p>
-              </div>
-              {certStatusInfo.Error && (
-                <p className="mt-3 text-sm text-red-600 font-bold bg-white/60 p-2 rounded border border-red-100">
-                  Erro Retornado: {certStatusInfo.Error}
-                </p>
-              )}
-            </div>
-          )}
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* O Token da API foi inteiramente removido do formulário do lojista */}
-
-            <div>
-              <label className="text-xs font-bold text-slate-700">
-                Ambiente de Emissão
-              </label>
-              <select
-                className="w-full border p-2.5 rounded bg-slate-50 text-sm font-bold"
-                value={certData.environment}
-                onChange={(e) =>
-                  setCertData({ ...certData, environment: e.target.value })
-                }
-              >
-                <option value="HOMOLOG">Homologação (Teste)</option>
-                <option value="PRODUCAO">Produção</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="text-xs font-bold text-slate-700">
-                Arquivo do Certificado (.pfx)
-              </label>
-              <input
-                type="file"
-                className="w-full text-xs border p-2 rounded cursor-pointer"
-                accept=".pfx,.p12"
-                onChange={(e) => {
-                  const file = e.target.files[0];
-                  if (file) {
-                    const reader = new FileReader();
-                    reader.onload = (evt) =>
-                      setCertData((prev) => ({
-                        ...prev,
-                        base64: evt.target.result.split(",")[1],
-                        fileName: file.name,
-                      }));
-                    reader.readAsDataURL(file);
-                  }
-                }}
-              />
-              <span className="text-xs text-emerald-600 font-bold block mt-1">
-                {certData.fileName}
-              </span>
-            </div>
-
-            <div>
-              <label className="text-xs font-bold text-slate-700">
-                Senha do Certificado
-              </label>
-              <div className="relative">
-                <input
-                  className="w-full border p-2.5 rounded pr-10 text-sm"
-                  type={showCertPassword ? "text" : "password"}
-                  value={certData.password}
-                  onChange={(e) =>
-                    setCertData({ ...certData, password: e.target.value })
-                  }
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowCertPassword(!showCertPassword)}
-                  className="absolute right-3 top-3 text-slate-400 hover:text-indigo-600 transition-colors"
-                  title={showCertPassword ? "Ocultar senha" : "Mostrar senha"}
-                >
-                  <Eye size={18} />
-                </button>
-              </div>
-            </div>
-
-            <div className="md:col-span-2 flex flex-col md:flex-row justify-end gap-3 mt-4 border-b border-slate-100 pb-6">
-              <button
-                onClick={handleSaveCertSettings}
-                className="bg-slate-900 text-white px-6 py-2.5 rounded font-bold hover:bg-slate-800 transition-colors flex items-center justify-center gap-2 shadow-sm"
-              >
-                <Save size={16} /> Enviar e Salvar
-              </button>
-            </div>
-
-            <div className="md:col-span-2 mt-2">
-              <h4 className="font-bold text-sm text-indigo-700 mb-3 flex items-center gap-2">
-                <FileText size={16} /> Configuração NFC-e (Cupom Fiscal)
-              </h4>
-              <div className="grid grid-cols-1 md:grid-cols-12 gap-4 bg-indigo-50/50 p-4 rounded border border-indigo-100">
-                <div className="md:col-span-3">
-                  <label className="block text-xs font-bold text-indigo-900 mb-1">
-                    ID do CSC
-                  </label>
-                  <input
-                    className="w-full border p-2 rounded text-sm placeholder-indigo-300"
-                    value={certData.csc_id}
-                    onChange={(e) =>
-                      setCertData({ ...certData, csc_id: e.target.value })
-                    }
-                    placeholder="Ex: 000001"
-                  />
-                </div>
-                <div className="md:col-span-9">
-                  <label className="block text-xs font-bold text-indigo-900 mb-1">
-                    Código CSC (Token)
-                  </label>
-                  <input
-                    className="w-full border p-2 rounded text-sm placeholder-indigo-300"
-                    value={certData.csc_token}
-                    onChange={(e) =>
-                      setCertData({ ...certData, csc_token: e.target.value })
-                    }
-                    placeholder="Ex: 1A2B3C..."
-                  />
-                </div>
-                <div className="md:col-span-12">
-                  <p className="text-[10px] text-indigo-600 font-medium">
-                    * Obrigatório para emitir NFC-e. Obtenha estes códigos no
-                    portal da SEFAZ do seu estado (No Ambiente correspondente).
-                  </p>
-                </div>
-              </div>
-            </div>
           </div>
         </div>
       )}
@@ -7487,25 +7091,20 @@ const cleanUndefinedFields = (obj, path = '') => {
 
     try {
       const appId = String(store.id);
-      const { data: nfeConfig } = await tenantDB.supabase
-        .query("fiscal_settings")
+      const { data: blingConfig } = await tenantDB.supabase
+        .query("fiscal_bling_settings")
         .single();
 
       const batch = tenantDB.firestore.batch();
 
-      const certDateString = nfeConfig?.cert_date || store?.certDate;
-      const isExpired = certDateString
-        ? new Date(certDateString) < new Date()
-        : false;
-
-      if (isExpired) {
+      if (!blingConfig?.connected) {
         await tenantDB.firestore.update("sales", String(sale.id), {
-          nfeStatus: "CONTINGÊNCIA",
-          nfeMessage: "Venda realizada com certificado expirado.",
+          nfeStatus: "SEM_INTEGRACAO",
+          nfeMessage: "Bling não conectado no momento da venda.",
         });
 
         showNotification(
-          "Certificado expirado. Imprimindo Cupom Não Fiscal.",
+          "Bling não conectado. Imprimindo Cupom Não Fiscal.",
           "warning",
         );
         printReceipt(sale, store.companyInfo);
@@ -7757,79 +7356,40 @@ const cleanUndefinedFields = (obj, path = '') => {
     return () => clearTimeout(timer);
   }, [store, showNotification]);
 
-  // --- VERIFICAÇÃO DIÁRIA DO CERTIFICADO DIGITAL ---
+  // --- VERIFICAÇÃO DIÁRIA DA CONEXÃO COM O BLING ---
   useEffect(() => {
-    const checkCertExpiration = async () => {
+    const checkBlingConnection = async () => {
       if (!store || !store.id) return;
 
       const todayStr = new Date().toISOString().split("T")[0];
-      const storageKey = `last_cert_check_${store.id}`;
+      const storageKey = `last_bling_check_${store.id}`;
       const lastCheck = localStorage.getItem(storageKey);
 
       // Se já verificou/avisou hoje, interrompe (não enche a tela do usuário toda hora)
       if (lastCheck === todayStr) return;
 
       try {
-        // Busca o certificado no Supabase (já adaptando para o padrão que estamos usando)
-        const { data: certSettings } = await supabase
-          .from("fiscal_settings")
-          .select("cert_base64, cert_password")
+        const { data: blingSettings } = await supabase
+          .from("fiscal_bling_settings")
+          .select("connected, refresh_token")
           .eq("firebase_store_id", String(store.id))
           .single();
 
-        if (
-          certSettings &&
-          certSettings.cert_base64 &&
-          certSettings.cert_password
-        ) {
-          // Decodifica usando o node-forge
-          const der = forge.util.decode64(certSettings.cert_base64);
-          const asn1 = forge.asn1.fromDer(der);
-          const p12 = forge.pkcs12.pkcs12FromAsn1(
-            asn1,
-            false,
-            certSettings.cert_password,
+        if (!blingSettings?.connected || !blingSettings?.refresh_token) {
+          showNotification(
+            "⚠️ Integração com o Bling não conectada. Emissão de notas indisponível — configure em Configurações > Integração Fiscal.",
+            "warning",
           );
-          const bags = p12.getBags({ bagType: forge.pki.oids.certBag });
-          const certBag = bags[forge.pki.oids.certBag]?.[0];
-
-          if (certBag && certBag.cert) {
-            const expirationDate = certBag.cert.validity.notAfter;
-            const today = new Date();
-
-            // Calcula a diferença em dias
-            const diffTime = expirationDate - today;
-            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-            if (diffDays <= 7 && diffDays > 0) {
-              showNotification(
-                `⚠️ Atenção: Seu Certificado Digital vence em ${diffDays} dia(s)!`,
-                "warning",
-              );
-              localStorage.setItem(storageKey, todayStr);
-            } else if (diffDays <= 0) {
-              showNotification(
-                `🚨 URGENTE: Seu Certificado Digital VENCEU! Emissão bloqueada.`,
-                "error",
-              );
-              localStorage.setItem(storageKey, todayStr);
-            } else {
-              // Se está tudo bem, marca que checou hoje para não ler o arquivo de novo
-              localStorage.setItem(storageKey, todayStr);
-            }
-          }
         }
+        localStorage.setItem(storageKey, todayStr);
       } catch (err) {
-        console.error(
-          "Erro ao verificar validade do certificado na inicialização:",
-          err,
-        );
-        // Em caso de erro na decodificação, não travamos o sistema, apenas ignoramos.
+        console.error("Erro ao verificar conexão com o Bling na inicialização:", err);
+        // Em caso de erro na consulta, não travamos o sistema, apenas ignoramos.
       }
     };
 
     // Colocamos um delay de 3.5 segundos para o aviso não atropelar outras notificações iniciais
-    const timer = setTimeout(checkCertExpiration, 3500);
+    const timer = setTimeout(checkBlingConnection, 3500);
     return () => clearTimeout(timer);
   }, [store, showNotification]);
 
@@ -7839,20 +7399,23 @@ const cleanUndefinedFields = (obj, path = '') => {
 
   const handleEmitNFe = async (sale) => {
     setIsEmitting(true);
-    showNotification("Calculando numeração e emitindo...", "info");
+    showNotification("Emitindo nota fiscal via Bling...", "info");
 
     try {
       const appId = String(store.id);
 
-      // 1. Configurações
-      const { data: nfeConfig } = await supabase
-        .from("fiscal_settings")
+      // 1. Configuração da integração Bling
+      const { data: blingConfig } = await supabase
+        .from("fiscal_bling_settings")
         .select("*")
         .eq("firebase_store_id", appId)
         .single();
 
-      if (!nfeConfig?.api_token)
-        throw new Error("Token Fiscal não configurado.");
+      if (!blingConfig?.connected) {
+        throw new Error("Bling não conectado. Configure em Configurações > Integração Fiscal.");
+      }
+
+      const accessToken = await BlingService.ensureValidToken(tenantDB, blingConfig);
 
       // 2. Perfis (SQL)
       const { data: taxProfiles } = await supabase
@@ -7896,25 +7459,7 @@ const cleanUndefinedFields = (obj, path = '') => {
           targetModel = "55";
         }
       }
-
-      // --- 4.1 NOVO: CÁLCULO DE NUMERAÇÃO ---
-      // Busca a última nota emitida DESTE modelo NESTE ambiente
-      const { data: lastInvoice } = await supabase
-        .from("fiscal_invoices")
-        .select("nfe_number")
-        .eq("firebase_store_id", appId)
-        .eq("nfe_model", targetModel)
-        .eq("environment", nfeConfig.environment) // Não mistura numeração de teste com produção
-        .order("nfe_number", { ascending: false })
-        .limit(1)
-        .single();
-
-      // Se achou última, soma 1. Se não, começa do 1.
-      const nextNumber = (lastInvoice?.nfe_number || 0) + 1;
-      console.log(
-        `🔢 Próximo Número calculado: ${nextNumber} (Modelo ${targetModel})`,
-      );
-      // --------------------------------------
+      const tipoDocumento = targetModel === "55" ? "nfe" : "nfce";
 
       // 5. Recálculo Itens (Com trava de segurança para campos undefined)
       const itemsWithFreshTaxes = sale.items.map((item) => {
@@ -7933,51 +7478,20 @@ const cleanUndefinedFields = (obj, path = '') => {
         const freshProfile = taxProfiles?.find(
           (tp) => String(tp.id) === mergedItem.taxProfileId,
         );
-        if (freshProfile) {
-          const newTaxes = calculateItemTaxes(
-            mergedItem,
-            clientFull,
-            store.companyInfo,
-            freshProfile,
-          );
-          return { ...mergedItem, taxes: newTaxes };
-        } else {
-          const basicTaxes = calculateItemTaxes(
-            mergedItem,
-            clientFull,
-            store.companyInfo,
-            null,
-          );
-          return { ...mergedItem, taxes: basicTaxes };
-        }
+        const newTaxes = calculateItemTaxes(
+          mergedItem,
+          clientFull,
+          store.companyInfo,
+          freshProfile || null,
+        );
+        return { ...mergedItem, taxes: newTaxes };
       });
 
       const saleWithFreshTaxes = { ...sale, items: itemsWithFreshTaxes };
 
-      // 6. Payload (Passando o nextNumber)
-      const payload = buildNFePayload(
-        saleWithFreshTaxes,
-        store.companyInfo,
-        clientFull,
-        nfeConfig,
-        targetModel,
-        nextNumber,
-      );
-
-      console.log("🚨 PAYLOAD FINAL:", JSON.stringify(payload, null, 2));
-
-      if (payload.TipoAmbiente !== "1" && payload.TipoAmbiente !== "2") {
-        throw new Error(`Ambiente inválido (${payload.TipoAmbiente}).`);
-      }
-
-      // 7. Envio
-      const apiResponse = await NFeService.emit(payload);
-      console.log("📢 RESPOSTA API:", apiResponse);
-
-      // 8. Processamento
-      const isSuccess =
-        apiResponse.Sucesso === true || apiResponse.ReturnNF?.Ok === true;
-      const returnData = apiResponse.ReturnNF || {};
+      // 6. Payload
+      const payload = buildBlingNotaPayload(saleWithFreshTaxes, clientFull, blingConfig, tipoDocumento);
+      console.log("🚨 PAYLOAD FINAL (Bling):", JSON.stringify(payload, null, 2));
 
       const saleRef = doc(
         firebase.db,
@@ -7989,50 +7503,78 @@ const cleanUndefinedFields = (obj, path = '') => {
         String(sale.id),
       );
 
-      if (isSuccess) {
+      // 7. Criação + envio à SEFAZ
+      const created = await BlingService.createNota(tipoDocumento, accessToken, payload);
+      const blingNfeId = created?.data?.id;
+      if (!blingNfeId) throw new Error("Bling não retornou o ID da nota criada.");
+
+      await BlingService.enviarNota(tipoDocumento, accessToken, blingNfeId);
+
+      // 8. Aguarda o processamento na SEFAZ (polling)
+      let notaFinal = null;
+      for (let attempt = 0; attempt < 8; attempt++) {
+        await new Promise((r) => setTimeout(r, 2500));
+        const { data: notaAtual } = await BlingService.getNota(tipoDocumento, accessToken, blingNfeId);
+        if ([4, 5, 9].includes(notaAtual?.situacao)) {
+          notaFinal = notaAtual;
+          break;
+        }
+      }
+
+      if (!notaFinal) {
+        showNotification(
+          "Nota enviada, mas a confirmação da SEFAZ está demorando. Consulte em Notas Fiscais Emitidas.",
+          "warning",
+        );
+        await updateDoc(saleRef, { nfeStatus: "PROCESSANDO", nfeMessage: "Aguardando retorno da SEFAZ" });
+        return;
+      }
+
+      const isAutorizada = notaFinal.situacao === 5;
+
+      if (isAutorizada) {
         const invoiceData = {
           firebase_store_id: appId,
           sale_id: String(sale.id),
-          environment: nfeConfig.environment,
+          environment: blingConfig.environment,
           nfe_model: targetModel,
-          nfe_number: returnData.Numero || nextNumber, // Usa o retornado ou o calculado
-          nfe_series: returnData.Serie || 55,
-          nfe_key: returnData.ChaveNF || returnData.ChaveNFe,
-          nfe_protocol: returnData.Protocolo || returnData.nProt,
-          status: returnData.DsStatusRespostaSefaz || "AUTORIZADA",
-          pdf_base64: apiResponse.Base64File || null,
-          xml_content: apiResponse.Base64Xml || null,
+          bling_nfe_id: blingNfeId,
+          nfe_number: notaFinal.numero,
+          nfe_series: notaFinal.serie,
+          nfe_key: notaFinal.chaveAcesso,
+          status: "AUTORIZADA",
+          link_danfe: notaFinal.linkDanfe || null,
+          link_pdf: notaFinal.linkPDF || null,
+          xml_content: notaFinal.xml ? btoa(unescape(encodeURIComponent(notaFinal.xml))) : null,
           client_name: clientFull?.name || sale.clientName || "Consumidor",
-          total_value: returnData.Detalhes?.valorNf || sale.total,
+          total_value: notaFinal.valorNota || sale.total,
         };
 
-        const { error: dbError } = await supabase
-          .from("fiscal_invoices")
-          .insert(invoiceData);
+        const { error: dbError } = await supabase.from("fiscal_invoices").insert(invoiceData);
         if (dbError) console.error("Erro SQL:", dbError);
+
+        // Reflexo financeiro/estoque no Bling (best-effort, não bloqueia a emissão)
+        BlingService.lancarContas(tipoDocumento, accessToken, blingNfeId).catch((e) =>
+          console.warn("Falha ao lançar contas no Bling:", e.message),
+        );
+        BlingService.lancarEstoque(tipoDocumento, accessToken, blingNfeId).catch((e) =>
+          console.warn("Falha ao lançar estoque no Bling:", e.message),
+        );
 
         await updateDoc(saleRef, {
           nfeStatus: "AUTORIZADA",
-          nfeKey: returnData.ChaveNF || returnData.ChaveNFe,
+          nfeKey: notaFinal.chaveAcesso,
           nfeMessage: "Emitida com Sucesso",
         });
 
-        showNotification(
-          `Nota ${invoiceData.nfe_number} Autorizada!`,
-          "success",
-        );
+        showNotification(`Nota ${invoiceData.nfe_number} Autorizada!`, "success");
       } else {
         const errorMsg =
-          apiResponse.Mensagem ||
-          apiResponse.Error ||
-          (apiResponse.ReturnNF
-            ? apiResponse.ReturnNF.DsStatusRespostaSefaz
-            : "Erro desconhecido");
-        await updateDoc(saleRef, {
-          nfeStatus: "REJEITADA",
-          nfeMessage: errorMsg,
-        });
-        showNotification(`Rejeição: ${errorMsg}`, "error");
+          notaFinal.situacao === 9
+            ? "Nota Denegada pela SEFAZ."
+            : "Nota Rejeitada pela SEFAZ.";
+        await updateDoc(saleRef, { nfeStatus: "REJEITADA", nfeMessage: errorMsg });
+        showNotification(errorMsg, "error");
       }
     } catch (error) {
       console.error("Erro Crítico:", error);
@@ -8042,17 +7584,24 @@ const cleanUndefinedFields = (obj, path = '') => {
     }
   };
 
-  // 2. CONFIRMAR: Envia a Nota Real
+  // 2. CONFIRMAR: Envia a Nota Real (fluxo de pré-visualização, legado)
   const handleConfirmEmission = async () => {
     if (!previewData || !currentSaleToEmit) return;
     setIsEmitting(true);
 
     try {
-      // Usa o MESMO payload que foi validado no preview
-      const apiResponse = await NFeService.emit(previewData.payload);
-
-      // Atualiza no Firebase
       const appId = String(store.id);
+      const { data: blingConfig } = await supabase
+        .from("fiscal_bling_settings")
+        .select("*")
+        .eq("firebase_store_id", appId)
+        .single();
+      if (!blingConfig?.connected) throw new Error("Bling não conectado.");
+
+      const accessToken = await BlingService.ensureValidToken(tenantDB, blingConfig);
+      const created = await BlingService.createNota(previewData.tipoDocumento || "nfce", accessToken, previewData.payload);
+      await BlingService.enviarNota(previewData.tipoDocumento || "nfce", accessToken, created.data.id);
+
       const saleRef = doc(
         firebase.db,
         "artifacts",
@@ -8064,11 +7613,9 @@ const cleanUndefinedFields = (obj, path = '') => {
       );
 
       await updateDoc(saleRef, {
-        nfeStatus: apiResponse.Status || apiResponse.status || "Processando",
+        nfeStatus: "PROCESSANDO",
         nfeRef: String(currentSaleToEmit.id),
-        nfeKey: apiResponse.ChaveNFe || apiResponse.chave_nfe || null,
-        nfeMessage:
-          apiResponse.Mensagem || apiResponse.Motivo || "Enviado com sucesso",
+        nfeMessage: "Enviado para processamento na SEFAZ",
       });
 
       showNotification("Nota Fiscal Enviada com Sucesso!", "success");
@@ -8690,8 +8237,78 @@ const App = () => {
     setTimeout(() => setNotification(null), 3000);
   }, []);
 
+  // --- CALLBACK OAUTH DO BLING ---
+  // O Bling redireciona de volta para a raiz do app com ?code=...&state=..., recarregando
+  // toda a SPA. Por isso resolvemos a loja pelo sessionStorage (gravado antes do redirect
+  // em SettingsManager) e falamos direto com o Supabase, sem depender do TenantContext.
+  useEffect(() => {
+    const handleBlingCallback = async () => {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get("code");
+      const state = params.get("state");
+      if (!code || !state) return;
+
+      window.history.replaceState(null, "", window.location.pathname);
+
+      const savedState = sessionStorage.getItem("bling_oauth_state");
+      const storeId = sessionStorage.getItem("bling_oauth_store_id");
+      sessionStorage.removeItem("bling_oauth_state");
+      sessionStorage.removeItem("bling_oauth_store_id");
+
+      // Guarda a loja que estava sendo configurada para o SuperAdminDashboard reabrir
+      // o painel dela automaticamente após o redirect de página inteira do OAuth do Bling.
+      if (storeId) sessionStorage.setItem("bling_reopen_store_id", storeId);
+
+      if (!savedState || savedState !== state || !storeId) {
+        showNotification("Retorno do Bling inválido ou expirado. Tente conectar novamente.", "error");
+        return;
+      }
+
+      try {
+        const { data: config } = await supabase
+          .from("fiscal_bling_settings")
+          .select("*")
+          .eq("firebase_store_id", storeId)
+          .single();
+
+        if (!config?.client_id || !config?.client_secret) {
+          throw new Error("Client ID/Secret do Bling não encontrados para esta loja.");
+        }
+
+        const tokenData = await BlingService.exchangeCodeForToken(config.client_id, config.client_secret, code);
+        const expiresAt = new Date(Date.now() + (tokenData.expires_in || 0) * 1000).toISOString();
+
+        const { error } = await supabase
+          .from("fiscal_bling_settings")
+          .update({
+            access_token: tokenData.access_token,
+            refresh_token: tokenData.refresh_token,
+            token_expires_at: expiresAt,
+            connected: true,
+            connected_at: new Date().toISOString(),
+          })
+          .eq("firebase_store_id", storeId);
+        if (error) throw error;
+
+        showNotification("Bling conectado com sucesso!", "success");
+      } catch (err) {
+        console.error("Erro ao concluir conexão com o Bling:", err);
+        showNotification(`Erro ao conectar com o Bling: ${err.message}`, "error");
+      }
+    };
+
+    handleBlingCallback();
+  }, [showNotification]);
+
   const handleSuperAdminLogin = () => {
     setLoginMode("superadmin");
+    localStorage.setItem(
+      "distripro_session",
+      JSON.stringify({
+        mode: "superadmin",
+        timestamp: new Date().getTime(),
+      }),
+    );
   };
 
   const handleLogout = () => {

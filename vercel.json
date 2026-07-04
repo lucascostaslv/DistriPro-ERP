@@ -1,8 +1,8 @@
 {
   "rewrites": [
     {
-      "source": "/services/(.*)",
-      "destination": "/api/proxy.js?endpoint=$1"
+      "source": "/bling-api/(.*)",
+      "destination": "/api/bling-proxy.js?path=$1"
     },
     {
       "source": "/(.*)",
