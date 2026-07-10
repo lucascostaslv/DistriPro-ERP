@@ -5,6 +5,10 @@
       "destination": "/api/bling-proxy.js?path=$1"
     },
     {
+      "source": "/services/(.*)",
+      "destination": "/api/proxy.js?endpoint=$1"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }

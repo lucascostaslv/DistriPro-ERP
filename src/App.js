@@ -25,6 +25,7 @@ import {
   Eye,
   ClipboardList,
   PieChart,
+  Save,
   UserPlus,
   Printer,
   Lock,
@@ -66,6 +67,7 @@ import {
   addDoc,
   deleteDoc,
 } from "firebase/firestore";
+import forge from "node-forge";
 import logo from "./img/LOGO-MAQUINA-PNG.png";
 import logoWhite from "./img/logo-maquina-texto-branco.png";
 import logoDistripro from "./img/logo-distripro.png";
@@ -79,6 +81,8 @@ import ClientsManager from "./ClientsManager";
 import { calculateItemTaxes } from "./utils/TaxCalculator";
 import { buildBlingNotaPayload } from "./utils/BlingPayloadBuilder";
 import { BlingService } from "./utils/BlingService";
+import { buildNFePayload } from "./utils/NFeBuilder";
+import { NFeService } from "./utils/NFeService";
 import ComandaManager from "./ComandaManager";
 import { downloadSmart } from "./EntradaNotas/FiscalInvoices";
 import BankAccountsManager from "./BankAccountsManager";
@@ -387,16 +391,55 @@ const SuperAdminDashboard = ({ onLogout, showNotification }) => {
   const [isSaving, setIsSaving] = useState(false);
   const [managingStore, setManagingStore] = useState(null);
   const [managingTab, setManagingTab] = useState("bling");
+  const [managingProvider, setManagingProvider] = useState("bling");
+  const [isSavingProvider, setIsSavingProvider] = useState(false);
 
-  const openStoreManagement = (store) => {
+  const openStoreManagement = async (store) => {
     setManagingStore(store);
     setManagingTab("bling");
     setCurrentStore({ id: store.id });
+    try {
+      const { data } = await supabase
+        .from("fiscal_provider_settings")
+        .select("provider")
+        .eq("firebase_store_id", String(store.id))
+        .single();
+      setManagingProvider(data?.provider || "bling");
+    } catch (e) {
+      setManagingProvider("bling");
+    }
   };
 
   const closeStoreManagement = () => {
     setManagingStore(null);
     setCurrentStore(null);
+  };
+
+  // Alterna qual provedor de emissão fiscal está ativo para a loja (Bling ou BrasilNFe/legado).
+  // Gravado em `fiscal_provider_settings` (Supabase), consultado pelo app da loja em runtime.
+  const handleChangeProvider = async (provider) => {
+    if (!managingStore || provider === managingProvider) return;
+    setIsSavingProvider(true);
+    try {
+      const { error } = await supabase.from("fiscal_provider_settings").upsert(
+        {
+          firebase_store_id: String(managingStore.id),
+          provider,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "firebase_store_id" },
+      );
+      if (error) throw error;
+      setManagingProvider(provider);
+      showNotification(
+        `Provedor fiscal alterado para ${provider === "brasilnfe" ? "BrasilNFe (legado)" : "Bling"}.`,
+        "success",
+      );
+    } catch (error) {
+      showNotification("Erro ao alterar provedor: " + error.message, "error");
+    } finally {
+      setIsSavingProvider(false);
+    }
   };
 
   const fetchData = useCallback(async () => {
@@ -753,6 +796,31 @@ const SuperAdminDashboard = ({ onLogout, showNotification }) => {
         title={`${managingStore?.name || "Loja"} — Integração / Manutenção`}
       >
         <div className="text-slate-800 max-h-[70vh] overflow-y-auto">
+          <div className="mb-4 p-3 bg-indigo-50 border border-indigo-200 rounded-lg">
+            <p className="text-xs font-bold text-indigo-900 uppercase mb-2">
+              Provedor de Emissão Fiscal Ativo
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => handleChangeProvider("bling")}
+                disabled={isSavingProvider}
+                className={`flex-1 px-4 py-2 text-sm font-bold rounded border-2 transition-colors disabled:opacity-50 ${managingProvider === "bling" ? "bg-indigo-600 border-indigo-600 text-white" : "bg-white border-indigo-200 text-indigo-700 hover:border-indigo-400"}`}
+              >
+                Bling
+              </button>
+              <button
+                onClick={() => handleChangeProvider("brasilnfe")}
+                disabled={isSavingProvider}
+                className={`flex-1 px-4 py-2 text-sm font-bold rounded border-2 transition-colors disabled:opacity-50 ${managingProvider === "brasilnfe" ? "bg-indigo-600 border-indigo-600 text-white" : "bg-white border-indigo-200 text-indigo-700 hover:border-indigo-400"}`}
+              >
+                BrasilNFe (legado)
+              </button>
+            </div>
+            <p className="text-[11px] text-indigo-700 mt-2">
+              Define qual integração o PDV desta loja usa para emitir NF-e/NFC-e. A configuração de cada provedor (Bling abaixo, ou o Certificado Digital em Configurações da loja) precisa estar preenchida separadamente.
+            </p>
+          </div>
+
           <div className="flex gap-2 border-b pb-1 mb-4">
             <button
               onClick={() => setManagingTab("bling")}
@@ -5405,6 +5473,9 @@ const SettingsManager = ({
 }) => {
   const { tenantDB, currentUser } = useTenant();
 
+  const [showCertPassword, setShowCertPassword] = useState(false);
+  const [certStatusInfo, setCertStatusInfo] = useState(null);
+
   const [activeTab, setActiveTab] = useState("general");
 
   // Estados da aba Caixas
@@ -5458,6 +5529,16 @@ const SettingsManager = ({
   // NOVO: ESTADOS DE CATEGORIAS
   const [categories, setCategories] = useState([]);
   const [newCategory, setNewCategory] = useState("");
+
+  const [certData, setCertData] = useState({
+    password: "",
+    api_token: "",
+    environment: "HOMOLOG",
+    fileName: "",
+    base64: "",
+    csc_id: "",
+    csc_token: "",
+  });
 
   const [formData, setFormData] = useState({
     name: companyInfo?.name || "",
@@ -5569,6 +5650,21 @@ const SettingsManager = ({
           "fiscal_tax_profiles",
         );
         if (profiles) setTaxProfiles(profiles);
+
+        const { data: certSettings } = await tenantDB.supabase
+          .query("fiscal_settings")
+          .single();
+        if (certSettings) {
+          setCertData({
+            password: certSettings.cert_password || "",
+            api_token: certSettings.api_token || "",
+            environment: certSettings.environment || "HOMOLOG",
+            fileName: certSettings.cert_base64 ? "Certificado Salvo" : "",
+            base64: certSettings.cert_base64 || "",
+            csc_id: certSettings.csc_id || "",
+            csc_token: certSettings.csc_token || "",
+          });
+        }
       } catch (err) {
         console.error(err);
       }
@@ -5728,6 +5824,77 @@ const SettingsManager = ({
     }
   };
 
+  // 2. SALVAR CERTIFICADO
+  const handleSaveCertSettings = async () => {
+    try {
+      if (certData.base64) {
+        // Envia para a API da BrasilNFe
+        await NFeService.updateCertificate(
+          certData.api_token,
+          certData.password,
+          certData.base64,
+        );
+      }
+
+      // Prepara o payload injetando o store_id automaticamente via Contexto
+      const payload = tenantDB.supabase.withStoreId({
+        cert_password: certData.password,
+        api_token: certData.api_token,
+        environment: certData.environment,
+        csc_id: certData.csc_id,
+        csc_token: certData.csc_token,
+        ...(certData.base64 ? { cert_base64: certData.base64 } : {}),
+      });
+
+      const { error } = await supabase
+        .from("fiscal_settings")
+        .upsert(payload, { onConflict: "firebase_store_id" });
+      if (error) throw error;
+
+      setCertData((prev) => ({ ...prev, base64: "" }));
+      showNotification("Configurações salvas com sucesso!", "success");
+    } catch (e) {
+      showNotification(`Erro: ${e.message}`, "error");
+    }
+  };
+
+  // Efeito que tenta decodificar o certificado localmente sempre que a base64 ou a senha mudarem
+  useEffect(() => {
+    const verifyLocalCert = () => {
+      // Se ainda não carregou do banco ou não tem senha, não faz nada
+      if (!certData.base64 || !certData.password) return;
+
+      try {
+        const der = forge.util.decode64(certData.base64);
+        const asn1 = forge.asn1.fromDer(der);
+        const p12 = forge.pkcs12.pkcs12FromAsn1(asn1, false, certData.password);
+        const bags = p12.getBags({ bagType: forge.pki.oids.certBag });
+        const certBag = bags[forge.pki.oids.certBag]?.[0];
+
+        if (certBag && certBag.cert) {
+          const cert = certBag.cert;
+          setCertStatusInfo({
+            Expirado: new Date() > cert.validity.notAfter,
+            DtExpiracao: cert.validity.notAfter,
+            Subject:
+              cert.subject.attributes.find((a) => a.shortName === "CN")
+                ?.value || "Empresa Identificada",
+            status: 1,
+          });
+        }
+      } catch (error) {
+        // Se falhar (ex: senha errada no banco), mostramos o erro visualmente
+        setCertStatusInfo({
+          Expirado: true,
+          Error: "Não foi possível ler o certificado salvo.",
+          status: 0,
+        });
+      }
+    };
+
+    verifyLocalCert();
+  }, [certData.base64, certData.password]); // Monitora os dados do banco/estado
+
   // 3. PERFIS TRIBUTÁRIOS (Adicionar e Remover)
   const handleAddProfile = async () => {
     if (!newProfile.name) return showNotification("Nome obrigatório", "error");
@@ -5867,6 +6034,12 @@ const SettingsManager = ({
           className={`px-4 py-2 text-sm font-bold rounded-t-lg ${activeTab === "tax_profiles" ? "bg-emerald-600 text-white" : "bg-slate-100"}`}
         >
           Perfis Tributários
+        </button>
+        <button
+          onClick={() => setActiveTab("certificate")}
+          className={`px-4 py-2 text-sm font-bold rounded-t-lg ${activeTab === "certificate" ? "bg-slate-800 text-white" : "bg-slate-100"}`}
+        >
+          Certificado (BrasilNFe)
         </button>
         <button
           onClick={() => setActiveTab("registers")}
@@ -6291,6 +6464,177 @@ const SettingsManager = ({
       {/* ABA PERFIS FISCAIS */}
       {activeTab === "tax_profiles" && (
         <TaxRulesManager showNotification={showNotification} />
+      )}
+
+      {activeTab === "certificate" && (
+        <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
+          <h3 className="font-bold mb-4">Certificado Digital & Integração (BrasilNFe)</h3>
+
+          {/* FEEDBACK VISUAL DE STATUS */}
+          {certStatusInfo && (
+            <div
+              className={`mb-6 p-4 rounded-lg border ${certStatusInfo.Expirado ? "bg-red-50 border-red-200 text-red-800" : "bg-emerald-50 border-emerald-200 text-emerald-800"} animate-in slide-in-from-top-2`}
+            >
+              <h4 className="font-bold flex items-center gap-2 text-base">
+                {certStatusInfo.Expirado ? (
+                  <AlertTriangle size={20} />
+                ) : (
+                  <CheckCircle size={20} />
+                )}
+                {certStatusInfo.Expirado
+                  ? "Certificado Expirado ou Inválido!"
+                  : "Certificado Válido e Ativo!"}
+              </h4>
+              <div className="mt-3 text-sm grid grid-cols-1 md:grid-cols-2 gap-3 bg-white/50 p-3 rounded">
+                <p>
+                  <strong>Vencimento:</strong>{" "}
+                  <span
+                    className={
+                      certStatusInfo.Expirado ? "text-red-600 font-bold" : ""
+                    }
+                  >
+                    {certStatusInfo.DtExpiracao
+                      ? new Date(certStatusInfo.DtExpiracao).toLocaleDateString(
+                          "pt-BR",
+                        )
+                      : "Desconhecido"}
+                  </span>
+                </p>
+                <p>
+                  <strong>Status:</strong>{" "}
+                  {certStatusInfo.status === 1
+                    ? "1 (Operacional)"
+                    : certStatusInfo.status}
+                </p>
+              </div>
+              {certStatusInfo.Error && (
+                <p className="mt-3 text-sm text-red-600 font-bold bg-white/60 p-2 rounded border border-red-100">
+                  Erro Retornado: {certStatusInfo.Error}
+                </p>
+              )}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* O Token da API foi inteiramente removido do formulário do lojista */}
+
+            <div>
+              <label className="text-xs font-bold text-slate-700">
+                Ambiente de Emissão
+              </label>
+              <select
+                className="w-full border p-2.5 rounded bg-slate-50 text-sm font-bold"
+                value={certData.environment}
+                onChange={(e) =>
+                  setCertData({ ...certData, environment: e.target.value })
+                }
+              >
+                <option value="HOMOLOG">Homologação (Teste)</option>
+                <option value="PRODUCAO">Produção</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="text-xs font-bold text-slate-700">
+                Arquivo do Certificado (.pfx)
+              </label>
+              <input
+                type="file"
+                className="w-full text-xs border p-2 rounded cursor-pointer"
+                accept=".pfx,.p12"
+                onChange={(e) => {
+                  const file = e.target.files[0];
+                  if (file) {
+                    const reader = new FileReader();
+                    reader.onload = (evt) =>
+                      setCertData((prev) => ({
+                        ...prev,
+                        base64: evt.target.result.split(",")[1],
+                        fileName: file.name,
+                      }));
+                    reader.readAsDataURL(file);
+                  }
+                }}
+              />
+              <span className="text-xs text-emerald-600 font-bold block mt-1">
+                {certData.fileName}
+              </span>
+            </div>
+
+            <div>
+              <label className="text-xs font-bold text-slate-700">
+                Senha do Certificado
+              </label>
+              <div className="relative">
+                <input
+                  className="w-full border p-2.5 rounded pr-10 text-sm"
+                  type={showCertPassword ? "text" : "password"}
+                  value={certData.password}
+                  onChange={(e) =>
+                    setCertData({ ...certData, password: e.target.value })
+                  }
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowCertPassword(!showCertPassword)}
+                  className="absolute right-3 top-3 text-slate-400 hover:text-indigo-600 transition-colors"
+                  title={showCertPassword ? "Ocultar senha" : "Mostrar senha"}
+                >
+                  <Eye size={18} />
+                </button>
+              </div>
+            </div>
+
+            <div className="md:col-span-2 flex flex-col md:flex-row justify-end gap-3 mt-4 border-b border-slate-100 pb-6">
+              <button
+                onClick={handleSaveCertSettings}
+                className="bg-slate-900 text-white px-6 py-2.5 rounded font-bold hover:bg-slate-800 transition-colors flex items-center justify-center gap-2 shadow-sm"
+              >
+                <Save size={16} /> Enviar e Salvar
+              </button>
+            </div>
+
+            <div className="md:col-span-2 mt-2">
+              <h4 className="font-bold text-sm text-indigo-700 mb-3 flex items-center gap-2">
+                <FileText size={16} /> Configuração NFC-e (Cupom Fiscal)
+              </h4>
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-4 bg-indigo-50/50 p-4 rounded border border-indigo-100">
+                <div className="md:col-span-3">
+                  <label className="block text-xs font-bold text-indigo-900 mb-1">
+                    ID do CSC
+                  </label>
+                  <input
+                    className="w-full border p-2 rounded text-sm placeholder-indigo-300"
+                    value={certData.csc_id}
+                    onChange={(e) =>
+                      setCertData({ ...certData, csc_id: e.target.value })
+                    }
+                    placeholder="Ex: 000001"
+                  />
+                </div>
+                <div className="md:col-span-9">
+                  <label className="block text-xs font-bold text-indigo-900 mb-1">
+                    Código CSC (Token)
+                  </label>
+                  <input
+                    className="w-full border p-2 rounded text-sm placeholder-indigo-300"
+                    value={certData.csc_token}
+                    onChange={(e) =>
+                      setCertData({ ...certData, csc_token: e.target.value })
+                    }
+                    placeholder="Ex: 1A2B3C..."
+                  />
+                </div>
+                <div className="md:col-span-12">
+                  <p className="text-[10px] text-indigo-600 font-medium">
+                    * Obrigatório para emitir NFC-e. Obtenha estes códigos no
+                    portal da SEFAZ do seu estado (No Ambiente correspondente).
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {activeTab === "module_permissions" && (
@@ -6733,6 +7077,27 @@ const StoreApp = ({ onLogout, updateStore }) => {
   const [transactionCategories, setTransactionCategories] = useState([]);
   const [showNonFiscalStep, setShowNonFiscalStep] = useState(false);
 
+  // Provedor de emissão fiscal ativo para esta loja ('bling' ou 'brasilnfe'),
+  // definido pelo Super Admin em fiscal_provider_settings. 'bling' é o padrão
+  // quando não há registro (mantém o comportamento atual das demais lojas).
+  const [nfeProvider, setNfeProvider] = useState("bling");
+  useEffect(() => {
+    const loadProvider = async () => {
+      if (!store?.id) return;
+      try {
+        const { data } = await supabase
+          .from("fiscal_provider_settings")
+          .select("provider")
+          .eq("firebase_store_id", String(store.id))
+          .single();
+        setNfeProvider(data?.provider || "bling");
+      } catch (e) {
+        setNfeProvider("bling");
+      }
+    };
+    loadProvider();
+  }, [store?.id]);
+
   // --- CORREÇÃO: Estado EXCLUSIVO para clientes do Supabase ---
   // Isso garante que não usamos dados antigos do Firebase/LocalStorage
   const [salesClients, setSalesClients] = useState([]);
@@ -7091,25 +7456,51 @@ const cleanUndefinedFields = (obj, path = '') => {
 
     try {
       const appId = String(store.id);
-      const { data: blingConfig } = await tenantDB.supabase
-        .query("fiscal_bling_settings")
-        .single();
-
       const batch = tenantDB.firestore.batch();
 
-      if (!blingConfig?.connected) {
-        await tenantDB.firestore.update("sales", String(sale.id), {
-          nfeStatus: "SEM_INTEGRACAO",
-          nfeMessage: "Bling não conectado no momento da venda.",
-        });
+      if (nfeProvider === "brasilnfe") {
+        const { data: nfeConfig } = await tenantDB.supabase
+          .query("fiscal_settings")
+          .single();
 
-        showNotification(
-          "Bling não conectado. Imprimindo Cupom Não Fiscal.",
-          "warning",
-        );
-        printReceipt(sale, store.companyInfo);
-        setIsEmitting(false);
-        return;
+        const certDateString = nfeConfig?.cert_date || store?.certDate;
+        const isExpired = certDateString
+          ? new Date(certDateString) < new Date()
+          : false;
+
+        if (isExpired) {
+          await tenantDB.firestore.update("sales", String(sale.id), {
+            nfeStatus: "CONTINGÊNCIA",
+            nfeMessage: "Venda realizada com certificado expirado.",
+          });
+
+          showNotification(
+            "Certificado expirado. Imprimindo Cupom Não Fiscal.",
+            "warning",
+          );
+          printReceipt(sale, store.companyInfo);
+          setIsEmitting(false);
+          return;
+        }
+      } else {
+        const { data: blingConfig } = await tenantDB.supabase
+          .query("fiscal_bling_settings")
+          .single();
+
+        if (!blingConfig?.connected) {
+          await tenantDB.firestore.update("sales", String(sale.id), {
+            nfeStatus: "SEM_INTEGRACAO",
+            nfeMessage: "Bling não conectado no momento da venda.",
+          });
+
+          showNotification(
+            "Bling não conectado. Imprimindo Cupom Não Fiscal.",
+            "warning",
+          );
+          printReceipt(sale, store.companyInfo);
+          setIsEmitting(false);
+          return;
+        }
       }
 
       // 1. Gera o ID da venda antes para poder referenciar
@@ -7356,7 +7747,7 @@ const cleanUndefinedFields = (obj, path = '') => {
     return () => clearTimeout(timer);
   }, [store, showNotification]);
 
-  // --- VERIFICAÇÃO DIÁRIA DA CONEXÃO COM O BLING ---
+  // --- VERIFICAÇÃO DIÁRIA DA INTEGRAÇÃO FISCAL ATIVA (Bling ou Certificado BrasilNFe) ---
   useEffect(() => {
     const checkBlingConnection = async () => {
       if (!store || !store.id) return;
@@ -7388,16 +7779,93 @@ const cleanUndefinedFields = (obj, path = '') => {
       }
     };
 
+    const checkCertExpiration = async () => {
+      if (!store || !store.id) return;
+
+      const todayStr = new Date().toISOString().split("T")[0];
+      const storageKey = `last_cert_check_${store.id}`;
+      const lastCheck = localStorage.getItem(storageKey);
+
+      // Se já verificou/avisou hoje, interrompe (não enche a tela do usuário toda hora)
+      if (lastCheck === todayStr) return;
+
+      try {
+        // Busca o certificado no Supabase (já adaptando para o padrão que estamos usando)
+        const { data: certSettings } = await supabase
+          .from("fiscal_settings")
+          .select("cert_base64, cert_password")
+          .eq("firebase_store_id", String(store.id))
+          .single();
+
+        if (
+          certSettings &&
+          certSettings.cert_base64 &&
+          certSettings.cert_password
+        ) {
+          // Decodifica usando o node-forge
+          const der = forge.util.decode64(certSettings.cert_base64);
+          const asn1 = forge.asn1.fromDer(der);
+          const p12 = forge.pkcs12.pkcs12FromAsn1(
+            asn1,
+            false,
+            certSettings.cert_password,
+          );
+          const bags = p12.getBags({ bagType: forge.pki.oids.certBag });
+          const certBag = bags[forge.pki.oids.certBag]?.[0];
+
+          if (certBag && certBag.cert) {
+            const expirationDate = certBag.cert.validity.notAfter;
+            const today = new Date();
+
+            // Calcula a diferença em dias
+            const diffTime = expirationDate - today;
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+            if (diffDays <= 7 && diffDays > 0) {
+              showNotification(
+                `⚠️ Atenção: Seu Certificado Digital vence em ${diffDays} dia(s)!`,
+                "warning",
+              );
+              localStorage.setItem(storageKey, todayStr);
+            } else if (diffDays <= 0) {
+              showNotification(
+                `🚨 URGENTE: Seu Certificado Digital VENCEU! Emissão bloqueada.`,
+                "error",
+              );
+              localStorage.setItem(storageKey, todayStr);
+            } else {
+              // Se está tudo bem, marca que checou hoje para não ler o arquivo de novo
+              localStorage.setItem(storageKey, todayStr);
+            }
+          }
+        }
+      } catch (err) {
+        console.error(
+          "Erro ao verificar validade do certificado na inicialização:",
+          err,
+        );
+        // Em caso de erro na decodificação, não travamos o sistema, apenas ignoramos.
+      }
+    };
+
     // Colocamos um delay de 3.5 segundos para o aviso não atropelar outras notificações iniciais
-    const timer = setTimeout(checkBlingConnection, 3500);
+    const timer = setTimeout(
+      nfeProvider === "brasilnfe" ? checkCertExpiration : checkBlingConnection,
+      3500,
+    );
     return () => clearTimeout(timer);
-  }, [store, showNotification]);
+  }, [store, showNotification, nfeProvider]);
 
   // --- FUNÇÃO DE EMISSÃO NF-E ---
   // Modificado para receber targetModel ('55' ou '65')
   // --- FUNÇÃO DE EMISSÃO INTELIGENTE (AUTOMÁTICA) ---
 
-  const handleEmitNFe = async (sale) => {
+  const handleEmitNFe = (sale) =>
+    nfeProvider === "brasilnfe"
+      ? handleEmitNFeBrasilNFe(sale)
+      : handleEmitNFeBling(sale);
+
+  const handleEmitNFeBling = async (sale) => {
     setIsEmitting(true);
     showNotification("Emitindo nota fiscal via Bling...", "info");
 
@@ -7584,6 +8052,211 @@ const cleanUndefinedFields = (obj, path = '') => {
     }
   };
 
+  // --- FUNÇÃO DE EMISSÃO NF-E VIA BRASILNFE (legado) ---
+  const handleEmitNFeBrasilNFe = async (sale) => {
+    setIsEmitting(true);
+    showNotification("Calculando numeração e emitindo...", "info");
+
+    try {
+      const appId = String(store.id);
+
+      // 1. Configurações
+      const { data: nfeConfig } = await supabase
+        .from("fiscal_settings")
+        .select("*")
+        .eq("firebase_store_id", appId)
+        .single();
+
+      if (!nfeConfig?.api_token)
+        throw new Error("Token Fiscal não configurado.");
+
+      // 2. Perfis (SQL)
+      const { data: taxProfiles } = await supabase
+        .from("fiscal_tax_profiles")
+        .select("*")
+        .eq("firebase_store_id", appId);
+
+      // 3. Cliente
+      let clientFull = null;
+      if (sale.clientId) {
+        const { data: clientDb } = await supabase
+          .from("fiscal_clients")
+          .select("*")
+          .eq("firebase_store_id", appId)
+          .eq("id", sale.clientId)
+          .single();
+        if (clientDb) {
+          clientFull = {
+            ...clientDb,
+            address: {
+              street: clientDb.street,
+              number: clientDb.number,
+              neighborhood: clientDb.neighborhood,
+              city: clientDb.city,
+              state: clientDb.state,
+              zip_code: clientDb.zip_code,
+              ibge_code: clientDb.ibge_code,
+            },
+          };
+        }
+      }
+
+      // 4. Modelo
+      let targetModel = "65";
+      if (clientFull) {
+        const cleanDoc = clientFull.tax_id?.replace(/\D/g, "") || "";
+        if (
+          cleanDoc.length > 11 ||
+          (clientFull.address?.zip_code && clientFull.address?.street)
+        ) {
+          targetModel = "55";
+        }
+      }
+
+      // --- 4.1 CÁLCULO DE NUMERAÇÃO ---
+      // Busca a última nota emitida DESTE modelo NESTE ambiente
+      const { data: lastInvoice } = await supabase
+        .from("fiscal_invoices")
+        .select("nfe_number")
+        .eq("firebase_store_id", appId)
+        .eq("nfe_model", targetModel)
+        .eq("environment", nfeConfig.environment) // Não mistura numeração de teste com produção
+        .order("nfe_number", { ascending: false })
+        .limit(1)
+        .single();
+
+      // Se achou última, soma 1. Se não, começa do 1.
+      const nextNumber = (lastInvoice?.nfe_number || 0) + 1;
+      console.log(
+        `🔢 Próximo Número calculado: ${nextNumber} (Modelo ${targetModel})`,
+      );
+
+      // 5. Recálculo Itens (Com trava de segurança para campos undefined)
+      const itemsWithFreshTaxes = sale.items.map((item) => {
+        const liveProduct = products.find((p) => p.id === item.id);
+        const mergedItem = liveProduct
+          ? {
+              ...item,
+              ncm: liveProduct.ncm || item.ncm || "",
+              cest: liveProduct.cest || item.cest || "",
+              taxProfileId: String(
+                liveProduct.taxProfileId || item.taxProfileId || "",
+              ),
+            }
+          : item;
+
+        const freshProfile = taxProfiles?.find(
+          (tp) => String(tp.id) === mergedItem.taxProfileId,
+        );
+        if (freshProfile) {
+          const newTaxes = calculateItemTaxes(
+            mergedItem,
+            clientFull,
+            store.companyInfo,
+            freshProfile,
+          );
+          return { ...mergedItem, taxes: newTaxes };
+        } else {
+          const basicTaxes = calculateItemTaxes(
+            mergedItem,
+            clientFull,
+            store.companyInfo,
+            null,
+          );
+          return { ...mergedItem, taxes: basicTaxes };
+        }
+      });
+
+      const saleWithFreshTaxes = { ...sale, items: itemsWithFreshTaxes };
+
+      // 6. Payload (Passando o nextNumber)
+      const payload = buildNFePayload(
+        saleWithFreshTaxes,
+        store.companyInfo,
+        clientFull,
+        nfeConfig,
+        targetModel,
+        nextNumber,
+      );
+
+      console.log("🚨 PAYLOAD FINAL:", JSON.stringify(payload, null, 2));
+
+      if (payload.TipoAmbiente !== "1" && payload.TipoAmbiente !== "2") {
+        throw new Error(`Ambiente inválido (${payload.TipoAmbiente}).`);
+      }
+
+      // 7. Envio
+      const apiResponse = await NFeService.emit(payload);
+      console.log("📢 RESPOSTA API:", apiResponse);
+
+      // 8. Processamento
+      const isSuccess =
+        apiResponse.Sucesso === true || apiResponse.ReturnNF?.Ok === true;
+      const returnData = apiResponse.ReturnNF || {};
+
+      const saleRef = doc(
+        firebase.db,
+        "artifacts",
+        appId,
+        "public",
+        "data",
+        "sales",
+        String(sale.id),
+      );
+
+      if (isSuccess) {
+        const invoiceData = {
+          firebase_store_id: appId,
+          sale_id: String(sale.id),
+          environment: nfeConfig.environment,
+          nfe_model: targetModel,
+          nfe_number: returnData.Numero || nextNumber, // Usa o retornado ou o calculado
+          nfe_series: returnData.Serie || 55,
+          nfe_key: returnData.ChaveNF || returnData.ChaveNFe,
+          nfe_protocol: returnData.Protocolo || returnData.nProt,
+          status: returnData.DsStatusRespostaSefaz || "AUTORIZADA",
+          pdf_base64: apiResponse.Base64File || null,
+          xml_content: apiResponse.Base64Xml || null,
+          client_name: clientFull?.name || sale.clientName || "Consumidor",
+          total_value: returnData.Detalhes?.valorNf || sale.total,
+        };
+
+        const { error: dbError } = await supabase
+          .from("fiscal_invoices")
+          .insert(invoiceData);
+        if (dbError) console.error("Erro SQL:", dbError);
+
+        await updateDoc(saleRef, {
+          nfeStatus: "AUTORIZADA",
+          nfeKey: returnData.ChaveNF || returnData.ChaveNFe,
+          nfeMessage: "Emitida com Sucesso",
+        });
+
+        showNotification(
+          `Nota ${invoiceData.nfe_number} Autorizada!`,
+          "success",
+        );
+      } else {
+        const errorMsg =
+          apiResponse.Mensagem ||
+          apiResponse.Error ||
+          (apiResponse.ReturnNF
+            ? apiResponse.ReturnNF.DsStatusRespostaSefaz
+            : "Erro desconhecido");
+        await updateDoc(saleRef, {
+          nfeStatus: "REJEITADA",
+          nfeMessage: errorMsg,
+        });
+        showNotification(`Rejeição: ${errorMsg}`, "error");
+      }
+    } catch (error) {
+      console.error("Erro Crítico:", error);
+      showNotification(`Erro: ${error.message}`, "error");
+    } finally {
+      setIsEmitting(false);
+    }
+  };
+
   // 2. CONFIRMAR: Envia a Nota Real (fluxo de pré-visualização, legado)
   const handleConfirmEmission = async () => {
     if (!previewData || !currentSaleToEmit) return;
@@ -7591,17 +8264,6 @@ const cleanUndefinedFields = (obj, path = '') => {
 
     try {
       const appId = String(store.id);
-      const { data: blingConfig } = await supabase
-        .from("fiscal_bling_settings")
-        .select("*")
-        .eq("firebase_store_id", appId)
-        .single();
-      if (!blingConfig?.connected) throw new Error("Bling não conectado.");
-
-      const accessToken = await BlingService.ensureValidToken(tenantDB, blingConfig);
-      const created = await BlingService.createNota(previewData.tipoDocumento || "nfce", accessToken, previewData.payload);
-      await BlingService.enviarNota(previewData.tipoDocumento || "nfce", accessToken, created.data.id);
-
       const saleRef = doc(
         firebase.db,
         "artifacts",
@@ -7612,11 +8274,35 @@ const cleanUndefinedFields = (obj, path = '') => {
         String(currentSaleToEmit.id),
       );
 
-      await updateDoc(saleRef, {
-        nfeStatus: "PROCESSANDO",
-        nfeRef: String(currentSaleToEmit.id),
-        nfeMessage: "Enviado para processamento na SEFAZ",
-      });
+      if (nfeProvider === "brasilnfe") {
+        // Usa o MESMO payload que foi validado no preview
+        const apiResponse = await NFeService.emit(previewData.payload);
+
+        await updateDoc(saleRef, {
+          nfeStatus: apiResponse.Status || apiResponse.status || "Processando",
+          nfeRef: String(currentSaleToEmit.id),
+          nfeKey: apiResponse.ChaveNFe || apiResponse.chave_nfe || null,
+          nfeMessage:
+            apiResponse.Mensagem || apiResponse.Motivo || "Enviado com sucesso",
+        });
+      } else {
+        const { data: blingConfig } = await supabase
+          .from("fiscal_bling_settings")
+          .select("*")
+          .eq("firebase_store_id", appId)
+          .single();
+        if (!blingConfig?.connected) throw new Error("Bling não conectado.");
+
+        const accessToken = await BlingService.ensureValidToken(tenantDB, blingConfig);
+        const created = await BlingService.createNota(previewData.tipoDocumento || "nfce", accessToken, previewData.payload);
+        await BlingService.enviarNota(previewData.tipoDocumento || "nfce", accessToken, created.data.id);
+
+        await updateDoc(saleRef, {
+          nfeStatus: "PROCESSANDO",
+          nfeRef: String(currentSaleToEmit.id),
+          nfeMessage: "Enviado para processamento na SEFAZ",
+        });
+      }
 
       showNotification("Nota Fiscal Enviada com Sucesso!", "success");
       setPreviewModalOpen(false);
@@ -8344,10 +9030,19 @@ const App = () => {
     );
   if (loginMode === "superadmin")
     return (
-      <SuperAdminDashboard
-        onLogout={handleLogout}
-        showNotification={showNotification}
-      />
+      <>
+        <SuperAdminDashboard
+          onLogout={handleLogout}
+          showNotification={showNotification}
+        />
+        {notification && (
+          <Toast
+            message={notification.message}
+            type={notification.type}
+            onClose={() => setNotification(null)}
+          />
+        )}
+      </>
     );
 
   return (
