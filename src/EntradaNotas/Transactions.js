@@ -43,14 +43,6 @@ const Transactions = ({ showNotification, products, initialTab, onFinalizeSale, 
       if(isExpenseModalOpen) fetchData();
   }, [isExpenseModalOpen, tenantDB]);
 
-  const safeCurrencyToNumber = (val) => {
-      if (!val) return 0;
-      if (typeof val === 'number') return val;
-      const cleaned = String(val).replace(/\./g, '').replace(',', '.');
-      const result = parseFloat(cleaned);
-      return isNaN(result) ? 0 : result;
-  };
-
   const handleSaveExpense = async () => {
       if (!expenseForm.description || !expenseForm.value || !expenseForm.category) {
           alert("Preencha descrição, valor e categoria.");
@@ -59,7 +51,7 @@ const Transactions = ({ showNotification, products, initialTab, onFinalizeSale, 
 
       const todayStr = new Date().toISOString().split('T')[0];
       const calculatedStatus = expenseForm.date > todayStr ? 'PENDENTE' : 'PAGO';
-      const amountNum = safeCurrencyToNumber(expenseForm.value);
+      const amountNum = parseFloat(expenseForm.value) || 0;
 
       if (calculatedStatus === 'PAGO' && !expenseForm.accountId) {
           alert("Para despesas pagas hoje ou retroativas, selecione de qual conta o dinheiro saiu.");

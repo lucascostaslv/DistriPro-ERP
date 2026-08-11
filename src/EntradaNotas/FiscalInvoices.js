@@ -7,6 +7,8 @@ import { BlingService } from '../utils/BlingService';
 import { NFeService } from '../utils/NFeService';
 import { useTenant } from '../contexts/TenantContext';
 
+const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(val) || 0);
+
 // Função auxiliar para baixar Base64
 
 export const downloadSmart = (base64, filename) => {
@@ -400,7 +402,7 @@ const FiscalInvoices = ({ storeConfig, showNotification, currentUser}) => {
                             </div>
                         </td>
                         <td className="p-4 font-medium text-slate-700">{inv.client_name}</td>
-                        <td className="p-4 text-right font-bold text-slate-800">R$ {Number(inv.total_value).toFixed(2)}</td>
+                        <td className="p-4 text-right font-bold text-slate-800">{formatCurrency(inv.total_value)}</td>
                         <td className="p-4 text-center">
                              <div className="flex flex-col items-center gap-1">
                                  {/* Status Principal */}

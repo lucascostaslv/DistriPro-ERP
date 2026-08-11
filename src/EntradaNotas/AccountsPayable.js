@@ -199,6 +199,9 @@ const AccountsPayable = ({ products }) => {
           return {
             id: item.id,
             source: "expense",
+            // Referência à nota de compra de origem (quando a despesa é uma parcela gerada em EntradaNotas),
+            // usada para agrupar e reajustar em lote todas as parcelas da mesma nota.
+            noteId: item.invoiceId || null,
             header: {
               number: "DESP",
               entityName:
@@ -214,7 +217,9 @@ const AccountsPayable = ({ products }) => {
             financials: [
               {
                 number: "1",
-                dueDate: item.date,
+                // dueDate é o vencimento real da parcela; some despesas antigas (lançadas direto no modal
+                // "Nova Despesa") não têm esse campo — nesse caso usa a data de competência como vencimento.
+                dueDate: item.dueDate || item.date,
                 value: Number(item.amount) || 0,
                 status: computedStatus,
               },
@@ -292,6 +297,7 @@ const AccountsPayable = ({ products }) => {
         items.push({
           uniqueId: `${inv.id}_${inst.number}`,
           invoiceId: inv.id,
+          noteId: inv.noteId || null,
           invoiceNumber: inv.header.number,
           supplier: inv.header.entityName,
           issueDate: inv.header.issueDate,
@@ -321,6 +327,70 @@ const AccountsPayable = ({ products }) => {
   // --- ESTADOS DO AGENDAMENTO AUTOMÁTICO ---
   const [autoPayModal, setAutoPayModal] = useState(null);
   const processingAuto = useRef(false);
+
+  // --- ESTADOS DE EDIÇÃO DE VENCIMENTO ---
+  const [editDueDateModal, setEditDueDateModal] = useState(null); // { item, date }
+  const [bulkShiftModal, setBulkShiftModal] = useState(null); // { item, day }
+
+  const handleSaveDueDate = async () => {
+    if (!editDueDateModal?.date) return alert("Selecione uma data.");
+    const { item } = editDueDateModal;
+    if (item.source !== "expense") {
+      alert(
+        "Edição de vencimento disponível apenas para despesas lançadas no fluxo atual (Contas a Pagar). Para notas antigas, ajuste pela tela de detalhes.",
+      );
+      return;
+    }
+    try {
+      await tenantDB.firestore.update("financial_movements", item.invoiceId, {
+        dueDate: editDueDateModal.date,
+      });
+      setEditDueDateModal(null);
+    } catch (e) {
+      console.error(e);
+      alert("Erro ao atualizar vencimento: " + e.message);
+    }
+  };
+
+  const handleSaveBulkShift = async () => {
+    const day = parseInt(bulkShiftModal?.day, 10);
+    if (!day || day < 1 || day > 31) return alert("Informe um dia válido (1 a 31).");
+    const noteId = bulkShiftModal.item.noteId;
+    if (!noteId) return;
+
+    const siblings = rawExpenses.filter(
+      (e) => e.noteId === noteId && e.financials[0].status !== "PAGO",
+    );
+    if (siblings.length === 0) {
+      setBulkShiftModal(null);
+      return;
+    }
+    if (
+      !window.confirm(
+        `Isso vai alterar o dia de vencimento de ${siblings.length} parcela(s) pendente(s) desta nota para o dia ${day}. Confirmar?`,
+      )
+    )
+      return;
+
+    try {
+      const batch = tenantDB.firestore.batch();
+      siblings.forEach((exp) => {
+        const oldDate = new Date(`${exp.financials[0].dueDate}T00:00:00`);
+        const year = oldDate.getFullYear();
+        const month = oldDate.getMonth();
+        const lastDayOfMonth = new Date(year, month + 1, 0).getDate();
+        const clampedDay = Math.min(day, lastDayOfMonth);
+        const newDate = `${year}-${String(month + 1).padStart(2, "0")}-${String(clampedDay).padStart(2, "0")}`;
+        batch.update("financial_movements", exp.id, { dueDate: newDate });
+      });
+      await batch.commit();
+      setBulkShiftModal(null);
+      alert(`${siblings.length} parcela(s) atualizadas.`);
+    } catch (e) {
+      console.error(e);
+      alert("Erro ao atualizar parcelas: " + e.message);
+    }
+  };
 
   // --- ROBÔ DE PAGAMENTO AUTOMÁTICO (Vigia e liquida as contas no dia certo) ---
   useEffect(() => {
@@ -729,6 +799,28 @@ const AccountsPayable = ({ products }) => {
                           >
                             <CheckCircle size={14} />
                           </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditDueDateModal({ item, date: item.dueDate });
+                            }}
+                            className="p-1.5 bg-amber-50 text-amber-600 rounded hover:bg-amber-100 transition-colors shadow-sm"
+                            title="Editar data de vencimento"
+                          >
+                            <Calendar size={14} />
+                          </button>
+                          {item.noteId && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setBulkShiftModal({ item, day: "" });
+                              }}
+                              className="p-1.5 bg-purple-50 text-purple-600 rounded hover:bg-purple-100 transition-colors shadow-sm"
+                              title="Alterar dia de vencimento de todas as parcelas futuras desta nota"
+                            >
+                              <CalendarDays size={14} />
+                            </button>
+                          )}
                         </>
                       )}
                       <button
@@ -968,6 +1060,101 @@ const AccountsPayable = ({ products }) => {
                   className="px-4 py-2 bg-indigo-600 text-white rounded text-sm font-bold flex items-center gap-2"
                 >
                   <CheckCircle size={16} /> Programar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE EDIÇÃO DE VENCIMENTO (parcela individual) */}
+      {editDueDateModal && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6">
+            <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-2">
+              <Calendar size={20} className="text-amber-600" /> Editar Vencimento
+            </h3>
+            <p className="text-sm text-slate-500 mb-4">
+              {editDueDateModal.item.supplier} — Parcela {editDueDateModal.item.installmentNum}ª
+            </p>
+
+            <div className="space-y-4">
+              <div>
+                <label className="text-xs font-bold text-slate-500 uppercase block mb-1">
+                  Nova Data de Vencimento
+                </label>
+                <input
+                  type="date"
+                  className="w-full border p-2 rounded text-sm bg-white focus:ring-2 outline-none border-slate-200 focus:ring-amber-200"
+                  value={editDueDateModal.date}
+                  onChange={(e) =>
+                    setEditDueDateModal({ ...editDueDateModal, date: e.target.value })
+                  }
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-4">
+                <button
+                  onClick={() => setEditDueDateModal(null)}
+                  className="px-4 py-2 text-sm font-bold text-slate-500"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={handleSaveDueDate}
+                  className="px-4 py-2 bg-amber-600 text-white rounded text-sm font-bold flex items-center gap-2"
+                >
+                  <CheckCircle size={16} /> Salvar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE DESLOCAMENTO EM LOTE (todas as parcelas futuras da mesma nota) */}
+      {bulkShiftModal && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6">
+            <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-2">
+              <CalendarDays size={20} className="text-purple-600" /> Alterar Dia de Vencimento
+            </h3>
+            <p className="text-sm text-slate-500 mb-4">
+              Aplica o novo dia do mês a todas as parcelas pendentes de{" "}
+              <strong>{bulkShiftModal.item.supplier}</strong>, mantendo o mês/ano original de cada uma.
+            </p>
+
+            <div className="space-y-4">
+              <div>
+                <label className="text-xs font-bold text-slate-500 uppercase block mb-1">
+                  Novo Dia do Mês (1-31)
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="31"
+                  className="w-full border p-2 rounded text-sm bg-white focus:ring-2 outline-none border-slate-200 focus:ring-purple-200"
+                  value={bulkShiftModal.day}
+                  onChange={(e) => setBulkShiftModal({ ...bulkShiftModal, day: e.target.value })}
+                  placeholder="Ex: 10"
+                />
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Meses mais curtos usam o último dia válido (ex.: dia 31 em fevereiro vira 28/29).
+                </p>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-4">
+                <button
+                  onClick={() => setBulkShiftModal(null)}
+                  className="px-4 py-2 text-sm font-bold text-slate-500"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={handleSaveBulkShift}
+                  className="px-4 py-2 bg-purple-600 text-white rounded text-sm font-bold flex items-center gap-2"
+                >
+                  <CheckCircle size={16} /> Aplicar a Todas
                 </button>
               </div>
             </div>

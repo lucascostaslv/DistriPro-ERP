@@ -50,6 +50,10 @@ import {
   Wine,
   Landmark,
   Shield,
+  Percent,
+  XCircle,
+  Truck,
+  RotateCcw,
 } from "lucide-react";
 import {
   collection,
@@ -850,7 +854,7 @@ const SuperAdminDashboard = ({ onLogout, showNotification }) => {
 // --- RECEIPT UTILS ---
 export const printReceipt = (sale, companyInfo) => {
   const LEFT_MARGIN = "  "; // 2 espaços: desloca o conteúdo para direita, evitando zona morta da impressora
-  const lineLength = 44; // largura útil após margem esquerda (48 - 2 espaços - 2 de padding = ~44)
+  const lineLength = 40; // largura útil após margem esquerda, com folga de segurança para não estourar o papel de 80mm
   const separator = LEFT_MARGIN + "-".repeat(lineLength) + "\n";
 
   const center = (text) => {
@@ -860,6 +864,9 @@ export const printReceipt = (sale, companyInfo) => {
   };
 
   const line = (text) => LEFT_MARGIN + text + "\n";
+
+  // Formato monetário brasileiro (vírgula decimal) — toFixed(2) sozinho gera "6578.56", errado para o padrão BR
+  const money = (n) => Number(n).toFixed(2).replace(".", ",");
 
   const rightAlign = (label, value) => {
     const maxVal = lineLength - label.length;
@@ -888,13 +895,13 @@ export const printReceipt = (sale, companyInfo) => {
 
   sale.items.forEach((item) => {
     const totalItemVal = item.price * item.qty;
-    const totalStr = `R$${totalItemVal.toFixed(2)}`;
+    const totalStr = `R$${money(totalItemVal)}`;
     const qtyStr = `${item.qty}x `;
     const maxNameLen = lineLength - qtyStr.length - totalStr.length - 1;
     const nameStr = item.name.substring(0, maxNameLen > 0 ? maxNameLen : 1).padEnd(maxNameLen > 0 ? maxNameLen : 1, " ");
     receiptContent += LEFT_MARGIN + qtyStr + nameStr + " " + totalStr + "\n";
     if (item.qty > 1) {
-      const unitLabel = `   @ R$${item.price.toFixed(2)} un.`;
+      const unitLabel = `   @ R$${money(item.price)} un.`;
       receiptContent += LEFT_MARGIN + unitLabel + "\n";
     }
   });
@@ -903,7 +910,10 @@ export const printReceipt = (sale, companyInfo) => {
 
   const totalQty = sale.items.reduce((acc, item) => acc + item.qty, 0);
   receiptContent += rightAlign("QTD. ITENS:", totalQty);
-  receiptContent += rightAlign("TOTAL R$:", sale.total.toFixed(2));
+  if (sale.discountTotal > 0) {
+    receiptContent += rightAlign("DESCONTO R$:", `-${money(sale.discountTotal)}`);
+  }
+  receiptContent += rightAlign("TOTAL R$:", money(sale.total));
 
   receiptContent += separator;
   receiptContent += line(`PAGAMENTO: ${sale.paymentMethod}${sale.installments > 1 ? ` (${sale.installments}x)` : ""}`);
@@ -942,8 +952,8 @@ export const printReceipt = (sale, companyInfo) => {
           padding: 2px 4px;
           width: 80mm;
           box-sizing: border-box;
-          overflow-x: hidden;
-          white-space: pre;
+          white-space: pre-wrap;
+          word-break: break-all;
         }
       </style>
     </head>
@@ -1224,9 +1234,29 @@ const PDV = ({
   const { currentStore: storeConfig, currentUser, tenantDB } = useTenant();
 
   const [cart, setCart] = useState([]);
+  const [cartDiscount, setCartDiscount] = useState({ type: "NONE", value: 0 }); // type: 'VALUE' | 'PERCENT' | 'NONE'
+  const [discountEditItemId, setDiscountEditItemId] = useState(null);
+  const [discountEditDraft, setDiscountEditDraft] = useState({ type: "PERCENT", value: "" });
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState("");
   const [showComandas, setShowComandas] = useState(false);
+
+  // --- CONSIGNAÇÃO: remessa (saída) ---
+  const [pdvMode, setPdvMode] = useState("VENDA"); // 'VENDA' | 'CONSIGNACAO'
+  const [consignRemessaModalOpen, setConsignRemessaModalOpen] = useState(false);
+  const [consignClientId, setConsignClientId] = useState("");
+  const [isNewConsignClient, setIsNewConsignClient] = useState(false);
+  const [newConsignClientName, setNewConsignClientName] = useState("");
+  const [isProcessingConsignRemessa, setIsProcessingConsignRemessa] = useState(false);
+
+  // --- CONSIGNAÇÃO: retorno / acerto ---
+  const [returnConsignModalOpen, setReturnConsignModalOpen] = useState(false);
+  const [openConsignments, setOpenConsignments] = useState([]);
+  const [loadingConsignments, setLoadingConsignments] = useState(false);
+  const [selectedConsignmentId, setSelectedConsignmentId] = useState(null);
+  const [returnQtyDrafts, setReturnQtyDrafts] = useState({}); // productId -> string
+  const [closeConsignPaymentMethod, setCloseConsignPaymentMethod] = useState("Dinheiro");
+  const [isProcessingConsignReturn, setIsProcessingConsignReturn] = useState(false);
 
   const [showDosePanel, setShowDosePanel] = useState(false);
 
@@ -1654,6 +1684,7 @@ const PDV = ({
   const clearCart = () => {
     if (window.confirm("Limpar todo o carrinho?")) {
       setCart([]);
+      setCartDiscount({ type: "NONE", value: 0 });
       setPaymentMethod("");
       setPaymentEntries([]);
     }
@@ -1668,14 +1699,325 @@ const PDV = ({
         const wholesalePrice = Number(originalProduct.wholesalePrice) || 0;
         if (wholesalePrice <= 0) return item;
         const newIsWholesale = !item.isWholesale;
+        const newBasePrice = newIsWholesale ? wholesalePrice : retailPrice;
         return {
           ...item,
           isWholesale: newIsWholesale,
-          price: newIsWholesale ? wholesalePrice : retailPrice,
+          price: newBasePrice,
+          originalPrice: newBasePrice,
+          discountValue: 0,
+          discountPercent: 0,
+          discountType: "NONE",
           priceMode: newIsWholesale ? "ATACADO" : "VAREJO",
         };
       }),
     );
+  };
+
+  // Aplica desconto (R$ ou %) a um item do carrinho, sempre a partir do preço de tabela (originalPrice)
+  const applyItemDiscount = (itemId, type, rawValue) => {
+    const value = parseFloat(String(rawValue).replace(",", ".")) || 0;
+    setCart((currentCart) =>
+      currentCart.map((i) => {
+        if (i.id !== itemId) return i;
+        const base = Number(i.originalPrice ?? i.price) || 0;
+        let discountValue = 0;
+        let discountPercent = 0;
+        if (type === "PERCENT") {
+          discountPercent = Math.min(Math.max(value, 0), 100);
+          discountValue = (base * discountPercent) / 100;
+        } else if (type === "VALUE") {
+          discountValue = Math.min(Math.max(value, 0), base);
+          discountPercent = base > 0 ? (discountValue / base) * 100 : 0;
+        }
+        return {
+          ...i,
+          originalPrice: base,
+          price: Math.max(0, base - discountValue),
+          discountValue,
+          discountPercent,
+          discountType: discountValue > 0 ? type : "NONE",
+        };
+      }),
+    );
+  };
+
+  // --- CONSIGNAÇÃO: registra a remessa (saída) para o revendedor ---
+  const handleConfirmConsignmentRemessa = async () => {
+    let clientId = consignClientId ? Number(consignClientId) : null;
+    let clientName = "Revendedor";
+
+    if (isNewConsignClient) {
+      if (!newConsignClientName.trim())
+        return showNotification("Nome do revendedor obrigatório.", "error");
+      clientName = newConsignClientName.trim();
+      clientId = Date.now();
+      setClients((prev) => [...prev, { id: clientId, name: clientName, phone: "", type: "PF" }]);
+    } else {
+      if (!consignClientId) return showNotification("Selecione o revendedor.", "error");
+      clientName = clients.find((c) => c.id === Number(consignClientId))?.name || "Revendedor";
+    }
+
+    if (cart.length === 0) return showNotification("Carrinho vazio.", "error");
+    if (!caixaSession) return showNotification("Abra o caixa antes de registrar uma remessa.", "error");
+
+    setIsProcessingConsignRemessa(true);
+    try {
+      const batch = tenantDB.firestore.batch();
+      const { serverTimestamp: sts } = tenantDB.firestore.utils;
+      const consignmentId = tenantDB.firestore.generateId("consignments");
+
+      const items = cart.map((item) => ({
+        productId: item.originalId || item.id,
+        name: item.name,
+        qty: item.qty,
+        unitPrice: item.price,
+        cost: item.cost || 0,
+        ncm: item.ncm || "",
+        cest: item.cest || "",
+        taxProfileId: item.taxProfileId || null,
+      }));
+      const totalRemessa = Math.round(items.reduce((acc, i) => acc + i.unitPrice * i.qty, 0) * 100) / 100;
+
+      batch.set("consignments", consignmentId, {
+        id: consignmentId,
+        type: "REMESSA",
+        status: "ABERTA",
+        parentConsignmentId: null,
+        clientId,
+        clientName,
+        items,
+        qtyReturned: {},
+        totalRemessa,
+        totalRetornado: 0,
+        totalApurado: totalRemessa,
+        saleIdAcerto: null,
+        userId: currentUser?.id || "anon",
+        userName: currentUser?.username || "Sistema",
+        caixaId: caixaSession?.caixaId || null,
+        caixaName: caixaSession?.caixaName || null,
+        createdAt: sts(),
+        updatedAt: sts(),
+      });
+
+      cart.forEach((item) => {
+        const originalProd = products.find((p) => p.id === (item.originalId || item.id));
+        if (!originalProd) return;
+        if (originalProd.itemType === "pack" && originalProd.parentId && originalProd.conversionFactor) {
+          batch.update("products", originalProd.parentId, {
+            stock: increment(-(item.qty * originalProd.conversionFactor)),
+          });
+        } else {
+          batch.update("products", originalProd.id, { stock: increment(-item.qty) });
+        }
+      });
+
+      // Auditoria de estoque (mesmo padrão da saída avulsa em InventoryWMS)
+      batch.add("stock_movements", {
+        type: "REMESSA_CONSIGNACAO",
+        consignmentId,
+        justificativa: `Remessa de consignação para ${clientName}`,
+        items: items.map((i) => ({ productId: i.productId, name: i.name, qty: i.qty })),
+        userId: currentUser?.id || "anon",
+        userName: currentUser?.username || "Sistema",
+        createdAt: sts(),
+      });
+
+      await batch.commit();
+      showNotification("Remessa de consignação registrada!", "success");
+      setCart([]);
+      setCartDiscount({ type: "NONE", value: 0 });
+      setConsignRemessaModalOpen(false);
+      setConsignClientId("");
+      setIsNewConsignClient(false);
+      setNewConsignClientName("");
+      setPdvMode("VENDA");
+    } catch (e) {
+      console.error(e);
+      showNotification("Erro ao registrar remessa: " + e.message, "error");
+    } finally {
+      setIsProcessingConsignRemessa(false);
+    }
+  };
+
+  // --- CONSIGNAÇÃO: busca remessas em aberto para a tela de retorno ---
+  const fetchOpenConsignments = async () => {
+    setLoadingConsignments(true);
+    try {
+      const all = await tenantDB.firestore.getAll("consignments");
+      const open = all.filter((c) => c.type === "REMESSA" && c.status !== "FINALIZADA");
+      setOpenConsignments(open);
+    } catch (e) {
+      console.error(e);
+      showNotification("Erro ao buscar consignações: " + e.message, "error");
+    } finally {
+      setLoadingConsignments(false);
+    }
+  };
+
+  // --- CONSIGNAÇÃO: registra retorno de itens não vendidos e, opcionalmente, fecha e gera a cobrança ---
+  const handleSubmitConsignmentReturn = async (close) => {
+    const remessa = openConsignments.find((c) => c.id === selectedConsignmentId);
+    if (!remessa) return;
+
+    const returnedItems = remessa.items.map((item) => {
+      const alreadyReturned = (remessa.qtyReturned || {})[item.productId] || 0;
+      const pending = item.qty - alreadyReturned;
+      const draftQty = Math.min(Math.max(parseInt(returnQtyDrafts[item.productId], 10) || 0, 0), pending);
+      return { productId: item.productId, name: item.name, qty: draftQty, unitPrice: item.unitPrice };
+    });
+
+    const hasReturns = returnedItems.some((ri) => ri.qty > 0);
+    if (!hasReturns && !close) {
+      return showNotification("Informe ao menos uma quantidade a devolver.", "error");
+    }
+
+    setIsProcessingConsignReturn(true);
+    try {
+      const batch = tenantDB.firestore.batch();
+      const { serverTimestamp: sts } = tenantDB.firestore.utils;
+
+      returnedItems.forEach((ri) => {
+        if (!ri.qty) return;
+        const prod = products.find((p) => p.id === ri.productId);
+        if (!prod) return;
+        if (prod.itemType === "pack" && prod.parentId && prod.conversionFactor) {
+          batch.update("products", prod.parentId, { stock: increment(ri.qty * prod.conversionFactor) });
+        } else {
+          batch.update("products", prod.id, { stock: increment(ri.qty) });
+        }
+      });
+
+      if (hasReturns) {
+        const returnId = tenantDB.firestore.generateId("consignments");
+        batch.set("consignments", returnId, {
+          id: returnId,
+          type: "RETORNO",
+          parentConsignmentId: remessa.id,
+          clientId: remessa.clientId,
+          clientName: remessa.clientName,
+          items: returnedItems.filter((ri) => ri.qty > 0),
+          userId: currentUser?.id || "anon",
+          userName: currentUser?.username || "Sistema",
+          createdAt: sts(),
+        });
+
+        batch.add("stock_movements", {
+          type: "RETORNO_CONSIGNACAO",
+          consignmentId: remessa.id,
+          justificativa: `Retorno de consignação — ${remessa.clientName}`,
+          items: returnedItems.filter((ri) => ri.qty > 0),
+          userId: currentUser?.id || "anon",
+          userName: currentUser?.username || "Sistema",
+          createdAt: sts(),
+        });
+      }
+
+      const newQtyReturned = { ...(remessa.qtyReturned || {}) };
+      let totalRetornadoIncrement = 0;
+      returnedItems.forEach((ri) => {
+        if (!ri.qty) return;
+        newQtyReturned[ri.productId] = (newQtyReturned[ri.productId] || 0) + ri.qty;
+        totalRetornadoIncrement += ri.qty * ri.unitPrice;
+      });
+      const newTotalRetornado = Math.round(((remessa.totalRetornado || 0) + totalRetornadoIncrement) * 100) / 100;
+      const newTotalApurado = Math.round((remessa.totalRemessa - newTotalRetornado) * 100) / 100;
+
+      let saleId = null;
+      if (close && newTotalApurado > 0.005) {
+        const soldItems = remessa.items
+          .map((item) => ({ ...item, qty: item.qty - (newQtyReturned[item.productId] || 0) }))
+          .filter((item) => item.qty > 0);
+
+        saleId = tenantDB.firestore.generateId("sales");
+        const saleItems = soldItems.map((item) => ({
+          id: item.productId,
+          originalId: item.productId,
+          name: item.name,
+          qty: item.qty,
+          price: item.unitPrice,
+          originalPrice: item.unitPrice,
+          ncm: item.ncm,
+          cest: item.cest,
+          taxProfileId: item.taxProfileId,
+        }));
+
+        // Venda de acerto: NÃO decrementa estoque (já foi baixado na remessa e ajustado nos retornos)
+        batch.set("sales", saleId, {
+          id: saleId,
+          date: new Date().toISOString(),
+          items: saleItems,
+          total: newTotalApurado,
+          cost: 0,
+          fee: 0,
+          net: newTotalApurado,
+          profit: newTotalApurado,
+          paymentMethod: closeConsignPaymentMethod,
+          installments: 1,
+          clientName: remessa.clientName,
+          clientId: remessa.clientId,
+          consignmentId: remessa.id,
+          userId: currentUser?.id || "anon",
+          userName: currentUser?.username || "Sistema",
+          createdAt: sts(),
+        });
+
+        const finId = tenantDB.firestore.generateId("financial_movements");
+        batch.set("financial_movements", finId, {
+          type: "INCOME",
+          category: "Vendas",
+          description: `Acerto Consignação #${remessa.id.slice(-6)} — ${remessa.clientName}`,
+          amount: newTotalApurado,
+          date: new Date().toISOString().split("T")[0],
+          paymentMethod: closeConsignPaymentMethod,
+          saleId,
+          consignmentId: remessa.id,
+          userId: currentUser?.id || "anon",
+          createdAt: sts(),
+        });
+
+        const routeData = await tenantDB.firestore.getById("financial_settings", "routing");
+        if (routeData) {
+          const routeMap = { Dinheiro: "dinheiro", Pix: "pix", Crédito: "cartao_credito", Débito: "cartao_debito" };
+          const targetAccountId = routeData[routeMap[closeConsignPaymentMethod]];
+          if (targetAccountId) {
+            batch.add("account_transactions", {
+              accountId: targetAccountId,
+              type: "IN",
+              amount: newTotalApurado,
+              description: `ACERTO CONSIGNAÇÃO #${remessa.id.slice(-6)}`,
+              category: "Vendas",
+              date: new Date().toISOString(),
+              createdAt: sts(),
+              userId: currentUser?.id || "anon",
+              userName: currentUser?.username || "Sistema",
+            });
+            batch.update("bank_accounts", targetAccountId, { currentBalance: increment(newTotalApurado) });
+          }
+        }
+      }
+
+      batch.update("consignments", remessa.id, {
+        qtyReturned: newQtyReturned,
+        totalRetornado: newTotalRetornado,
+        totalApurado: newTotalApurado,
+        status: close ? "FINALIZADA" : newTotalApurado <= 0.005 ? "FINALIZADA" : "PARCIAL",
+        saleIdAcerto: close ? saleId : remessa.saleIdAcerto || null,
+        updatedAt: sts(),
+      });
+
+      await batch.commit();
+      showNotification(close ? "Consignação fechada e cobrança gerada!" : "Retorno registrado com sucesso!", "success");
+      setSelectedConsignmentId(null);
+      setReturnQtyDrafts({});
+      await fetchOpenConsignments();
+      if (close) setReturnConsignModalOpen(false);
+    } catch (e) {
+      console.error(e);
+      showNotification("Erro ao processar retorno: " + e.message, "error");
+    } finally {
+      setIsProcessingConsignReturn(false);
+    }
   };
 
   const addToCart = (product, customQty = null) => {
@@ -1735,6 +2077,10 @@ const PDV = ({
                 ...item,
                 qty: item.qty + qtyToAdd,
                 price: finalPrice,       // ✨ Atualiza com a tabela de preço ativa
+                originalPrice: finalPrice,
+                discountValue: 0,
+                discountPercent: 0,
+                discountType: "NONE",
                 priceMode: priceLabel,   // ✨ Atualiza a identificação visual
                 isWholesale: useWholesale,
               }
@@ -1747,6 +2093,10 @@ const PDV = ({
             ...product,
             qty: qtyToAdd,
             price: finalPrice,
+            originalPrice: finalPrice,
+            discountValue: 0,
+            discountPercent: 0,
+            discountType: "NONE",
             priceMode: priceLabel,
             isWholesale: useWholesale,
           },
@@ -1789,7 +2139,16 @@ const PDV = ({
 
   const removeItem = (id) => setCart(cart.filter((item) => item.id !== id));
 
-  const totalCart = cart.reduce((acc, item) => acc + item.price * item.qty, 0);
+  const cartSubtotal = cart.reduce((acc, item) => acc + item.price * item.qty, 0);
+  const generalDiscountAmount = Math.min(
+    cartDiscount.type === "PERCENT"
+      ? (cartSubtotal * (Number(cartDiscount.value) || 0)) / 100
+      : cartDiscount.type === "VALUE"
+        ? Number(cartDiscount.value) || 0
+        : 0,
+    cartSubtotal,
+  );
+  const totalCart = Math.max(0, cartSubtotal - generalDiscountAmount);
   const totalCost = cart.reduce((acc, item) => {
     const product = products.find((p) => p.id === (item.originalId || item.id));
     // product.cost para packs já é o custo total do pacote (não multiplicar por conversionFactor)
@@ -2031,14 +2390,24 @@ const PDV = ({
         companyInfo,
         taxProfile,
       );
-      return { ...item, taxDetails };
+      // Desconto discriminado: direto no item + rateio proporcional do desconto geral do carrinho
+      const itemDirectDiscount = (item.discountValue || 0) * item.qty;
+      const itemShareOfSubtotal = cartSubtotal > 0 ? (item.price * item.qty) / cartSubtotal : 0;
+      const itemGeneralDiscount = itemShareOfSubtotal * generalDiscountAmount;
+      const discountTotal = Math.round((itemDirectDiscount + itemGeneralDiscount) * 100) / 100;
+      return { ...item, taxDetails, discountTotal };
     });
+
+    const discountTotal = Math.round(
+      (cart.reduce((acc, item) => acc + (item.discountValue || 0) * item.qty, 0) + generalDiscountAmount) * 100,
+    ) / 100;
 
     const sale = {
       id: Date.now(),
       date: new Date().toISOString(),
       items: itemsWithTax,
       total: totalCart,
+      discountTotal,
       cost: totalCost,
       fee: totalFee,
       net: totalCart - totalFee,
@@ -2071,6 +2440,7 @@ const PDV = ({
     onNewSale(pendingSale);
     if (shouldPrint) printReceipt(pendingSale, companyInfo);
     setCart([]);
+    setCartDiscount({ type: "NONE", value: 0 });
     setPaymentModalOpen(false);
     setPaymentEntries([]);
   };
@@ -2390,6 +2760,27 @@ const PDV = ({
               <Wine size={14} /> Doses [F9]
             </button>
             <button
+              onClick={() => setPdvMode(pdvMode === "CONSIGNACAO" ? "VENDA" : "CONSIGNACAO")}
+              className={`px-3 py-1.5 rounded-md font-bold hover:opacity-90 flex items-center gap-1.5 text-xs shadow-sm border ${
+                pdvMode === "CONSIGNACAO"
+                  ? "bg-amber-500 border-amber-600 text-white"
+                  : "bg-white border-amber-200 text-amber-700 hover:bg-amber-50"
+              }`}
+              title="Alternar para modo Remessa/Consignação"
+            >
+              <Truck size={14} /> {pdvMode === "CONSIGNACAO" ? "Modo Remessa" : "Consignação"}
+            </button>
+            <button
+              onClick={() => {
+                setReturnConsignModalOpen(true);
+                fetchOpenConsignments();
+              }}
+              className="bg-white border border-teal-200 text-teal-700 px-3 py-1.5 rounded-md font-bold hover:bg-teal-50 flex items-center gap-1.5 text-xs shadow-sm"
+              title="Registrar retorno de mercadoria consignada"
+            >
+              <RotateCcw size={14} /> Retorno
+            </button>
+            <button
               onClick={() => setShowHistory(true)}
               className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
               title="Histórico"
@@ -2469,44 +2860,129 @@ const PDV = ({
                     </div>
                   </div>
 
-                  {/* CAMPO DE PREÇO EDITÁVEL */}
-                  <div className="text-right px-2 border-r border-slate-100 flex items-center justify-end">
-                    <span className="text-[10px] text-slate-400 mr-1 font-bold">
-                      R$
-                    </span>
-                    <input
-                      type="text"
-                      inputMode="decimal"
-                      className="w-16 font-bold text-slate-700 text-sm text-right border-b-2 border-dashed border-slate-300 outline-none focus:border-indigo-500 bg-transparent transition-colors hover:bg-slate-100"
-                      value={item.price}
-                      onChange={(e) => {
-                        // Troca vírgula por ponto e aceita apenas números e ponto
-                        let val = e.target.value
-                          .replace(",", ".")
-                          .replace(/[^0-9.]/g, "");
-                        // Evita múltiplos pontos
-                        if ((val.match(/\./g) || []).length > 1)
-                          val = val.replace(/\.+$/, "");
+                  {/* CAMPO DE PREÇO EDITÁVEL + DESCONTO POR ITEM */}
+                  <div
+                    className="text-right px-2 border-r border-slate-100 flex flex-col items-end justify-center gap-0.5"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="flex items-center justify-end">
+                      <span className="text-[10px] text-slate-400 mr-1 font-bold">
+                        R$
+                      </span>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        className="w-16 font-bold text-slate-700 text-sm text-right border-b-2 border-dashed border-slate-300 outline-none focus:border-indigo-500 bg-transparent transition-colors hover:bg-slate-100"
+                        value={item.price}
+                        onChange={(e) => {
+                          // Troca vírgula por ponto e aceita apenas números e ponto
+                          let val = e.target.value
+                            .replace(",", ".")
+                            .replace(/[^0-9.]/g, "");
+                          // Evita múltiplos pontos
+                          if ((val.match(/\./g) || []).length > 1)
+                            val = val.replace(/\.+$/, "");
 
-                        // Atualiza o carrinho com a string (para permitir digitar "10.")
-                        setCart(
-                          cart.map((i) =>
-                            i.id === item.id ? { ...i, price: val } : i,
-                          ),
-                        );
-                      }}
-                      onBlur={(e) => {
-                        // Ao sair do campo, garante que vira um float válido (Ex: "10." vira 10)
-                        const finalVal = parseFloat(item.price) || 0;
-                        setCart(
-                          cart.map((i) =>
-                            i.id === item.id ? { ...i, price: finalVal } : i,
-                          ),
-                        );
-                      }}
-                      onFocus={(e) => e.target.select()}
-                      title="Editar Preço"
-                    />
+                          // Atualiza o carrinho com a string (para permitir digitar "10.")
+                          setCart(
+                            cart.map((i) =>
+                              i.id === item.id ? { ...i, price: val } : i,
+                            ),
+                          );
+                        }}
+                        onBlur={(e) => {
+                          // Ao sair do campo, garante que vira um float válido (Ex: "10." vira 10)
+                          // e recalcula o desconto discriminado a partir do preço de tabela (originalPrice)
+                          const finalVal = parseFloat(item.price) || 0;
+                          setCart(
+                            cart.map((i) => {
+                              if (i.id !== item.id) return i;
+                              const base = Number(i.originalPrice ?? finalVal) || 0;
+                              const discountValue = Math.max(0, base - finalVal);
+                              const discountPercent = base > 0 ? (discountValue / base) * 100 : 0;
+                              return {
+                                ...i,
+                                price: finalVal,
+                                discountValue,
+                                discountPercent,
+                                discountType: discountValue > 0 ? "VALUE" : "NONE",
+                              };
+                            }),
+                          );
+                        }}
+                        onFocus={(e) => e.target.select()}
+                        title="Editar Preço"
+                      />
+                      <button
+                        onClick={() => {
+                          if (discountEditItemId === item.id) {
+                            setDiscountEditItemId(null);
+                          } else {
+                            setDiscountEditItemId(item.id);
+                            setDiscountEditDraft({
+                              type: item.discountType === "PERCENT" ? "PERCENT" : "VALUE",
+                              value:
+                                item.discountType === "PERCENT"
+                                  ? (item.discountPercent || 0).toFixed(2)
+                                  : (item.discountValue || 0).toFixed(2),
+                            });
+                          }
+                        }}
+                        className={`ml-1 p-1 rounded transition-colors ${
+                          item.discountValue > 0
+                            ? "text-amber-600 bg-amber-100"
+                            : "text-slate-300 hover:text-amber-600 hover:bg-amber-50"
+                        }`}
+                        title="Desconto do item"
+                      >
+                        <Percent size={12} />
+                      </button>
+                    </div>
+                    {item.discountValue > 0 && (
+                      <span className="text-[9px] font-bold text-amber-600">
+                        -{formatCurrency(item.discountValue)} ({item.discountPercent.toFixed(1)}%)
+                      </span>
+                    )}
+                    {discountEditItemId === item.id && (
+                      <div className="flex items-center gap-1 bg-amber-50 border border-amber-200 rounded p-1 mt-1">
+                        <select
+                          className="text-[10px] border rounded px-1 py-0.5 bg-white"
+                          value={discountEditDraft.type}
+                          onChange={(e) =>
+                            setDiscountEditDraft({ ...discountEditDraft, type: e.target.value })
+                          }
+                        >
+                          <option value="VALUE">R$</option>
+                          <option value="PERCENT">%</option>
+                        </select>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          autoFocus
+                          className="w-14 text-[11px] border rounded px-1 py-0.5 text-right"
+                          value={discountEditDraft.value}
+                          onChange={(e) =>
+                            setDiscountEditDraft({ ...discountEditDraft, value: e.target.value })
+                          }
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              applyItemDiscount(item.id, discountEditDraft.type, discountEditDraft.value);
+                              setDiscountEditItemId(null);
+                            }
+                          }}
+                        />
+                        <button
+                          onClick={() => {
+                            applyItemDiscount(item.id, discountEditDraft.type, discountEditDraft.value);
+                            setDiscountEditItemId(null);
+                          }}
+                          className="text-emerald-600 hover:bg-emerald-100 rounded p-0.5"
+                          title="Aplicar"
+                        >
+                          <CheckCircle size={14} />
+                        </button>
+                      </div>
+                    )}
                   </div>
 
                   {/* Controle Qtd Compacto */}
@@ -2549,6 +3025,39 @@ const PDV = ({
         {/* Footer Totais e Pagamento (Botões Menores) */}
         {/* Footer Totais e Pagamento (Botões Menores) */}
         <div className="bg-slate-50 border-t p-3 z-20 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+          {/* Desconto Geral do Carrinho */}
+          <div className="flex items-center justify-between gap-2 mb-2 px-1 bg-white border border-slate-200 rounded-lg p-1.5">
+            <div className="flex items-center gap-1 text-[10px] font-bold text-slate-500 uppercase">
+              <Percent size={12} /> Desconto Geral
+            </div>
+            <div className="flex items-center gap-1">
+              <select
+                className="text-xs border rounded px-1 py-1 bg-white"
+                value={cartDiscount.type}
+                onChange={(e) => setCartDiscount({ ...cartDiscount, type: e.target.value })}
+              >
+                <option value="NONE">Nenhum</option>
+                <option value="VALUE">R$</option>
+                <option value="PERCENT">%</option>
+              </select>
+              <input
+                type="text"
+                inputMode="decimal"
+                disabled={cartDiscount.type === "NONE"}
+                className="w-16 text-xs border rounded px-1 py-1 text-right disabled:bg-slate-100 disabled:text-slate-300"
+                placeholder="0,00"
+                value={cartDiscount.value}
+                onChange={(e) => {
+                  const val = e.target.value.replace(",", ".").replace(/[^0-9.]/g, "");
+                  setCartDiscount({ ...cartDiscount, value: val });
+                }}
+                onBlur={(e) =>
+                  setCartDiscount({ ...cartDiscount, value: parseFloat(cartDiscount.value) || 0 })
+                }
+              />
+            </div>
+          </div>
+
           <div className="flex justify-between items-end mb-3 px-1">
             <div>
               <p className="text-[10px] font-bold text-slate-400 uppercase">
@@ -2559,6 +3068,11 @@ const PDV = ({
               </p>
             </div>
             <div className="text-right">
+              {generalDiscountAmount > 0 && (
+                <p className="text-[10px] text-slate-400">
+                  Subtotal {formatCurrency(cartSubtotal)} · Desconto -{formatCurrency(generalDiscountAmount)}
+                </p>
+              )}
               <p className="text-[10px] font-bold text-slate-400 uppercase">
                 Total a Pagar
               </p>
@@ -2568,56 +3082,256 @@ const PDV = ({
             </div>
           </div>
 
-          {/* Grid de Botões Menores (py-2.5 e text-sm) */}
-          <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
+          {pdvMode === "CONSIGNACAO" ? (
             <button
-              onClick={() => handlePaymentInit("Dinheiro")}
-              className="bg-emerald-600 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-emerald-700 shadow-sm transition-all border-b-2 border-emerald-800 active:border-b-0 active:translate-y-[2px]"
+              onClick={() => setConsignRemessaModalOpen(true)}
+              disabled={cart.length === 0}
+              className="w-full bg-amber-500 text-white py-3 rounded-lg text-sm font-bold hover:bg-amber-600 shadow-sm transition-all flex justify-center items-center gap-2 border-b-2 border-amber-700 active:border-b-0 active:translate-y-[2px] disabled:opacity-50"
             >
-              Dinheiro [F1]
+              <Truck size={18} /> Confirmar Remessa de Consignação
             </button>
-            <button
-              onClick={() => handlePaymentInit("Pix")}
-              className="bg-slate-800 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-slate-900 shadow-sm transition-all border-b-2 border-slate-950 active:border-b-0 active:translate-y-[2px]"
-            >
-              Pix [F2]
-            </button>
-            <button
-              onClick={() => handlePaymentInit("Débito")}
-              className="bg-blue-600 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-blue-700 shadow-sm transition-all border-b-2 border-blue-800 active:border-b-0 active:translate-y-[2px]"
-            >
-              Débito [F3]
-            </button>
-            <button
-              onClick={() => handlePaymentInit("Crédito")}
-              className="bg-indigo-600 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-indigo-700 shadow-sm transition-all border-b-2 border-indigo-800 active:border-b-0 active:translate-y-[2px]"
-            >
-              Crédito [F4]
-            </button>
-            <button
-              onClick={() => handlePaymentInit("Fiado")}
-              className="md:col-span-2 bg-amber-500 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-amber-600 shadow-sm transition-all flex justify-center items-center gap-2 border-b-2 border-amber-700 active:border-b-0 active:translate-y-[2px]"
-            >
-              <UserPlus size={16} /> Fiado / Prazo [F5]
-            </button>
-          </div>
+          ) : (
+            <>
+              {/* Grid de Botões Menores (py-2.5 e text-sm) */}
+              <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
+                <button
+                  onClick={() => handlePaymentInit("Dinheiro")}
+                  className="bg-emerald-600 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-emerald-700 shadow-sm transition-all border-b-2 border-emerald-800 active:border-b-0 active:translate-y-[2px]"
+                >
+                  Dinheiro [F1]
+                </button>
+                <button
+                  onClick={() => handlePaymentInit("Pix")}
+                  className="bg-slate-800 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-slate-900 shadow-sm transition-all border-b-2 border-slate-950 active:border-b-0 active:translate-y-[2px]"
+                >
+                  Pix [F2]
+                </button>
+                <button
+                  onClick={() => handlePaymentInit("Débito")}
+                  className="bg-blue-600 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-blue-700 shadow-sm transition-all border-b-2 border-blue-800 active:border-b-0 active:translate-y-[2px]"
+                >
+                  Débito [F3]
+                </button>
+                <button
+                  onClick={() => handlePaymentInit("Crédito")}
+                  className="bg-indigo-600 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-indigo-700 shadow-sm transition-all border-b-2 border-indigo-800 active:border-b-0 active:translate-y-[2px]"
+                >
+                  Crédito [F4]
+                </button>
+                <button
+                  onClick={() => handlePaymentInit("Fiado")}
+                  className="md:col-span-2 bg-amber-500 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-amber-600 shadow-sm transition-all flex justify-center items-center gap-2 border-b-2 border-amber-700 active:border-b-0 active:translate-y-[2px]"
+                >
+                  <UserPlus size={16} /> Fiado / Prazo [F5]
+                </button>
+              </div>
 
-          <div className="flex justify-center mt-2 gap-4">
-            <button
-              onClick={() => handlePaymentInit("PERCA")}
-              className="text-[10px] text-red-400 font-bold hover:text-red-600 flex items-center gap-1 px-3 py-1 rounded hover:bg-red-50"
-            >
-              <AlertTriangle size={10} /> Registrar Perca [F6]
-            </button>
-            <button
-              onClick={() => setSangriaModalOpen(true)}
-              className="text-[10px] text-orange-500 font-bold hover:text-orange-700 flex items-center gap-1 px-3 py-1 rounded hover:bg-orange-50"
-            >
-              <LogOut size={10} className="rotate-180" /> Sangria de Caixa [F7]
-            </button>
-          </div>
+              <div className="flex justify-center mt-2 gap-4">
+                <button
+                  onClick={() => handlePaymentInit("PERCA")}
+                  className="text-[10px] text-red-400 font-bold hover:text-red-600 flex items-center gap-1 px-3 py-1 rounded hover:bg-red-50"
+                >
+                  <AlertTriangle size={10} /> Registrar Perca [F6]
+                </button>
+                <button
+                  onClick={() => setSangriaModalOpen(true)}
+                  className="text-[10px] text-orange-500 font-bold hover:text-orange-700 flex items-center gap-1 px-3 py-1 rounded hover:bg-orange-50"
+                >
+                  <LogOut size={10} className="rotate-180" /> Sangria de Caixa [F7]
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
+
+      {/* MODAL: Confirmar Remessa de Consignação */}
+      <Modal
+        isOpen={consignRemessaModalOpen}
+        onClose={() => !isProcessingConsignRemessa && setConsignRemessaModalOpen(false)}
+        title="Confirmar Remessa de Consignação"
+      >
+        <div className="space-y-4">
+          <div className="bg-amber-50 border border-amber-200 rounded p-3 text-xs text-amber-800">
+            Os itens do carrinho sairão do estoque como <strong>remessa</strong> (não é uma venda ainda). A cobrança
+            só será gerada depois, no retorno, pela quantidade efetivamente vendida pelo revendedor.
+          </div>
+          <div className="bg-slate-50 rounded p-3 text-center">
+            <p className="text-xs font-bold text-slate-400 uppercase">Valor Total da Remessa</p>
+            <p className="text-2xl font-extrabold text-slate-800">{formatCurrency(totalCart)}</p>
+          </div>
+          <div>
+            <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Revendedor</label>
+            <div className="flex gap-1 mb-2">
+              <button
+                onClick={() => setIsNewConsignClient(false)}
+                className={`flex-1 py-1 text-xs font-bold rounded ${!isNewConsignClient ? "bg-amber-600 text-white" : "bg-white text-amber-600 border"}`}
+              >
+                Existente
+              </button>
+              <button
+                onClick={() => setIsNewConsignClient(true)}
+                className={`flex-1 py-1 text-xs font-bold rounded ${isNewConsignClient ? "bg-amber-600 text-white" : "bg-white text-amber-600 border"}`}
+              >
+                Novo
+              </button>
+            </div>
+            {isNewConsignClient ? (
+              <input
+                className="w-full border p-2 rounded text-sm"
+                placeholder="Nome do Revendedor"
+                value={newConsignClientName}
+                onChange={(e) => setNewConsignClientName(e.target.value)}
+              />
+            ) : (
+              <select
+                className="w-full border p-2 rounded text-sm"
+                value={consignClientId}
+                onChange={(e) => setConsignClientId(e.target.value)}
+              >
+                <option value="">-- Selecione --</option>
+                {clients.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+          <button
+            disabled={isProcessingConsignRemessa}
+            onClick={handleConfirmConsignmentRemessa}
+            className="w-full bg-amber-600 text-white py-2.5 rounded-lg text-sm font-bold hover:bg-amber-700 flex justify-center items-center gap-2 disabled:opacity-50"
+          >
+            <Truck size={16} /> {isProcessingConsignRemessa ? "Registrando..." : "Confirmar Remessa"}
+          </button>
+        </div>
+      </Modal>
+
+      {/* MODAL: Retorno de Consignação */}
+      <Modal
+        isOpen={returnConsignModalOpen}
+        onClose={() => {
+          setReturnConsignModalOpen(false);
+          setSelectedConsignmentId(null);
+          setReturnQtyDrafts({});
+        }}
+        title="Retorno de Consignação"
+      >
+        <div className="space-y-4">
+          {loadingConsignments ? (
+            <p className="text-center text-sm text-slate-400 py-6">Carregando remessas em aberto...</p>
+          ) : !selectedConsignmentId ? (
+            <>
+              {openConsignments.length === 0 ? (
+                <p className="text-center text-sm text-slate-400 py-6">Nenhuma remessa de consignação em aberto.</p>
+              ) : (
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {openConsignments.map((c) => (
+                    <button
+                      key={c.id}
+                      onClick={() => setSelectedConsignmentId(c.id)}
+                      className="w-full text-left p-3 border rounded-lg hover:bg-teal-50 hover:border-teal-300 transition-colors"
+                    >
+                      <div className="flex justify-between items-center">
+                        <span className="font-bold text-sm text-slate-800">{c.clientName}</span>
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-teal-100 text-teal-700 font-bold">
+                          {c.status}
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-xs text-slate-500 mt-1">
+                        <span>{c.items?.length || 0} item(ns)</span>
+                        <span>Saldo em aberto: {formatCurrency(c.totalApurado)}</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            (() => {
+              const remessa = openConsignments.find((c) => c.id === selectedConsignmentId);
+              if (!remessa) return null;
+              return (
+                <>
+                  <button
+                    onClick={() => {
+                      setSelectedConsignmentId(null);
+                      setReturnQtyDrafts({});
+                    }}
+                    className="text-xs text-teal-600 font-bold flex items-center gap-1"
+                  >
+                    <ArrowLeft size={12} /> Voltar
+                  </button>
+                  <p className="text-sm font-bold text-slate-800">{remessa.clientName}</p>
+
+                  <div className="space-y-2 max-h-72 overflow-y-auto">
+                    {remessa.items.map((item) => {
+                      const alreadyReturned = (remessa.qtyReturned || {})[item.productId] || 0;
+                      const pending = item.qty - alreadyReturned;
+                      return (
+                        <div key={item.productId} className="border rounded p-2 flex items-center gap-2">
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-bold text-slate-700 truncate">{item.name}</p>
+                            <p className="text-[10px] text-slate-400">
+                              Enviado: {item.qty} · Já retornado: {alreadyReturned} · Saldo: {pending}
+                            </p>
+                          </div>
+                          <input
+                            type="number"
+                            min="0"
+                            max={pending}
+                            disabled={pending <= 0}
+                            className="w-16 border rounded p-1 text-sm text-right disabled:bg-slate-100"
+                            placeholder="0"
+                            value={returnQtyDrafts[item.productId] || ""}
+                            onChange={(e) =>
+                              setReturnQtyDrafts({ ...returnQtyDrafts, [item.productId]: e.target.value })
+                            }
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="bg-slate-50 rounded p-3">
+                    <label className="text-xs font-bold text-slate-500 uppercase block mb-1">
+                      Forma de Pagamento (para fechar e cobrar o vendido)
+                    </label>
+                    <select
+                      className="w-full border p-2 rounded text-sm bg-white"
+                      value={closeConsignPaymentMethod}
+                      onChange={(e) => setCloseConsignPaymentMethod(e.target.value)}
+                    >
+                      <option value="Dinheiro">Dinheiro</option>
+                      <option value="Pix">Pix</option>
+                      <option value="Débito">Débito</option>
+                      <option value="Crédito">Crédito</option>
+                    </select>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button
+                      disabled={isProcessingConsignReturn}
+                      onClick={() => handleSubmitConsignmentReturn(false)}
+                      className="flex-1 border border-teal-600 text-teal-600 py-2 rounded-lg text-sm font-bold hover:bg-teal-50 disabled:opacity-50"
+                    >
+                      Registrar Retorno
+                    </button>
+                    <button
+                      disabled={isProcessingConsignReturn}
+                      onClick={() => handleSubmitConsignmentReturn(true)}
+                      className="flex-1 bg-teal-600 text-white py-2 rounded-lg text-sm font-bold hover:bg-teal-700 disabled:opacity-50"
+                    >
+                      Fechar e Gerar Cobrança
+                    </button>
+                  </div>
+                </>
+              );
+            })()
+          )}
+        </div>
+      </Modal>
 
       {/* ... MANTENHA OS MODAIS IGUAIS ... */}
       <Modal
@@ -4748,6 +5462,198 @@ const Finance = ({
   const [filterClient, setFilterClient] = useState("");
   const [filterPayment, setFilterPayment] = useState("ALL");
 
+  // --- CANCELAMENTO DE VENDA ---
+  const [cancelSaleModal, setCancelSaleModal] = useState(null); // { sale, justification }
+  const [isCancellingSale, setIsCancellingSale] = useState(false);
+
+  const handleCancelSale = async () => {
+    if (!cancelSaleModal) return;
+    const sale = cancelSaleModal.sale;
+    const justification = (cancelSaleModal.justification || "").trim();
+    if (justification.length < 15) {
+      return showNotification("A justificativa deve ter no mínimo 15 caracteres.", "error");
+    }
+
+    setIsCancellingSale(true);
+    try {
+      const { increment: inc, serverTimestamp: sts } = tenantDB.firestore.utils;
+
+      // 1. Se a NF-e está autorizada, tenta cancelar na SEFAZ/Bling antes de mexer em qualquer coisa
+      if (sale.nfeStatus === "AUTORIZADA") {
+        const authorizedAt = sale.nfeAuthorizedAt?.toDate
+          ? sale.nfeAuthorizedAt.toDate()
+          : sale.nfeAuthorizedAt
+            ? new Date(sale.nfeAuthorizedAt)
+            : new Date(sale.date);
+        const hoursSinceAuth = (Date.now() - authorizedAt.getTime()) / (1000 * 60 * 60);
+
+        if (hoursSinceAuth > 24) {
+          showNotification(
+            "Esta venda possui NF-e autorizada há mais de 24h. Não é possível cancelar automaticamente — gere uma Nota de Devolução ou CC-e manualmente e contate o suporte para o estorno.",
+            "error",
+          );
+          setIsCancellingSale(false);
+          return;
+        }
+
+        const { data: invoice } = await supabase
+          .from("fiscal_invoices")
+          .select("*")
+          .eq("sale_id", String(sale.id))
+          .order("issued_at", { ascending: false })
+          .limit(1)
+          .single();
+
+        if (!invoice) {
+          showNotification(
+            "NF-e autorizada mas não encontrada em Notas Fiscais Emitidas — cancele manualmente antes de estornar a venda.",
+            "error",
+          );
+          setIsCancellingSale(false);
+          return;
+        }
+
+        const isBling = !!invoice.bling_nfe_id;
+
+        if (isBling) {
+          const { data: blingConfig } = await supabase
+            .from("fiscal_bling_settings")
+            .select("*")
+            .eq("firebase_store_id", String(storeConfig.id))
+            .single();
+          if (!blingConfig?.connected) {
+            showNotification("Bling não conectado — não foi possível cancelar a NF-e.", "error");
+            setIsCancellingSale(false);
+            return;
+          }
+          const accessToken = await BlingService.ensureValidToken(tenantDB, blingConfig);
+          const tipoDocumento = invoice.nfe_model === "55" ? "nfe" : "nfce";
+          const result = await BlingService.cancelarNota(tipoDocumento, accessToken, invoice.bling_nfe_id, justification);
+          if (result?.error) {
+            showNotification(
+              "Falha ao cancelar NF-e no Bling: " + (result.error.message || result.error.description || "erro desconhecido"),
+              "error",
+            );
+            setIsCancellingSale(false);
+            return;
+          }
+          await supabase.from("fiscal_invoices").update({ status: "CANCELADA" }).eq("id", invoice.id);
+        } else {
+          const { data: config } = await supabase
+            .from("fiscal_settings")
+            .select("*")
+            .eq("firebase_store_id", String(storeConfig.id))
+            .single();
+          if (!config?.api_token) {
+            showNotification("Token fiscal não configurado — não foi possível cancelar a NF-e.", "error");
+            setIsCancellingSale(false);
+            return;
+          }
+          let protocolToUse = invoice.nfe_protocol;
+          if (!protocolToUse && invoice.xml_content) {
+            try {
+              const xmlStr = atob(invoice.xml_content.includes(",") ? invoice.xml_content.split(",")[1] : invoice.xml_content);
+              const match = xmlStr.match(/<nProt>(\d+)<\/nProt>/);
+              if (match && match[1]) protocolToUse = match[1];
+            } catch (e) {}
+          }
+          if (!protocolToUse) {
+            showNotification("Protocolo da NF-e não encontrado — cancelamento fiscal manual necessário.", "error");
+            setIsCancellingSale(false);
+            return;
+          }
+          const result = await NFeService.cancel(config.api_token, invoice.nfe_key, protocolToUse, justification);
+          const hasError = result?.Error !== null && result?.Error !== undefined;
+          const isRejection = result?.DsMotivo && result.DsMotivo.toLowerCase().includes("rejeicao");
+          if (hasError || isRejection) {
+            showNotification("SEFAZ rejeitou o cancelamento: " + (result.Error || result.DsMotivo), "error");
+            setIsCancellingSale(false);
+            return;
+          }
+          await supabase.from("fiscal_invoices").update({ status: "CANCELADA" }).eq("id", invoice.id);
+        }
+      }
+
+      // 2. Reversão de estoque + financeiro/bancário — só depois do passo fiscal ter sucesso (ou não ser necessário)
+      const batch = tenantDB.firestore.batch();
+
+      (sale.items || []).forEach((item) => {
+        const originalProd = products.find((p) => p.id === (item.originalId || item.id));
+        if (!originalProd) return;
+        if (originalProd.itemType === "pack" && originalProd.parentId && originalProd.conversionFactor) {
+          batch.update("products", originalProd.parentId, {
+            stock: inc(item.qty * originalProd.conversionFactor),
+          });
+        } else {
+          batch.update("products", originalProd.id, { stock: inc(item.qty) });
+        }
+      });
+
+      if (!sale.isLoss) {
+        const finId = tenantDB.firestore.generateId("financial_movements");
+        batch.set("financial_movements", finId, {
+          type: "EXPENSE",
+          category: "Estorno de Venda",
+          description: `Estorno da Venda #${String(sale.id).slice(-6)}`,
+          amount: sale.total,
+          date: new Date().toISOString().split("T")[0],
+          saleId: String(sale.id),
+          userId: currentUser?.id || "anon",
+          userName: currentUser?.username || "Gerente",
+          createdAt: sts(),
+        });
+
+        const routeData = await tenantDB.firestore.getById("financial_settings", "routing");
+        if (routeData) {
+          const routeMap = { Dinheiro: "dinheiro", Pix: "pix", Crédito: "cartao_credito", Débito: "cartao_debito" };
+          const entriesToRoute = sale.paymentMethods
+            ? sale.paymentMethods.filter((e) => e.method !== "Fiado")
+            : sale.paymentMethod !== "Fiado"
+              ? [{ method: sale.paymentMethod, amount: sale.net || sale.total, fee: 0 }]
+              : [];
+
+          for (const entry of entriesToRoute) {
+            const routeKey = routeMap[entry.method];
+            const targetAccountId = routeData[routeKey];
+            if (targetAccountId) {
+              const netAmount = entry.amount - (entry.fee || 0);
+              batch.add("account_transactions", {
+                accountId: targetAccountId,
+                type: "OUT",
+                amount: netAmount,
+                description: `ESTORNO VENDA #${String(sale.id).slice(-6)}`,
+                category: "Estorno de Venda",
+                date: new Date().toISOString(),
+                createdAt: sts(),
+                userId: currentUser?.id || "anon",
+                userName: currentUser?.username || "Gerente",
+              });
+              batch.update("bank_accounts", targetAccountId, { currentBalance: inc(-netAmount) });
+            }
+          }
+        }
+      }
+
+      batch.update("sales", String(sale.id), {
+        status: "CANCELADA",
+        canceledAt: sts(),
+        canceledBy: currentUser?.id || "anon",
+        canceledByName: currentUser?.username || "Gerente",
+        cancelReason: justification,
+      });
+
+      await batch.commit();
+
+      showNotification("Venda cancelada e estornada com sucesso.", "success");
+      setCancelSaleModal(null);
+    } catch (e) {
+      console.error(e);
+      showNotification("Erro ao cancelar venda: " + e.message, "error");
+    } finally {
+      setIsCancellingSale(false);
+    }
+  };
+
   const saveHistory = (record) => {
     setHistory([record, ...history]);
     showNotification("Fechamento salvo no histórico", "success");
@@ -4962,8 +5868,9 @@ const Finance = ({
                   const isFiado = s.paymentMethod === "Fiado";
                   const nfeOk = s.nfeStatus === "AUTORIZADA";
                   const nfeRej = s.nfeStatus === "REJEITADA";
+                  const isCanceled = s.status === "CANCELADA";
                   return (
-                    <tr key={s.id} className={`hover:bg-slate-50 ${isLoss ? 'bg-red-50/40' : ''}`}>
+                    <tr key={s.id} className={`hover:bg-slate-50 ${isCanceled ? 'bg-slate-50 opacity-60' : isLoss ? 'bg-red-50/40' : ''}`}>
                       <td className="p-3 font-mono text-xs text-slate-400">#{String(s.id).slice(-6)}</td>
                       <td className="p-3 text-xs">
                         <span className="font-bold block">{new Date(s.date).toLocaleDateString('pt-BR')}</span>
@@ -4979,7 +5886,11 @@ const Finance = ({
                         </span>
                       </td>
                       <td className="p-3 text-center">
-                        {nfeOk ? (
+                        {isCanceled ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 text-[10px] font-bold" title={s.cancelReason}>
+                            <XCircle size={10} /> Cancelada
+                          </span>
+                        ) : nfeOk ? (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-[10px] font-bold">
                             <CheckCircle size={10} /> NF-e OK
                           </span>
@@ -5008,44 +5919,56 @@ const Finance = ({
                           <button onClick={() => setViewSale(s)} className="p-1.5 rounded text-indigo-600 hover:bg-indigo-50" title="Ver Detalhes">
                             <Eye size={16} />
                           </button>
-                          {/* Reimprimir cupom não fiscal */}
-                          {onPrintReceipt && (
-                            <button onClick={() => onPrintReceipt(s)} className="p-1.5 rounded text-slate-500 hover:bg-slate-100" title="Reimprimir Cupom Não Fiscal">
-                              <Printer size={16} />
-                            </button>
-                          )}
-                          {/* NF-e / reemissão */}
-                          {nfeOk ? (
-                            <button
-                              onClick={async () => {
-                                const { data } = await supabase.from("fiscal_invoices").select("pdf_base64, nfe_number").eq("sale_id", String(s.id)).single();
-                                if (data?.pdf_base64) downloadSmart(data.pdf_base64, `NFe-${data.nfe_number}`);
-                                else alert("PDF não encontrado para esta nota.");
-                              }}
-                              className="p-1.5 rounded text-green-600 bg-green-50 hover:bg-green-100"
-                              title="Baixar PDF NF-e"
-                            >
-                              <Download size={16} />
-                            </button>
-                          ) : (
-                            !isLoss && (
-                              <>
-                                <button
-                                  onClick={() => onEmitNFe && onEmitNFe(s, '65')}
-                                  className="p-1.5 rounded text-purple-500 hover:bg-purple-50"
-                                  title={nfeRej ? "Reemitir NFC-e" : "Emitir NFC-e (Cupom)"}
-                                >
-                                  <FileText size={16} />
+                          {!isCanceled && (
+                            <>
+                              {/* Reimprimir cupom não fiscal */}
+                              {onPrintReceipt && (
+                                <button onClick={() => onPrintReceipt(s)} className="p-1.5 rounded text-slate-500 hover:bg-slate-100" title="Reimprimir Cupom Não Fiscal">
+                                  <Printer size={16} />
                                 </button>
+                              )}
+                              {/* NF-e / reemissão */}
+                              {nfeOk ? (
                                 <button
-                                  onClick={() => onEmitNFe && onEmitNFe(s, '55')}
-                                  className="p-1.5 rounded text-blue-500 hover:bg-blue-50"
-                                  title={nfeRej ? "Reemitir NF-e" : "Emitir NF-e (Nota)"}
+                                  onClick={async () => {
+                                    const { data } = await supabase.from("fiscal_invoices").select("pdf_base64, nfe_number").eq("sale_id", String(s.id)).single();
+                                    if (data?.pdf_base64) downloadSmart(data.pdf_base64, `NFe-${data.nfe_number}`);
+                                    else alert("PDF não encontrado para esta nota.");
+                                  }}
+                                  className="p-1.5 rounded text-green-600 bg-green-50 hover:bg-green-100"
+                                  title="Baixar PDF NF-e"
                                 >
-                                  <FileText size={16} />
+                                  <Download size={16} />
                                 </button>
-                              </>
-                            )
+                              ) : (
+                                !isLoss && (
+                                  <>
+                                    <button
+                                      onClick={() => onEmitNFe && onEmitNFe(s, '65')}
+                                      className="p-1.5 rounded text-purple-500 hover:bg-purple-50"
+                                      title={nfeRej ? "Reemitir NFC-e" : "Emitir NFC-e (Cupom)"}
+                                    >
+                                      <FileText size={16} />
+                                    </button>
+                                    <button
+                                      onClick={() => onEmitNFe && onEmitNFe(s, '55')}
+                                      className="p-1.5 rounded text-blue-500 hover:bg-blue-50"
+                                      title={nfeRej ? "Reemitir NF-e" : "Emitir NF-e (Nota)"}
+                                    >
+                                      <FileText size={16} />
+                                    </button>
+                                  </>
+                                )
+                              )}
+                              {/* Cancelar venda */}
+                              <button
+                                onClick={() => setCancelSaleModal({ sale: s, justification: "" })}
+                                className="p-1.5 rounded text-red-600 hover:bg-red-50"
+                                title="Cancelar Venda"
+                              >
+                                <XCircle size={16} />
+                              </button>
+                            </>
                           )}
                         </div>
                       </td>
@@ -5405,6 +6328,63 @@ const Finance = ({
             </div>
           </div>
         </div>
+      </Modal>
+
+      <Modal
+        isOpen={!!cancelSaleModal}
+        onClose={() => !isCancellingSale && setCancelSaleModal(null)}
+        title={`Cancelar Venda #${cancelSaleModal ? String(cancelSaleModal.sale.id).slice(-6) : ""}`}
+      >
+        {cancelSaleModal && (
+          <div className="space-y-4">
+            {cancelSaleModal.sale.nfeStatus === "AUTORIZADA" && (
+              <div className="bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded p-3 flex gap-2">
+                <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+                <span>
+                  Esta venda possui NF-e autorizada. Se estiver dentro de 24h da autorização, o sistema tentará
+                  cancelá-la na SEFAZ/Bling automaticamente. Fora desse prazo, o cancelamento fiscal será bloqueado
+                  e será necessário emitir uma Nota de Devolução ou CC-e manualmente.
+                </span>
+              </div>
+            )}
+            <div>
+              <label className="text-xs font-bold text-slate-500 uppercase block mb-1">
+                Justificativa (mín. 15 caracteres)
+              </label>
+              <textarea
+                className="w-full border p-2 rounded text-sm resize-none"
+                rows={3}
+                placeholder="Ex: Cartão de crédito recusado na maquininha, cliente desistiu da compra."
+                value={cancelSaleModal.justification}
+                onChange={(e) =>
+                  setCancelSaleModal({ ...cancelSaleModal, justification: e.target.value })
+                }
+              />
+              <p className={`text-[10px] mt-1 ${cancelSaleModal.justification.trim().length >= 15 ? "text-emerald-600" : "text-slate-400"}`}>
+                {cancelSaleModal.justification.trim().length}/15 caracteres mínimos
+              </p>
+            </div>
+            <p className="text-xs text-slate-500">
+              O estoque e os lançamentos financeiros/bancários desta venda serão estornados automaticamente.
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                disabled={isCancellingSale}
+                onClick={() => setCancelSaleModal(null)}
+                className="px-4 py-2 text-sm font-bold text-slate-500 disabled:opacity-50"
+              >
+                Voltar
+              </button>
+              <button
+                disabled={isCancellingSale || cancelSaleModal.justification.trim().length < 15}
+                onClick={handleCancelSale}
+                className="px-4 py-2 bg-red-600 text-white rounded text-sm font-bold flex items-center gap-2 disabled:opacity-50"
+              >
+                <XCircle size={16} /> {isCancellingSale ? "Cancelando..." : "Confirmar Cancelamento"}
+              </button>
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );
@@ -8033,6 +9013,7 @@ const cleanUndefinedFields = (obj, path = '') => {
           nfeStatus: "AUTORIZADA",
           nfeKey: notaFinal.chaveAcesso,
           nfeMessage: "Emitida com Sucesso",
+          nfeAuthorizedAt: serverTimestamp(),
         });
 
         showNotification(`Nota ${invoiceData.nfe_number} Autorizada!`, "success");
@@ -8230,6 +9211,7 @@ const cleanUndefinedFields = (obj, path = '') => {
           nfeStatus: "AUTORIZADA",
           nfeKey: returnData.ChaveNF || returnData.ChaveNFe,
           nfeMessage: "Emitida com Sucesso",
+          nfeAuthorizedAt: serverTimestamp(),
         });
 
         showNotification(

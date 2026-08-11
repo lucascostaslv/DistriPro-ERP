@@ -1,7 +1,15 @@
 // src/utils/TaxCalculator.js
 
-export const calculateItemTaxes = (product, client, companyInfo, taxProfile) => {
-    
+// CFOP de consignação mercantil — tabela SEFAZ para remessa/retorno de mercadoria fora do estabelecimento.
+// ATENÇÃO: CST/ICMS de suspensão para consignação não é calculado automaticamente (ver NFeBuilder.js) —
+// exige validação de um contador antes de emitir em produção.
+const CONSIGNMENT_CFOP_TABLE = {
+    REMESSA_CONSIGNACAO: { internal: '5914', interstate: '6914' },
+    RETORNO_CONSIGNACAO: { internal: '1918', interstate: '2918' },
+};
+
+export const calculateItemTaxes = (product, client, companyInfo, taxProfile, operationType = 'VENDA') => {
+
     // 1. Sanitização
     const quantity = Number(product.qty || product.quantity || 1);
     const unitPrice = Number(product.price || product.unitPrice || 0);
@@ -23,16 +31,34 @@ export const calculateItemTaxes = (product, client, companyInfo, taxProfile) => 
 
     // Fallback se não tiver empresa/perfil
     if (!companyInfo?.address?.state) return { ...taxes, cfop: '5102', error: "Empresa sem UF" };
+
+    // --- REMESSA/RETORNO DE CONSIGNAÇÃO: CFOP fixo por tabela, independente de perfil tributário ---
+    // CST/ICMS de suspensão não é calculado aqui — precisa de validação contábil antes de ir para produção
+    // (ver observação em NFeBuilder.js e no plano de implementação).
+    if (operationType !== 'VENDA' && CONSIGNMENT_CFOP_TABLE[operationType]) {
+        const clientStateConsign = client?.address?.state || companyInfo.address.state;
+        const isInternalConsign = clientStateConsign === companyInfo.address.state;
+        taxes.cfop = isInternalConsign
+            ? CONSIGNMENT_CFOP_TABLE[operationType].internal
+            : CONSIGNMENT_CFOP_TABLE[operationType].interstate;
+        log(`CFOP de ${operationType} (consignação): ${taxes.cfop}`);
+        if (taxProfile) {
+            taxes.csosn = taxProfile.cst_nfe || '102';
+            taxes.origin = String(taxProfile.origin || product.origin || '0');
+        }
+        return taxes;
+    }
+
     if (!taxProfile) {
         taxes.cfop = '5102'; // Sem perfil = Padrão
-        return taxes; 
+        return taxes;
     }
 
     // --- LÓGICA DE CFOP (AQUI ESTÁ A CORREÇÃO) ---
     const clientState = client?.address?.state || companyInfo.address.state;
     const companyState = companyInfo.address.state;
     const isInternal = clientState === companyState;
-    const indIEDest = client?.ie_indicator || '9'; 
+    const indIEDest = client?.ie_indicator || '9';
     const isContribuinte = indIEDest === '1' || indIEDest === '2';
 
     // REGRA DE OURO: Se o perfil tem CFOP manual (cfop_state), USE ELE!
@@ -42,11 +68,11 @@ export const calculateItemTaxes = (product, client, companyInfo, taxProfile) => 
     if (isInternal && manualCFOP && String(manualCFOP).length === 4) {
         taxes.cfop = String(manualCFOP);
         log(`CFOP forçado pelo perfil: ${taxes.cfop}`);
-    } 
+    }
     else {
         // Cálculo Automático (Apenas se não tiver manual)
         const isSTProfile = ['500', '201', '202', '203', '60', '70'].includes(taxProfile.cst_nfe);
-        
+
         if (isInternal) {
             taxes.cfop = isSTProfile ? '5405' : '5102';
         } else {

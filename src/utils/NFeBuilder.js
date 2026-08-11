@@ -13,8 +13,14 @@ const getSafeDate = () => {
     return `${y}-${m}-${d}T${h}:${min}:${s}-03:00`;
 };
 
-export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = '65', customNumber = 0) => {
-    
+// Natureza da operação por etapa da consignação mercantil (SEFAZ) — venda normal não muda o comportamento atual.
+const NATUREZA_OPERACAO_BY_TYPE = {
+    REMESSA_CONSIGNACAO: 'REMESSA PARA VENDA FORA DO ESTABELECIMENTO',
+    RETORNO_CONSIGNACAO: 'RETORNO DE MERCADORIA NAO VENDIDA (CONSIGNACAO)',
+};
+
+export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = '65', customNumber = 0, operationType = 'VENDA') => {
+
     if (!company.cnpj) throw new Error("Empresa sem CNPJ configurado.");
     if (!sale.items || sale.items.length === 0) throw new Error("Venda sem itens.");
     if (!nfeConfig?.api_token) throw new Error("Token da API não configurado.");
@@ -67,12 +73,14 @@ export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = 
         "Lote": String(Math.floor(Date.now() / 1000)),
         "DataEmissao": dataAtual,
         "DataEntradaSaida": dataAtual,
-        "NaturezaOperacao": targetModel === '55' ? "VENDA DE MERCADORIA" : "VENDA A CONSUMIDOR",
+        "NaturezaOperacao": NATUREZA_OPERACAO_BY_TYPE[operationType]
+            || (targetModel === '55' ? "VENDA DE MERCADORIA" : "VENDA A CONSUMIDOR"),
         "ModeloDocumento": Number(targetModel),
-        "TipoAmbiente": env, 
+        "TipoAmbiente": env,
         "Finalidade": 1,
-        "IndicadorPresenca": 1,
-        "ConsumidorFinal": true,
+        // Remessa/retorno de consignação é operação B2B com o revendedor, não venda presencial a consumidor final
+        "IndicadorPresenca": operationType === 'VENDA' ? 1 : 9,
+        "ConsumidorFinal": operationType === 'VENDA',
         "Cliente": clientePayload,
 
         "Produtos": sale.items.map((item, index) => {
@@ -91,8 +99,10 @@ export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = 
             }
 
             const qtd = Number(item.quantity || item.qty);
-            const vUnit = Number(item.unitPrice || item.price);
+            // Preço bruto (de tabela, antes de desconto) — cai de volta para o preço já líquido em vendas antigas sem originalPrice
+            const vUnit = Number(item.originalPrice ?? item.unitPrice ?? item.price);
             const vTotal = Number(item.total || (qtd * vUnit));
+            const valorDesconto = Number((item.discountTotal || 0).toFixed(2));
             const cfopCode = Number(taxes.cfop || "5102");
             const hasIPI = taxes.vIPI > 0;
 
@@ -121,7 +131,7 @@ export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = 
                 "ValorUnitario": vUnit,
                 "ValorTotal": vTotal,
                 "OrigemProduto": Number(taxes.origin || 0),
-                "ValorDesconto": 0,
+                "ValorDesconto": valorDesconto,
                 "ValorFrete": 0,
                 "ValorSeguro": 0,
                 "ValorOutrasDespesas": 0,
