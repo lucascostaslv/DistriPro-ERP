@@ -6,6 +6,7 @@ import {
 import { BlingService } from '../utils/BlingService';
 import { NFeService } from '../utils/NFeService';
 import { useTenant } from '../contexts/TenantContext';
+import { extractCancelEventData } from '../utils/fiscalCancelHelpers';
 
 const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(val) || 0);
 
@@ -187,7 +188,13 @@ const FiscalInvoices = ({ storeConfig, showNotification, currentUser}) => {
 
                 const success = handleApiResponse(result, 'Nota Cancelada!', 'Falha no Cancelamento', true);
                 if (success) {
-                    await tenantDB.supabase.update('fiscal_invoices', invoice.id, { status: 'CANCELADA' });
+                    // Guarda o evento de cancelamento (protocolo/data/XML se a API retornar) — sem
+                    // isso, o único rastro do cancelamento era o campo `status`, insuficiente pra um
+                    // contador comprovar o cancelamento perante a SEFAZ depois.
+                    await tenantDB.supabase.update('fiscal_invoices', invoice.id, {
+                        status: 'CANCELADA',
+                        ...extractCancelEventData(result, justification),
+                    });
                 }
             } else {
                 return setFeedbackData({ type: 'error', title: 'Ação indisponível', message: 'Carta de Correção (CC-e) não é suportada para notas emitidas via Bling.' });
@@ -219,7 +226,10 @@ const FiscalInvoices = ({ storeConfig, showNotification, currentUser}) => {
 
                 const success = handleApiResponse(result, 'Nota Cancelada!', 'Falha no Cancelamento', false);
                 if (success) {
-                    await tenantDB.supabase.update('fiscal_invoices', invoice.id, { status: 'CANCELADA' });
+                    await tenantDB.supabase.update('fiscal_invoices', invoice.id, {
+                        status: 'CANCELADA',
+                        ...extractCancelEventData(result, justification),
+                    });
                 }
             }
             else if (type === 'CORRECT') {
@@ -407,13 +417,28 @@ const FiscalInvoices = ({ storeConfig, showNotification, currentUser}) => {
                              <div className="flex flex-col items-center gap-1">
                                  {/* Status Principal */}
                                  <span className={`px-2 py-1 rounded text-[10px] font-bold border uppercase w-24 ${
-                                     inv.status && inv.status.includes('CANCEL') 
-                                     ? 'bg-red-50 text-red-700 border-red-200' 
+                                     inv.status && inv.status.includes('CANCEL')
+                                     ? 'bg-red-50 text-red-700 border-red-200'
                                      : 'bg-emerald-50 text-emerald-700 border-emerald-200'
                                  }`}>
                                      {inv.status && inv.status.includes('CANCEL') ? 'Cancelada' : 'Autorizada'}
                                  </span>
-                                 
+
+                                 {/* Comprovante do evento de cancelamento — o pdf_base64/xml_content acima
+                                     continuam sendo o documento ORIGINAL pré-cancelamento (a SEFAZ não permite
+                                     reescrevê-lo); isso é o registro do EVENTO em si, para o contador. */}
+                                 {inv.status && inv.status.includes('CANCEL') && (
+                                     <div
+                                         className="text-[9px] text-red-500 text-center leading-tight"
+                                         title={inv.cancel_justification || ''}
+                                     >
+                                         {inv.canceled_at && (
+                                             <div>{new Date(inv.canceled_at).toLocaleString('pt-BR')}</div>
+                                         )}
+                                         {inv.cancel_protocol && <div>Prot. {inv.cancel_protocol}</div>}
+                                     </div>
+                                 )}
+
                                  {/* Badge de Correção (Se houver) */}
                                  {inv.has_correction && (
                                      <span className="text-[10px] flex items-center gap-1 text-blue-600 bg-blue-50 px-2 py-0.5 rounded border border-blue-100 font-bold">
@@ -433,20 +458,40 @@ const FiscalInvoices = ({ storeConfig, showNotification, currentUser}) => {
                                         <button onClick={() => setActionModal({type:'CANCEL', invoice:inv})} className="p-2 text-red-600 hover:bg-red-50 rounded border border-transparent hover:border-red-100" title="Cancelar Nota"><Ban size={16}/></button>
                                     </>
                                 )}
-                                {/* Downloads */}
+                                {/* Downloads — nome do arquivo marca "CANCELADA" quando aplicável: o PDF/XML
+                                    em si é sempre o documento ORIGINAL pré-cancelamento (a SEFAZ não deixa
+                                    reescrevê-lo), então o nome do arquivo é o único jeito de quem baixar não
+                                    confundir com um documento válido. */}
                                 <div className="w-px h-6 bg-slate-200 mx-1"></div>
                                 {inv.link_danfe || inv.link_pdf ? (
-                                    <a href={inv.link_danfe || inv.link_pdf} target="_blank" rel="noopener noreferrer" className="p-2 text-slate-600 hover:bg-slate-100 rounded" title="Abrir DANFE/PDF">
+                                    <a href={inv.link_danfe || inv.link_pdf} target="_blank" rel="noopener noreferrer" className="p-2 text-slate-600 hover:bg-slate-100 rounded" title={inv.status?.includes('CANCEL') ? "Abrir DANFE/PDF (nota CANCELADA — este link é do documento original)" : "Abrir DANFE/PDF"}>
                                         <Printer size={16}/>
                                     </a>
                                 ) : (
-                                    <button onClick={() => downloadSmart(inv.pdf_base64, `NFe-${inv.nfe_number}`)} className="p-2 text-slate-600 hover:bg-slate-100 rounded" title="Baixar Documento">
+                                    <button
+                                        onClick={() => downloadSmart(inv.pdf_base64, `NFe-${inv.nfe_number}${inv.status?.includes('CANCEL') ? '-CANCELADA' : ''}`)}
+                                        className="p-2 text-slate-600 hover:bg-slate-100 rounded"
+                                        title={inv.status?.includes('CANCEL') ? "Baixar Documento (nota CANCELADA — PDF original, sem marca de cancelamento)" : "Baixar Documento"}
+                                    >
                                         <Printer size={16}/>
                                     </button>
                                 )}
-                                <button onClick={() => downloadSmart(inv.xml_content, `NFe-${inv.nfe_number}.xml`)} className="p-2 text-slate-600 hover:bg-slate-100 rounded" title="Baixar XML">
+                                <button
+                                    onClick={() => downloadSmart(inv.xml_content, `NFe-${inv.nfe_number}${inv.status?.includes('CANCEL') ? '-CANCELADA' : ''}.xml`)}
+                                    className="p-2 text-slate-600 hover:bg-slate-100 rounded"
+                                    title={inv.status?.includes('CANCEL') ? "Baixar XML (nota CANCELADA — XML original, sem o evento de cancelamento)" : "Baixar XML"}
+                                >
                                     <Download size={16}/>
                                 </button>
+                                {inv.cancel_event_xml && (
+                                    <button
+                                        onClick={() => downloadSmart(inv.cancel_event_xml, `NFe-${inv.nfe_number}-Evento-Cancelamento.xml`)}
+                                        className="p-2 text-red-500 hover:bg-red-50 rounded"
+                                        title="Baixar XML do Evento de Cancelamento (comprovante para o contador)"
+                                    >
+                                        <Ban size={16}/>
+                                    </button>
+                                )}
                                 <button 
                                     onClick={() => handleDeleteInvoice(inv.id)} 
                                     className="p-2 text-slate-300 hover:text-red-600 hover:bg-red-50 rounded transition-colors ml-1" 

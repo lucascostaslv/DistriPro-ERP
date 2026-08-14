@@ -87,6 +87,7 @@ import { buildBlingNotaPayload } from "./utils/BlingPayloadBuilder";
 import { BlingService } from "./utils/BlingService";
 import { buildNFePayload } from "./utils/NFeBuilder";
 import { NFeService } from "./utils/NFeService";
+import { extractCancelEventData } from "./utils/fiscalCancelHelpers";
 import ComandaManager from "./ComandaManager";
 import { downloadSmart } from "./EntradaNotas/FiscalInvoices";
 import BankAccountsManager from "./BankAccountsManager";
@@ -5552,7 +5553,13 @@ const Finance = ({
             setIsCancellingSale(false);
             return;
           }
-          await supabase.from("fiscal_invoices").update({ status: "CANCELADA" }).eq("id", invoice.id);
+          // Registra o evento de cancelamento (protocolo/data/XML se a API retornar) — sem isso,
+          // o único rastro do cancelamento era o campo `status`, insuficiente pra um contador
+          // comprovar o cancelamento perante a SEFAZ depois.
+          await supabase
+            .from("fiscal_invoices")
+            .update({ status: "CANCELADA", ...extractCancelEventData(result, justification) })
+            .eq("id", invoice.id);
         } else {
           const { data: config } = await supabase
             .from("fiscal_settings")
@@ -5585,7 +5592,12 @@ const Finance = ({
             setIsCancellingSale(false);
             return;
           }
-          await supabase.from("fiscal_invoices").update({ status: "CANCELADA" }).eq("id", invoice.id);
+          // Idem ao ramo Bling acima: guarda o evento de cancelamento (protocolo do EVENTO,
+          // diferente do protocolo de autorização original enviado em `protocolToUse`).
+          await supabase
+            .from("fiscal_invoices")
+            .update({ status: "CANCELADA", ...extractCancelEventData(result, justification) })
+            .eq("id", invoice.id);
         }
         }
       }
