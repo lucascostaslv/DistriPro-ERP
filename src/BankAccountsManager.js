@@ -96,8 +96,11 @@ const BankAccountsManager = ({ showNotification }) => {
       const unsubscribe = tenantDB.firestore.subscribe(
           'account_transactions', 
           (dados) => {
-              // Ordena localmente (mais recentes primeiro)
-              const sorted = dados.sort((a,b) => new Date(b.date || b.createdAt) - new Date(a.date || a.createdAt));
+              // Ordena localmente (mais recentes primeiro) — usa parseTxnDate (não `new Date` cru)
+              // para tratar "YYYY-MM-DD" como meio-dia local, não meia-noite UTC; senão uma
+              // transação editada (que grava date só como data, sem hora) ordenava como se
+              // tivesse ocorrido às 21h do dia anterior (UTC-3) e pulava de posição na lista.
+              const sorted = dados.sort((a,b) => parseTxnDate(b.date || b.createdAt) - parseTxnDate(a.date || a.createdAt));
               setTransactions(sorted);
           },
           [where('accountId', '==', selectedAccount.id)] // O filtro mágico!

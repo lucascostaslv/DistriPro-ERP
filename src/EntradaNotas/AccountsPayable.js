@@ -191,12 +191,20 @@ const AccountsPayable = ({ products }) => {
       "financial_movements",
       (data) => {
         const mapped = data.map((item) => {
+          const dueDateForItem = item.dueDate || item.date;
+          // Antes só rodava quando item.status vinha ausente — mas Transactions.js sempre grava
+          // status ('PENDENTE'/'PAGO'), então "ATRASADO" nunca acontecia na prática. Agora reavalia
+          // sempre que o status atual é PENDENTE, comparando contra o vencimento real (dueDate).
           let computedStatus = item.status || "PENDENTE";
-          if (!item.status) {
+          if (computedStatus === "PENDENTE") {
             const today = new Date().toISOString().split("T")[0];
-            if (item.date < today) computedStatus = "ATRASADO";
+            if (dueDateForItem < today) computedStatus = "ATRASADO";
           }
           return {
+            // ...item primeiro para preservar isAutoPay/autoPayDate/autoPayAccount e qualquer outro
+            // campo gravado direto no documento (ex.: pelo agendamento automático) — sem o spread,
+            // esses campos eram descartados e o robô de auto-pay/badge "Agendado" nunca funcionavam.
+            ...item,
             id: item.id,
             source: "expense",
             // Referência à nota de compra de origem (quando a despesa é uma parcela gerada em EntradaNotas),
@@ -219,7 +227,7 @@ const AccountsPayable = ({ products }) => {
                 number: "1",
                 // dueDate é o vencimento real da parcela; some despesas antigas (lançadas direto no modal
                 // "Nova Despesa") não têm esse campo — nesse caso usa a data de competência como vencimento.
-                dueDate: item.dueDate || item.date,
+                dueDate: dueDateForItem,
                 value: Number(item.amount) || 0,
                 status: computedStatus,
               },

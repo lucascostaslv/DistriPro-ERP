@@ -26,13 +26,23 @@ const formatCurrency = (val) =>
     Number(val) || 0,
   );
 
+// "YYYY-MM-DD" a partir dos getters LOCAIS do Date (não toISOString, que é UTC e desloca o dia
+// para vendas depois das ~21h no fuso do Brasil — mesmo bug já corrigido em BankAccountsManager.js).
+const toLocalDateStr = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
 const safeGetDate = (dateVal) => {
   if (!dateVal) return null;
   try {
-    if (dateVal.seconds)
-      return new Date(dateVal.seconds * 1000).toISOString().split("T")[0];
-    if (typeof dateVal === "string") return dateVal.split("T")[0];
-    if (dateVal instanceof Date) return dateVal.toISOString().split("T")[0];
+    if (dateVal.seconds) return toLocalDateStr(new Date(dateVal.seconds * 1000));
+    if (typeof dateVal === "string") {
+      // Data-only ("2026-05-10", sem hora) já é um dia de calendário sem ambiguidade de fuso.
+      if (/^\d{4}-\d{2}-\d{2}$/.test(dateVal)) return dateVal;
+      // Timestamp ISO completo (ex: sale.date = new Date().toISOString()): o "dia" relevante para
+      // o fechamento de caixa é o dia local (Brasil), não o dia UTC embutido na string.
+      return toLocalDateStr(new Date(dateVal));
+    }
+    if (dateVal instanceof Date) return toLocalDateStr(dateVal);
     return null;
   } catch (e) {
     return null;
@@ -318,7 +328,9 @@ const CashClosingManager = ({ showNotification }) => {
     pendings.forEach((p) => {
       if (p.status === "INFERIOR_PENDENTE") qteVermelho++;
       if (p.status === "PENDENTE_CONCILIACAO") qteAmarelo++;
-      const d = new Date(p.periodId);
+      // periodId é "YYYY-MM-DD" (dia 1 do mês) — parseado sem hora vira meia-noite UTC, que em
+      // UTC-3 já é o dia anterior (mês anterior quando cai no dia 1), mostrando o mês errado.
+      const d = new Date(p.periodId + "T12:00:00");
       const monthName = [
         "Janeiro",
         "Fevereiro",

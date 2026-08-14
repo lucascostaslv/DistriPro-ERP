@@ -32,6 +32,19 @@ const formatDate = (dateStr) => {
 };
 
 export default function PurchaseSuggestion({ products, sales, suppliers }) {
+  // Estoque de um produto "pack" (caixa/fardo) é sempre derivado do produto pai — o campo
+  // `stock` do próprio pack nunca é escrito (fica 0), igual à mesma lógica usada em
+  // InventoryWMS.js (getDisplayStock). Sem isso, todo produto tipo pack aparece com estoque
+  // zerado aqui e a sugestão de compra fica sistematicamente inflada para esses SKUs.
+  const getDisplayStock = (prod) => {
+    if (prod.itemType === "pack" && prod.parentId) {
+      const parent = products.find((p) => p.id === prod.parentId);
+      const factor = prod.conversionFactor || prod.packQuantity || 1;
+      return parent ? Math.floor((parent.stock || 0) / factor) : 0;
+    }
+    return prod.stock;
+  };
+
   // --- CONFIGURAÇÕES DE ANÁLISE ---
   const [daysAnalysis, setDaysAnalysis] = useState(30);
   const [daysCoverage, setDaysCoverage] = useState(15);
@@ -72,7 +85,7 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
       const totalSold = salesMap[prod.id] || 0;
       const dailySales = totalSold / daysAnalysis;
 
-      const currentStock = Number(prod.stock || 0);
+      const currentStock = Number(getDisplayStock(prod) || 0);
       let daysStock = dailySales > 0 ? currentStock / dailySales : 999;
       if (currentStock === 0 && dailySales === 0) daysStock = 999;
 
@@ -270,7 +283,11 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
       [pid]: {
         ...prev[pid],
         qty: val,
-        total: val * prev[pid].cost,
+        // Usa basePrice (o valor negociado, editável em "Vlr Base"), não cost (custo original
+        // sugerido) — senão editar a quantidade depois de negociar o preço descartava o
+        // desconto/ajuste silenciosamente, e o total final saía inconsistente com o preço
+        // unitário ainda exibido na tela.
+        total: val * (prev[pid].basePrice ?? prev[pid].cost),
       },
     }));
   };
@@ -453,11 +470,11 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
                     </div>
                     <div className="text-xs text-slate-500 flex gap-4 mt-1.5 items-center">
                       <div className="bg-slate-100 px-2 py-0.5 rounded text-slate-600">
-                        Estoque: <strong>{prod.stock}</strong>
+                        Estoque: <strong>{getDisplayStock(prod)}</strong>
                       </div>
                       <div>
                         Giro:{" "}
-                        <strong>{prod.stats.dailySales.toFixed(2)}/dia</strong>
+                        <strong>{prod.stats.dailySales.toFixed(2).replace(".", ",")}/dia</strong>
                       </div>
                       <div>
                         Cob. Atual:{" "}

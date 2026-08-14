@@ -221,7 +221,8 @@ export default function PriceGroups({ products, showNotification }) {
       .filter(
         (p) =>
           p.priceGroupId !== activeGroup.id &&
-          (p.name.toLowerCase().includes(term) ||
+          // ✨ Blindagem: (p.name || "") — produto sem name derrubava a tela inteira aqui
+          ((p.name || "").toLowerCase().includes(term) ||
             String(p.cbaCode).includes(term)),
       )
       .slice(0, 10);
@@ -305,7 +306,7 @@ export default function PriceGroups({ products, showNotification }) {
                 <div className="text-xs text-slate-500">
                   Markup:{" "}
                   <span className="font-bold text-indigo-600">
-                    {group.margin}%
+                    {String(group.margin).replace(".", ",")}%
                   </span>
                 </div>
               </div>

@@ -85,7 +85,14 @@ export const buildBlingNotaPayload = (sale, client, blingConfig, tipoDocumento =
 
     const cest = item.cest ? String(item.cest).replace(/\D/g, '') : '';
     const qtd = Number(item.quantity || item.qty);
-    const vUnit = Number(item.unitPrice || item.price);
+    // O Bling não tem campo de desconto discriminado neste payload — o desconto (por item e/ou
+    // rateio do desconto geral do carrinho, ver App.js handleReview/item.discountTotal) precisa
+    // ficar embutido no valor unitário para o total dos itens reconciliar com sale.total. Usar só
+    // item.price aqui (sem subtrair o desconto geral) deixaria o total dos itens MAIOR que o total
+    // da parcela sempre que houvesse desconto geral aplicado, arriscando rejeição da nota pelo Bling.
+    const grossUnit = Number(item.originalPrice ?? item.unitPrice ?? item.price);
+    const lineDiscount = Number(item.discountTotal || 0);
+    const vUnit = qtd > 0 ? Math.max(0, (grossUnit * qtd - lineDiscount) / qtd) : grossUnit;
 
     return {
       codigo: item.id ? String(item.id).substring(0, 20) : undefined,

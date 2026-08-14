@@ -524,11 +524,15 @@ const handleSaveSupplier = async () => {
   };
 
   // --- FUNÇÃO AUXILIAR DE SEGURANÇA ---
+  // Hoje só recebe string de <input type="number"> (sempre ponto decimal, nunca milhar) ou
+  // número já pronto — mas fica defensiva contra formato BR completo ("1.234,56") caso seja
+  // reaproveitada num input de texto mascarado no futuro: só remove pontos de milhar quando
+  // há vírgula decimal presente (senão um ponto isolado é sempre decimal, nunca milhar).
   const safeFloat = (val) => {
       if (typeof val === 'number') return val;
       if (!val) return 0;
-      // Permite números, vírgulas, PONTOS e traços. Depois troca vírgula por ponto.
-      const clean = String(val).replace(/[^\d,.-]/g, '').replace(',', '.');
+      let clean = String(val).replace(/[^\d,.-]/g, '');
+      clean = clean.includes(',') ? clean.replace(/\./g, '').replace(',', '.') : clean;
       return parseFloat(clean) || 0;
   };
 

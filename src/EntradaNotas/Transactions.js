@@ -8,14 +8,21 @@ import { useTenant } from '../contexts/TenantContext';
 
 const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
 
+// "YYYY-MM-DD" do dia local — toISOString() converte para UTC antes de fatiar, então depois das
+// ~21h no fuso do Brasil (UTC-3) já mostra o dia seguinte como "hoje".
+const todayLocalStr = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
 const Transactions = ({ showNotification, products, initialTab, onFinalizeSale, highlightId }) => {
   const { tenantDB, currentUser, currentStore } = useTenant();
 
   const [activeTab, setActiveTab] = useState(initialTab || 'entry');
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
-  
+
   const [categories, setCategories] = useState([]);
-  const [bankAccounts, setBankAccounts] = useState([]); 
+  const [bankAccounts, setBankAccounts] = useState([]);
 
   const [isAddingCat, setIsAddingCat] = useState(false);
   const [tempCatName, setTempCatName] = useState('');
@@ -24,9 +31,9 @@ const Transactions = ({ showNotification, products, initialTab, onFinalizeSale, 
   const [expenseForm, setExpenseForm] = useState({
       description: '',
       value: '',
-      date: new Date().toISOString().split('T')[0],
+      date: todayLocalStr(),
       category: '',
-      accountId: '' 
+      accountId: ''
   });
 
   useEffect(() => {
@@ -49,7 +56,7 @@ const Transactions = ({ showNotification, products, initialTab, onFinalizeSale, 
           return;
       }
 
-      const todayStr = new Date().toISOString().split('T')[0];
+      const todayStr = todayLocalStr();
       const calculatedStatus = expenseForm.date > todayStr ? 'PENDENTE' : 'PAGO';
       const amountNum = parseFloat(expenseForm.value) || 0;
 
@@ -210,7 +217,12 @@ const Transactions = ({ showNotification, products, initialTab, onFinalizeSale, 
                               <div className="flex gap-1">
                                   <select className="w-full border p-2 rounded text-sm bg-white" value={expenseForm.category} onChange={e => setExpenseForm({...expenseForm, category: e.target.value})}>
                                       <option value="">Selecione...</option>
-                                      {categories.map((c, i) => <option key={i} value={c.name}>{c.name}</option>)}
+                                      {categories.map((c, i) => {
+                                          // Blindagem: categoria antiga com `name` gravado como objeto
+                                          // (bug de cadastro já corrigido — ver Apêndice A.1) quebrava esta tela.
+                                          const catName = typeof c.name === 'string' ? c.name : c.name?.name || String(c.id || i);
+                                          return <option key={i} value={catName}>{catName}</option>;
+                                      })}
                                   </select>
                                   <button onClick={() => setIsAddingCat(true)} className="bg-slate-200 px-3 rounded hover:bg-slate-300 text-slate-600" title="Criar Nova Categoria">
                                       <PlusCircle size={16}/>
@@ -249,19 +261,19 @@ const Transactions = ({ showNotification, products, initialTab, onFinalizeSale, 
                           <label className="text-xs font-bold text-slate-500 uppercase block mb-1 flex items-center gap-1">
                               <Landmark size={12}/> Conta de Saída (Pagamento)
                           </label>
-                          <select 
-                              className={`w-full border p-2 rounded text-sm bg-white focus:ring-2 outline-none ${expenseForm.date <= new Date().toISOString().split('T')[0] && !expenseForm.accountId ? 'border-red-400 focus:ring-red-200' : 'border-slate-200 focus:ring-indigo-200'}`}
-                              value={expenseForm.accountId} 
+                          <select
+                              className={`w-full border p-2 rounded text-sm bg-white focus:ring-2 outline-none ${expenseForm.date <= todayLocalStr() && !expenseForm.accountId ? 'border-red-400 focus:ring-red-200' : 'border-slate-200 focus:ring-indigo-200'}`}
+                              value={expenseForm.accountId}
                               onChange={e => setExpenseForm({...expenseForm, accountId: e.target.value})}
                           >
-                              <option value="">{expenseForm.date <= new Date().toISOString().split('T')[0] ? '-- Selecione a Conta (Obrigatório) --' : '-- Nenhuma (Apenas Agendar) --'}</option>
+                              <option value="">{expenseForm.date <= todayLocalStr() ? '-- Selecione a Conta (Obrigatório) --' : '-- Nenhuma (Apenas Agendar) --'}</option>
                               {bankAccounts.map((acc, i) => (
                                   <option key={i} value={acc.id}>{acc.name} (Saldo: {formatCurrency(acc.currentBalance)})</option>
                               ))}
                           </select>
-                          {expenseForm.date <= new Date().toISOString().split('T')[0] && !expenseForm.accountId ? (
+                          {expenseForm.date <= todayLocalStr() && !expenseForm.accountId ? (
                               <span className="text-[10px] text-red-500 font-bold mt-1 block">Necessário para debitar o valor do extrato hoje.</span>
-                          ) : expenseForm.date > new Date().toISOString().split('T')[0] && (
+                          ) : expenseForm.date > todayLocalStr() && (
                               <span className="text-[10px] text-slate-400 mt-1 block">O valor só será descontado no dia do pagamento efetivo.</span>
                           )}
                       </div>

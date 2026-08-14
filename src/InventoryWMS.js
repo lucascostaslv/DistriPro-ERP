@@ -1266,9 +1266,19 @@ const InventoryWMS = ({
                       const batch = tenantDB.firestore.batch(); // ✨ Usa o batch da DAL
 
                       saidaCart.forEach((item) => {
-                        batch.update("products", item.id, {
-                          stock: tenantDB.firestore.utils.increment(-item.qty),
-                        });
+                        // Igual a processStockUpdate: produto "pack" não tem stock próprio (é
+                        // sempre derivado do pai) — decrementar o campo do próprio pack é um
+                        // no-op silencioso que não reflete no estoque real/vendável.
+                        if (item.itemType === "pack" && item.parentId) {
+                          const factor = item.conversionFactor || item.packQuantity || 1;
+                          batch.update("products", item.parentId, {
+                            stock: tenantDB.firestore.utils.increment(-item.qty * factor),
+                          });
+                        } else {
+                          batch.update("products", item.id, {
+                            stock: tenantDB.firestore.utils.increment(-item.qty),
+                          });
+                        }
                       });
 
                       // A nossa DAL permite encadear ou adicionar direto no batch!
@@ -1420,7 +1430,10 @@ const InventoryWMS = ({
                 const hasSale = !!prod.lastSale;
                 const days = hasSale ? getDaysDiff(prod.lastSale) : 0;
 
-                const moneyStuck = (prod.stock || 0) * (prod.cost || 0);
+                // stock bruto é sempre 0 para produtos "pack" (estoque é derivado do pai) —
+                // usar getDisplayStock evita mostrar "Dinheiro Parado: R$ 0,00" para fardos/caixas
+                // que na verdade têm capital real parado.
+                const moneyStuck = (getDisplayStock(prod) || 0) * (prod.cost || 0);
                 const suggestedPromo = (prod.price * 0.85).toFixed(2);
 
                 return (
@@ -2616,7 +2629,7 @@ const InventoryWMS = ({
                                       {diff > 0.001 && (
                                         <span className="bg-red-100 text-red-700 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center justify-center gap-1 w-fit mx-auto">
                                           <ArrowUpCircle size={10} /> +
-                                          {Math.abs(pct).toFixed(1)}%
+                                          {Math.abs(pct).toFixed(1).replace(".", ",")}%
                                         </span>
                                       )}
 
@@ -2624,7 +2637,7 @@ const InventoryWMS = ({
                                       {diff < -0.001 && (
                                         <span className="bg-emerald-100 text-emerald-700 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center justify-center gap-1 w-fit mx-auto">
                                           <ArrowDownCircle size={10} />{" "}
-                                          {Math.abs(pct).toFixed(1)}%
+                                          {Math.abs(pct).toFixed(1).replace(".", ",")}%
                                         </span>
                                       )}
 
@@ -2760,7 +2773,7 @@ const InventoryWMS = ({
                                   {masks.currency(taxes.vBC || price)}
                                 </td>
                                 <td className="p-3 text-right text-slate-600">
-                                  {(taxes.pICMS || 0).toFixed(2)}%
+                                  {(taxes.pICMS || 0).toFixed(2).replace(".", ",")}%
                                 </td>
                                 <td className="p-3 text-right font-bold text-slate-800">
                                   {masks.currency(taxes.vICMS || 0)}
@@ -2780,7 +2793,7 @@ const InventoryWMS = ({
                                   {taxes.cst_pis_cofins === "01" ? masks.currency(price) : "—"}
                                 </td>
                                 <td className="p-3 text-right text-slate-600">
-                                  {taxes.cst_pis_cofins === "01" ? `${(taxes.pis_rate || 0).toFixed(2)}%` : "0,00%"}
+                                  {taxes.cst_pis_cofins === "01" ? `${(taxes.pis_rate || 0).toFixed(2).replace(".", ",")}%` : "0,00%"}
                                 </td>
                                 <td className="p-3 text-right font-bold text-slate-800">
                                   {masks.currency(taxes.vPIS || 0)}
@@ -2800,7 +2813,7 @@ const InventoryWMS = ({
                                   {taxes.cst_pis_cofins === "01" ? masks.currency(price) : "—"}
                                 </td>
                                 <td className="p-3 text-right text-slate-600">
-                                  {taxes.cst_pis_cofins === "01" ? `${(taxes.cofins_rate || 0).toFixed(2)}%` : "0,00%"}
+                                  {taxes.cst_pis_cofins === "01" ? `${(taxes.cofins_rate || 0).toFixed(2).replace(".", ",")}%` : "0,00%"}
                                 </td>
                                 <td className="p-3 text-right font-bold text-slate-800">
                                   {masks.currency(taxes.vCOFINS || 0)}
@@ -2820,7 +2833,7 @@ const InventoryWMS = ({
                                     {masks.currency(price)}
                                   </td>
                                   <td className="p-3 text-right text-slate-600">
-                                    {(taxes.pIPI || 0).toFixed(2)}%
+                                    {(taxes.pIPI || 0).toFixed(2).replace(".", ",")}%
                                   </td>
                                   <td className="p-3 text-right font-bold text-slate-800">
                                     {masks.currency(taxes.vIPI)}
@@ -2849,8 +2862,8 @@ const InventoryWMS = ({
                           </table>
 
                           <p className="text-[10px] text-slate-400 italic">
-                            * Simulação baseada no preço de venda atual (R${" "}
-                            {price.toFixed(2)}) com 1 unidade, sem cliente
+                            * Simulação baseada no preço de venda atual (
+                            {masks.currency(price)}) com 1 unidade, sem cliente
                             definido.
                           </p>
                         </>
@@ -2935,7 +2948,7 @@ const InventoryWMS = ({
                   </p>
                   <p className="font-bold text-blue-600">
                     {selectedHistoryProduct.profitMargin
-                      ? `${selectedHistoryProduct.profitMargin}%`
+                      ? `${String(selectedHistoryProduct.profitMargin).replace(".", ",")}%`
                       : "-"}
                   </p>
                 </div>
@@ -2945,7 +2958,7 @@ const InventoryWMS = ({
                   </p>
                   <p className="font-bold text-slate-800">
                     {masks.currency(
-                      (selectedHistoryProduct.stock || 0) *
+                      (getDisplayStock(selectedHistoryProduct) || 0) *
                         (selectedHistoryProduct.cost || 0),
                     )}
                   </p>

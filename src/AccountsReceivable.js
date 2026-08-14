@@ -19,7 +19,10 @@ const fmtDate = (d) => d ? new Date(d + 'T12:00:00').toLocaleDateString('pt-BR')
 
 const computeStatus = (rec) => {
   if (rec.status === 'RECEBIDO' || rec.status === 'CANCELADO') return rec.status;
-  const today = new Date(); today.setHours(0,0,0,0);
+  // Ancora "hoje" ao meio-dia local, igual a `due` — misturar meia-noite com meio-dia fazia
+  // um título vencido ontem contar como 0.5 dia de atraso (floor -> 0 -> "Em Aberto" errado).
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12, 0, 0);
   const due = rec.dueDate ? new Date(rec.dueDate + 'T12:00:00') : null;
   if (!due) return 'ABERTO';
   const diffDays = Math.floor((today - due) / 86400000);
@@ -105,10 +108,14 @@ export default function AccountsReceivable({ showNotification, onFinalizeSale, h
       return (order[a._status] ?? 5) - (order[b._status] ?? 5);
     });
 
+  const currentMonthKey = new Date().toISOString().slice(0, 7); // "YYYY-MM"
   const totals = {
     aberto:   receivables.filter(r => ['ABERTO','VENCIDO','CRITICO'].includes(computeStatus(r))).reduce((a,r) => a + r.amount, 0),
     vencido:  receivables.filter(r => ['VENCIDO','CRITICO'].includes(computeStatus(r))).reduce((a,r) => a + r.amount, 0),
-    recebido: receivables.filter(r => computeStatus(r) === 'RECEBIDO').reduce((a,r) => a + (r.receivedAmount || r.amount), 0),
+    // "Recebido (mês)" — soma só o que foi de fato recebido no mês corrente, não o total histórico
+    recebido: receivables
+      .filter(r => computeStatus(r) === 'RECEBIDO' && (r.receivedAt || '').slice(0, 7) === currentMonthKey)
+      .reduce((a,r) => a + (r.receivedAmount || r.amount), 0),
   };
 
   // ── CONFIRMAR RECEBIMENTO ──────────────────────────────────────────────────
@@ -217,9 +224,11 @@ export default function AccountsReceivable({ showNotification, onFinalizeSale, h
           const batch = tenantDB.firestore.batch();
           const { increment } = tenantDB.firestore.utils || {};
           rec.reservedItems.forEach(ri => {
-            if (ri.productId && ri.qty) {
+            // Sem increment() não há como decrementar com segurança sem sobrescrever
+            // qualquer reserva concorrente de outro título — melhor pular do que zerar.
+            if (ri.productId && ri.qty && increment) {
               batch.update('products', ri.productId, {
-                reserved_stock: increment ? increment(-ri.qty) : 0,
+                reserved_stock: increment(-ri.qty),
               });
             }
           });

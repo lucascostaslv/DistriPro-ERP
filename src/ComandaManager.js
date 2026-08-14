@@ -168,6 +168,16 @@ const ComandaManager = ({
     return () => unsubscribe();
   }, [tenantDB]);
 
+  // Resincroniza a comanda aberta neste terminal sempre que a lista realtime mudar — sem isso,
+  // uma edição concorrente em outro caixa (ou terminal) na MESMA comanda nunca chegava até aqui,
+  // e a próxima mutação local (handleAddItem/handleUpdateQty/handleRemoveItem/handleAddDose)
+  // recalculava `items` a partir do estado antigo e sobrescrevia a edição do outro terminal.
+  useEffect(() => {
+    if (!selectedComanda) return;
+    const updated = comandas.find((c) => c.id === selectedComanda.id);
+    if (updated) setSelectedComanda(updated);
+  }, [comandas]);
+
   // --- 2. AÇÕES DE COMANDA ---
   const handleCreateComanda = async () => {
     if (!newCustomerName)

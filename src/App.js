@@ -2940,7 +2940,7 @@ const PDV = ({
                     </div>
                     {item.discountValue > 0 && (
                       <span className="text-[9px] font-bold text-amber-600">
-                        -{formatCurrency(item.discountValue)} ({item.discountPercent.toFixed(1)}%)
+                        -{formatCurrency(item.discountValue)} ({item.discountPercent.toFixed(1).replace(".", ",")}%)
                       </span>
                     )}
                     {discountEditItemId === item.id && (
@@ -4292,11 +4292,17 @@ const ExpenseHistory = ({ transactions, categories }) => {
           >
             <option value="ALL">Todas as Categorias</option>
             {/* AQUI ESTÁ O MAP CORRETO DAS CATEGORIAS */}
-            {safeCategories.map((c) => (
-              <option key={c.id} value={c.name}>
-                {c.name}
-              </option>
-            ))}
+            {safeCategories.map((c) => {
+              // Blindagem: registros antigos de categoria podem ter `name` gravado como objeto
+              // em vez de string (bug conhecido no cadastro de categoria — ver Apêndice A.1),
+              // o que quebrava a tela inteira ao tentar renderizar o objeto direto no <option>.
+              const catName = typeof c.name === "string" ? c.name : c.name?.name || String(c.id);
+              return (
+                <option key={c.id} value={catName}>
+                  {catName}
+                </option>
+              );
+            })}
           </select>
         </div>
         <div className="flex items-end">
@@ -5362,7 +5368,7 @@ const FinancialReport = ({
               <div className="text-center">
                 <p className="text-xs text-slate-400">Margem Líquida</p>
                 <p className="font-bold text-slate-800">
-                  {revenue > 0 ? ((netProfit / revenue) * 100).toFixed(1) : 0}%
+                  {revenue > 0 ? ((netProfit / revenue) * 100).toFixed(1).replace(".", ",") : 0}%
                 </p>
               </div>
               <div className="text-center">
@@ -5474,11 +5480,26 @@ const Finance = ({
       return showNotification("A justificativa deve ter no mínimo 15 caracteres.", "error");
     }
 
+    const hoursSinceSale = (Date.now() - new Date(sale.date).getTime()) / (1000 * 60 * 60);
+    if (hoursSinceSale > 24 && !cancelSaleModal.confirmedOverdue) {
+      return showNotification(
+        "Marque a confirmação de que está ciente do prazo antes de cancelar.",
+        "error",
+      );
+    }
+
     setIsCancellingSale(true);
+    let fiscalCancelSkipped = false;
     try {
       const { increment: inc, serverTimestamp: sts } = tenantDB.firestore.utils;
 
-      // 1. Se a NF-e está autorizada, tenta cancelar na SEFAZ/Bling antes de mexer em qualquer coisa
+      // 1. Se a NF-e está autorizada, tenta cancelar na SEFAZ/Bling — mas só dentro do prazo legal
+      // de 24h. Fora do prazo a SEFAZ rejeitaria a tentativa de qualquer forma, então pulamos a
+      // chamada fiscal e seguimos com o estorno interno (estoque + financeiro); o operador é
+      // avisado que a nota continua ativa na SEFAZ e precisa de tratamento manual (Nota de
+      // Devolução ou CC-e). Isso é diferente do comportamento anterior, que bloqueava TUDO
+      // (inclusive o estorno de estoque) fora do prazo — a pedido do usuário, o estorno interno
+      // deve sempre poder acontecer, com um aviso mais sério quando a venda for antiga.
       if (sale.nfeStatus === "AUTORIZADA") {
         const authorizedAt = sale.nfeAuthorizedAt?.toDate
           ? sale.nfeAuthorizedAt.toDate()
@@ -5488,14 +5509,8 @@ const Finance = ({
         const hoursSinceAuth = (Date.now() - authorizedAt.getTime()) / (1000 * 60 * 60);
 
         if (hoursSinceAuth > 24) {
-          showNotification(
-            "Esta venda possui NF-e autorizada há mais de 24h. Não é possível cancelar automaticamente — gere uma Nota de Devolução ou CC-e manualmente e contate o suporte para o estorno.",
-            "error",
-          );
-          setIsCancellingSale(false);
-          return;
-        }
-
+          fiscalCancelSkipped = true;
+        } else {
         const { data: invoice } = await supabase
           .from("fiscal_invoices")
           .select("*")
@@ -5572,12 +5587,17 @@ const Finance = ({
           }
           await supabase.from("fiscal_invoices").update({ status: "CANCELADA" }).eq("id", invoice.id);
         }
+        }
       }
 
-      // 2. Reversão de estoque + financeiro/bancário — só depois do passo fiscal ter sucesso (ou não ser necessário)
+      // 2. Reversão de estoque + financeiro/bancário — acontece sempre a partir daqui, mesmo
+      // quando o cancelamento fiscal foi pulado por estar fora do prazo (fiscalCancelSkipped)
       const batch = tenantDB.firestore.batch();
 
       (sale.items || []).forEach((item) => {
+        // Doses nunca decrementaram products.stock no checkout (só a abertura da garrafa
+        // decrementa) — reverter aqui criaria estoque fantasma.
+        if (item.isDose) return;
         const originalProd = products.find((p) => p.id === (item.originalId || item.id));
         if (!originalProd) return;
         if (originalProd.itemType === "pack" && originalProd.parentId && originalProd.conversionFactor) {
@@ -5640,11 +5660,19 @@ const Finance = ({
         canceledBy: currentUser?.id || "anon",
         canceledByName: currentUser?.username || "Gerente",
         cancelReason: justification,
+        fiscalCancelSkipped,
       });
 
       await batch.commit();
 
-      showNotification("Venda cancelada e estornada com sucesso.", "success");
+      if (fiscalCancelSkipped) {
+        showNotification(
+          "Venda estornada (estoque e financeiro revertidos). ATENÇÃO: a NF-e NÃO foi cancelada na SEFAZ/Bling — já passou de 24h da autorização. Ela continua ATIVA. Emita uma Nota de Devolução ou CC-e manualmente.",
+          "warning",
+        );
+      } else {
+        showNotification("Venda cancelada e estornada com sucesso.", "success");
+      }
       setCancelSaleModal(null);
     } catch (e) {
       console.error(e);
@@ -6335,15 +6363,34 @@ const Finance = ({
         onClose={() => !isCancellingSale && setCancelSaleModal(null)}
         title={`Cancelar Venda #${cancelSaleModal ? String(cancelSaleModal.sale.id).slice(-6) : ""}`}
       >
-        {cancelSaleModal && (
+        {cancelSaleModal && (() => {
+          const hoursSinceSale = (Date.now() - new Date(cancelSaleModal.sale.date).getTime()) / (1000 * 60 * 60);
+          const isOverdue = hoursSinceSale > 24;
+          const daysSinceSale = Math.floor(hoursSinceSale / 24);
+          return (
           <div className="space-y-4">
+            {isOverdue && (
+              <div className="bg-red-50 border-2 border-red-300 text-red-800 text-xs rounded p-3 flex gap-2">
+                <AlertTriangle size={20} className="shrink-0 mt-0.5 text-red-600" />
+                <div>
+                  <p className="font-bold text-sm mb-1">
+                    Atenção: esta venda foi feita há {daysSinceSale >= 1 ? `${daysSinceSale} dia(s)` : "mais de 24 horas"}.
+                  </p>
+                  <p>
+                    Cancelar uma venda antiga pode já ter impactado relatórios, fechamentos de caixa e conciliações
+                    bancárias fechados desde então. Confira com atenção antes de prosseguir.
+                  </p>
+                </div>
+              </div>
+            )}
             {cancelSaleModal.sale.nfeStatus === "AUTORIZADA" && (
               <div className="bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded p-3 flex gap-2">
                 <AlertTriangle size={16} className="shrink-0 mt-0.5" />
                 <span>
                   Esta venda possui NF-e autorizada. Se estiver dentro de 24h da autorização, o sistema tentará
-                  cancelá-la na SEFAZ/Bling automaticamente. Fora desse prazo, o cancelamento fiscal será bloqueado
-                  e será necessário emitir uma Nota de Devolução ou CC-e manualmente.
+                  cancelá-la na SEFAZ/Bling automaticamente. Fora desse prazo, a tentativa de cancelamento fiscal
+                  é pulada (a SEFAZ rejeitaria de qualquer forma) — o estoque e o financeiro são estornados normalmente,
+                  mas a NF-e continua ativa e precisa de uma Nota de Devolução ou CC-e manual depois.
                 </span>
               </div>
             )}
@@ -6367,6 +6414,21 @@ const Finance = ({
             <p className="text-xs text-slate-500">
               O estoque e os lançamentos financeiros/bancários desta venda serão estornados automaticamente.
             </p>
+            {isOverdue && (
+              <label className="flex items-start gap-2 bg-red-50 border border-red-200 rounded p-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={!!cancelSaleModal.confirmedOverdue}
+                  onChange={(e) =>
+                    setCancelSaleModal({ ...cancelSaleModal, confirmedOverdue: e.target.checked })
+                  }
+                />
+                <span className="text-xs font-bold text-red-700">
+                  Sim, sei que essa venda foi feita há mais de 24 horas e quero cancelar mesmo assim.
+                </span>
+              </label>
+            )}
             <div className="flex justify-end gap-2 pt-2">
               <button
                 disabled={isCancellingSale}
@@ -6376,7 +6438,11 @@ const Finance = ({
                 Voltar
               </button>
               <button
-                disabled={isCancellingSale || cancelSaleModal.justification.trim().length < 15}
+                disabled={
+                  isCancellingSale ||
+                  cancelSaleModal.justification.trim().length < 15 ||
+                  (isOverdue && !cancelSaleModal.confirmedOverdue)
+                }
                 onClick={handleCancelSale}
                 className="px-4 py-2 bg-red-600 text-white rounded text-sm font-bold flex items-center gap-2 disabled:opacity-50"
               >
@@ -6384,7 +6450,8 @@ const Finance = ({
               </button>
             </div>
           </div>
-        )}
+          );
+        })()}
       </Modal>
     </div>
   );
@@ -6508,7 +6575,10 @@ const SettingsManager = ({
 
   // NOVO: ESTADOS DE CATEGORIAS
   const [categories, setCategories] = useState([]);
-  const [newCategory, setNewCategory] = useState("");
+  // Objeto desde o início — antes era inicializado como "" (string) mas manipulado como objeto
+  // ({...newCategory, name: ...}), o que gravava `name` como {name: "..."} no Firestore (bug
+  // documentado no Apêndice A.1) e quebrava qualquer tela que tentasse renderizar c.name direto.
+  const [newCategory, setNewCategory] = useState({ name: "", isOperational: true });
 
   const [certData, setCertData] = useState({
     password: "",
@@ -6735,12 +6805,13 @@ const SettingsManager = ({
 
   // --- LOGICA CATEGORIAS ---
   const handleAddCategory = async () => {
-    if (!newCategory)
+    if (!newCategory.name?.trim())
       return showNotification("Digite um nome para a categoria", "error");
     try {
       const newCat = {
-        name: newCategory,
+        name: newCategory.name.trim(),
         type: "EXPENSE",
+        isOperational: newCategory.isOperational !== false,
         createdAt: tenantDB.firestore.utils.serverTimestamp(),
       };
       const docId = await tenantDB.firestore.add(
@@ -6749,7 +6820,7 @@ const SettingsManager = ({
       );
 
       setCategories([...categories, { id: docId, ...newCat }]);
-      setNewCategory("");
+      setNewCategory({ name: "", isOperational: true });
       showNotification("Categoria adicionada!", "success");
     } catch (e) {
       showNotification("Erro ao salvar categoria", "error");
@@ -7238,7 +7309,9 @@ const SettingsManager = ({
                 {/* CORRIGIDO DE store. PARA storeConfig. */}
                 {(storeConfig.transactionCategories || []).map((cat) => (
                   <tr key={cat.id} className="hover:bg-slate-50">
-                    <td className="p-3 font-bold text-slate-700">{cat.name}</td>
+                    <td className="p-3 font-bold text-slate-700">
+                      {typeof cat.name === "string" ? cat.name : cat.name?.name || cat.id}
+                    </td>
                     <td className="p-3 text-center">
                       <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-1 rounded font-bold uppercase">
                         Despesa
@@ -8315,6 +8388,19 @@ const cleanUndefinedFields = (obj, path = '') => {
       const { increment: inc, serverTimestamp: sts } = tenantDB.firestore.utils || {};
       const receivableId = tenantDB.firestore.generateId('receivables');
 
+      // Resolve o produto/quantidade REALMENTE reservados (pai + qty*conversionFactor para
+      // packs) — precisa bater exatamente com o que é reservado abaixo, pois reservedItems é
+      // o que handleFinalizeFiadoSale/AccountsReceivable.handleCancel usam depois para dar
+      // baixa definitiva ou devolver a reserva. Divergir aqui deixa reserved_stock do produto
+      // pai "preso" para sempre em vendas fiado de itens tipo pack/fardo.
+      const reservedItems = (sale.items || []).map(item => {
+        const prod = products.find(p => p.id === (item.originalId || item.id));
+        if (prod && prod.itemType === 'pack' && prod.parentId && prod.conversionFactor) {
+          return { productId: prod.parentId, qty: item.qty * prod.conversionFactor };
+        }
+        return { productId: item.originalId || item.id, qty: item.qty };
+      });
+
       batch.set('receivables', receivableId, {
         id: receivableId,
         clientId: sale.clientId || null,
@@ -8323,7 +8409,7 @@ const cleanUndefinedFields = (obj, path = '') => {
         dueDate: sale.dueDate || null,
         amount: sale.total,
         items: (sale.items || []).map(i => ({ id: i.id || i.originalId, name: i.name, qty: i.qty, price: i.price, cost: i.cost || 0 })),
-        reservedItems: (sale.items || []).map(i => ({ productId: i.originalId || i.id, qty: i.qty })),
+        reservedItems,
         paymentMethod: 'Fiado',
         status: 'ABERTO',
         sessionId: sale.sessionId || null,
@@ -8332,17 +8418,9 @@ const cleanUndefinedFields = (obj, path = '') => {
         createdBy: currentUser?.id || 'anon',
       });
 
-      // Reserva estoque (não baixa definitivo)
-      sale.items.forEach(item => {
-        const prod = products.find(p => p.id === (item.originalId || item.id));
-        if (prod) {
-          if (prod.itemType === 'pack' && prod.parentId && prod.conversionFactor) {
-            const qtyToReserve = item.qty * prod.conversionFactor;
-            batch.update('products', prod.parentId, { reserved_stock: inc ? inc(qtyToReserve) : (prod.reserved_stock || 0) + qtyToReserve });
-          } else {
-            batch.update('products', prod.id, { reserved_stock: inc ? inc(item.qty) : (prod.reserved_stock || 0) + item.qty });
-          }
-        }
+      // Reserva estoque (não baixa definitivo) — mesmo destino/qty calculados em reservedItems acima
+      reservedItems.forEach(ri => {
+        batch.update('products', ri.productId, { reserved_stock: inc ? inc(ri.qty) : undefined });
       });
 
       await batch.commit();
@@ -8530,6 +8608,12 @@ const cleanUndefinedFields = (obj, path = '') => {
       const comandaUpdates = {};
 
       sale.items.forEach((item) => {
+        // Doses: a garrafa inteira já teve seu estoque baixado (-1) ao ser aberta em
+        // DoseManager.handleOpenBottle — o item de dose no carrinho é só uma fração dessa
+        // garrafa já retirada do estoque, não uma unidade nova. Baixar de novo aqui duplicava
+        // o desconto de estoque a cada dose vendida.
+        if (item.isDose) return;
+
         const originalProd = products.find(
           (p) => p.id === (item.originalId || item.id),
         );

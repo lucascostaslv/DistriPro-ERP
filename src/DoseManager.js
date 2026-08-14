@@ -9,6 +9,8 @@ import {
 } from "lucide-react";
 import { useTenant } from "./contexts/TenantContext";
 
+const formatCurrency = (val) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(Number(val) || 0);
+
 // --- COMPONENTE DO CARD DA GARRAFA ---
 const BottleCard = ({
   bottle,
@@ -173,8 +175,8 @@ const BottleCard = ({
             className={`flex-1 h-9 rounded-lg text-xs font-bold disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed flex items-center justify-center gap-1.5 transition-all shadow-sm active:scale-95 ${isSelected && isEditingQty ? "bg-amber-600 text-white hover:bg-amber-700" : "bg-purple-600 text-white hover:bg-purple-700"}`}
           >
             <ShoppingCart size={14} />{" "}
-            {isSelected && isEditingQty ? "Confirmar" : "Vender"} R${" "}
-            {((bottle.dosePrice || 0) * currentQty).toFixed(2)}
+            {isSelected && isEditingQty ? "Confirmar" : "Vender"}{" "}
+            {formatCurrency((bottle.dosePrice || 0) * currentQty)}
           </button>
         </div>
 
@@ -381,23 +383,38 @@ const DoseManager = ({
         "error",
       );
     }
+    if (qty > bottle.remainingDoses) {
+      return showNotification(
+        `Só restam ${bottle.remainingDoses} dose(s) nesta garrafa.`,
+        "error",
+      );
+    }
 
     const storeId = String(storeConfig.id);
     const newRemaining = bottle.remainingDoses - qty;
 
-    onAddDoseToCart({
-      id: bottle.productId,
-      name: `${bottle.productName} (Dose ${bottle.doseVolumeMl}ml)`,
-      price: bottle.dosePrice,
-      cost: 0,
-      qty,
-      isDose: true,
-      bottleId: bottle.id,
-    });
-
     try {
       if (newRemaining <= 0) {
         await tenantDB.firestore.delete("open_bottles", bottle.id);
+      } else {
+        await tenantDB.firestore.update("open_bottles", bottle.id, {
+          remainingDoses: newRemaining,
+        });
+      }
+
+      // Só adiciona ao carrinho depois de confirmar a baixa das doses no banco —
+      // evita cobrar/reservar doses que na verdade não foram debitadas por falha de rede.
+      onAddDoseToCart({
+        id: bottle.productId,
+        name: `${bottle.productName} (Dose ${bottle.doseVolumeMl}ml)`,
+        price: bottle.dosePrice,
+        cost: 0,
+        qty,
+        isDose: true,
+        bottleId: bottle.id,
+      });
+
+      if (newRemaining <= 0) {
         showNotification(
           `Garrafa de ${bottle.productName} esvaziada!`,
           "success",
@@ -411,10 +428,6 @@ const DoseManager = ({
         ) {
           await handleOpenBottle(product);
         }
-      } else {
-        await tenantDB.firestore.update("open_bottles", bottle.id, {
-          remainingDoses: newRemaining,
-        });
       }
     } catch (error) {
       showNotification("Erro ao processar dose.", "error");
@@ -593,7 +606,7 @@ const DoseManager = ({
                                 {maxDoses > 0 ? (
                                   <span>
                                     Rende {maxDoses} doses de {p.doseVolumeMl}ml
-                                    · R$ {(p.dosePrice || 0).toFixed(2)}/dose
+                                    · {formatCurrency(p.dosePrice || 0)}/dose
                                   </span>
                                 ) : (
                                   <span className="text-amber-500 font-medium">
