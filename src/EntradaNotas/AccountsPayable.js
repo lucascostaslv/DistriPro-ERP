@@ -27,13 +27,42 @@ const formatCurrency = (val) => {
 
 const formatDate = (dateStr) => {
   if (!dateStr) return "-";
+  // Blindagem: `dueDate` pode chegar como Firestore Timestamp/objeto em documentos legados/
+  // malformados (nunca deveria, mas já aconteceu com outros campos nesta base — ver bug de
+  // categoria corrigido em 2026-08-12). Sem isso, o catch abaixo devolvia o objeto cru, que
+  // quebrava a tela inteira ao ser renderizado direto no JSX ("Objects are not valid as a
+  // React child").
+  if (typeof dateStr !== "string") {
+    if (dateStr?.toDate) dateStr = dateStr.toDate().toISOString();
+    else if (dateStr?.seconds) dateStr = new Date(dateStr.seconds * 1000).toISOString();
+    else return "-";
+  }
   try {
     if (dateStr.includes("T")) dateStr = dateStr.split("T")[0];
     const [y, m, d] = dateStr.split("-");
+    if (!y || !m || !d) return "-";
     return `${d}/${m}/${y}`;
   } catch (e) {
-    return dateStr;
+    return "-";
   }
+};
+
+// Normaliza qualquer formato de data recebido (string "YYYY-MM-DD", ISO completo, Firestore
+// Timestamp, Date) para "YYYY-MM-DD", pronto para preencher um <input type="date"> ou para
+// aritmética de data segura — mesma blindagem de formatDate, usada nos pontos que EDITAM a
+// data (modal de edição individual e deslocamento em lote), onde um valor não-string travava
+// a tela ou gerava datas "NaN-NaN-NaN" gravadas no banco.
+const toDateInputValue = (dateVal) => {
+  const todayStr = new Date().toISOString().split("T")[0];
+  if (!dateVal) return todayStr;
+  let str = dateVal;
+  if (typeof str !== "string") {
+    if (str?.toDate) str = str.toDate().toISOString();
+    else if (str?.seconds) str = new Date(str.seconds * 1000).toISOString();
+    else return todayStr;
+  }
+  if (str.includes("T")) str = str.split("T")[0];
+  return /^\d{4}-\d{2}-\d{2}$/.test(str) ? str : todayStr;
 };
 
 const AccountsPayable = ({ products }) => {
@@ -367,7 +396,7 @@ const AccountsPayable = ({ products }) => {
     if (!noteId) return;
 
     const siblings = rawExpenses.filter(
-      (e) => e.noteId === noteId && e.financials[0].status !== "PAGO",
+      (e) => e.noteId === noteId && e.financials?.[0]?.status !== "PAGO",
     );
     if (siblings.length === 0) {
       setBulkShiftModal(null);
@@ -383,7 +412,7 @@ const AccountsPayable = ({ products }) => {
     try {
       const batch = tenantDB.firestore.batch();
       siblings.forEach((exp) => {
-        const oldDate = new Date(`${exp.financials[0].dueDate}T00:00:00`);
+        const oldDate = new Date(`${toDateInputValue(exp.financials[0].dueDate)}T00:00:00`);
         const year = oldDate.getFullYear();
         const month = oldDate.getMonth();
         const lastDayOfMonth = new Date(year, month + 1, 0).getDate();
@@ -810,7 +839,7 @@ const AccountsPayable = ({ products }) => {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              setEditDueDateModal({ item, date: item.dueDate });
+                              setEditDueDateModal({ item, date: toDateInputValue(item.dueDate) });
                             }}
                             className="p-1.5 bg-amber-50 text-amber-600 rounded hover:bg-amber-100 transition-colors shadow-sm"
                             title="Editar data de vencimento"

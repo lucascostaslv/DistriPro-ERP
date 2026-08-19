@@ -768,11 +768,21 @@ const handleSaveSupplier = async () => {
       const nextNum = installments.length + 1;
       let baseDate = new Date(headerData.issueDate);
       if (installments.length > 0) baseDate = new Date(installments[installments.length-1].dueDate);
+      if (isNaN(baseDate.getTime())) baseDate = new Date(); // mesma blindagem de generateInstallments
       baseDate.setDate(baseDate.getDate() + 30);
       setInstallments([...installments, { id: Math.random().toString(), number: nextNum, dueDate: baseDate.toISOString().split('T')[0], value: 0, status: 'PENDENTE' }]);
   };
 
   const handleRemoveInstallment = (id) => { setInstallments(installments.filter(i => i.id !== id)); };
+
+  // Edita o vencimento de UMA parcela específica já gerada, sem mexer nas demais. Como o
+  // useEffect que chama generateInstallments() só reage a mudanças em financialConfig/
+  // launchPaid/totals/currentStep, essa edição direta no array não é sobrescrita — só se
+  // perde se o usuário depois mudar a quantidade de parcelas ou a data base (regeneração
+  // intencional nesse caso).
+  const handleUpdateInstallmentDate = (idx, newDate) => {
+      setInstallments(prev => prev.map((inst, i) => (i === idx ? { ...inst, dueDate: newDate } : inst)));
+  };
 
   // --- NOVO: Função para Gerar Parcelas Automaticamente ---
   const generateInstallments = () => {
@@ -788,6 +798,16 @@ const handleSaveSupplier = async () => {
 
       const newInst = [];
       const startDate = new Date(financialConfig.firstDueDate);
+
+      // Blindagem: campo de data vazio/incompleto (ex.: usuário ainda digitando, ou o valor não
+      // bateu com o formato esperado pelo <input type="date">) vira Invalid Date — chamar
+      // .toISOString() nesse caso lança RangeError e derruba a tela inteira (era exatamente
+      // isso que estava acontecendo). Em vez de crashar, só não gera parcelas ainda; o efeito
+      // roda de novo assim que o campo tiver uma data válida.
+      if (isNaN(startDate.getTime())) {
+          setInstallments([]);
+          return;
+      }
 
       for (let i = 0; i < count; i++) {
           const dueDate = new Date(startDate);
@@ -1463,7 +1483,12 @@ const handleSaveSupplier = async () => {
                                         <tr key={idx} className="hover:bg-slate-50 transition-colors">
                                             <td className="p-3 font-mono font-bold text-slate-500">{inst.number}ª</td>
                                             <td className="p-3 text-slate-700">
-                                                {new Date(inst.dueDate).toLocaleDateString('pt-BR')}
+                                                <input
+                                                    type="date"
+                                                    className="border border-slate-200 rounded p-1.5 text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white"
+                                                    value={inst.dueDate || ''}
+                                                    onChange={(e) => handleUpdateInstallmentDate(idx, e.target.value)}
+                                                />
                                             </td>
                                             <td className="p-3 text-right font-bold text-slate-800">
                                                 {formatCurrency(inst.value)}

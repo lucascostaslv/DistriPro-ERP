@@ -4633,54 +4633,68 @@ const CashClosure = ({
             const isBalanced = Math.abs(diff) < 0.1;
 
             return (
-              <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4 mt-4">
+              // col-span-full: este bloco é o 6º item da grade de KPIs acima (grid-cols-2/5) —
+              // sem ocupar a linha inteira, a grade horizontal interna de 5 colunas ficava
+              // espremida em 1/5 da largura da página, com os textos se sobrepondo.
+              <div className="col-span-2 md:col-span-5 bg-white rounded-lg border border-slate-200 shadow-sm p-4 mt-1">
                 <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2">
                   <CheckCircle size={18} className="text-indigo-500" />{" "}
                   Auditoria: PDV vs Banco
                 </h3>
-                <div className="space-y-2 text-sm">
-                  <div className="flex justify-between items-center p-2 bg-slate-50 rounded">
-                    <span className="text-slate-600">
+                {/* Mesmo padrão de grade horizontal dos KPIs no topo da tela — antes cada métrica
+                    ocupava uma linha inteira empilhada, deixando o card comprido e difícil de
+                    escanear rapidamente. */}
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
+                  <div className="bg-slate-50 p-3 rounded border border-slate-200">
+                    <div className="text-[10px] font-bold text-slate-400 uppercase">
                       (+) Vendas Brutas (PDV)
-                    </span>
-                    <span className="font-bold text-slate-800">
+                    </div>
+                    <div className="text-lg font-bold text-slate-800">
                       {fmt(totalBruto)}
-                    </span>
+                    </div>
                   </div>
-                  <div className="flex justify-between items-center p-2 bg-slate-50 rounded">
-                    <span className="text-slate-600">(-) Taxas Estimadas</span>
-                    <span className="font-bold text-red-500">
+                  <div className="bg-slate-50 p-3 rounded border border-slate-200">
+                    <div className="text-[10px] font-bold text-slate-400 uppercase">
+                      (-) Taxas Estimadas
+                    </div>
+                    <div className="text-lg font-bold text-red-500">
                       -{fmt(summary.fees)}
-                    </span>
+                    </div>
                   </div>
-                  <div className="flex justify-between items-center p-2 bg-indigo-50 rounded border border-indigo-100">
-                    <span className="font-bold text-indigo-700">
+                  <div className="bg-indigo-50 p-3 rounded border border-indigo-100">
+                    <div className="text-[10px] font-bold text-indigo-500 uppercase">
                       (=) Líquido Esperado no Banco
-                    </span>
-                    <span className="font-bold text-indigo-700">
+                    </div>
+                    <div className="text-lg font-bold text-indigo-700">
                       {fmt(totalLiquidoEsperado)}
-                    </span>
+                    </div>
                   </div>
-                  <div className="flex justify-between items-center p-2 bg-slate-50 rounded">
-                    <span className="text-slate-600">
+                  <div className="bg-slate-50 p-3 rounded border border-slate-200">
+                    <div className="text-[10px] font-bold text-slate-400 uppercase">
                       Entradas Reais no Banco (Vendas)
-                    </span>
-                    <span className="font-bold text-slate-800">
+                    </div>
+                    <div className="text-lg font-bold text-slate-800">
                       {fmt(bankSalesTotal)}
-                    </span>
+                    </div>
                   </div>
                   <div
-                    className={`flex justify-between items-center p-3 rounded border font-bold ${isBalanced ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-red-50 border-red-200 text-red-700"}`}
+                    className={`p-3 rounded border ${isBalanced ? "bg-emerald-50 border-emerald-200" : "bg-red-50 border-red-200"}`}
                   >
-                    <span className="flex items-center gap-2">
+                    <div
+                      className={`text-[10px] font-bold uppercase flex items-center gap-1 ${isBalanced ? "text-emerald-600" : "text-red-600"}`}
+                    >
                       {isBalanced ? (
-                        <CheckCircle size={16} />
+                        <CheckCircle size={10} />
                       ) : (
-                        <AlertTriangle size={16} />
+                        <AlertTriangle size={10} />
                       )}
                       {isBalanced ? "Caixa Conferido" : "Divergência Detectada"}
-                    </span>
-                    <span>{isBalanced ? "R$ 0,00" : fmt(Math.abs(diff))}</span>
+                    </div>
+                    <div
+                      className={`text-lg font-bold ${isBalanced ? "text-emerald-700" : "text-red-700"}`}
+                    >
+                      {isBalanced ? "R$ 0,00" : fmt(Math.abs(diff))}
+                    </div>
                   </div>
                 </div>
               </div>
