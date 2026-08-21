@@ -15,6 +15,7 @@ import {
   Clock,
 } from "lucide-react";
 import { useTenant } from "../contexts/TenantContext";
+import { safeStr } from "../utils/safeString";
 
 const formatCurrency = (val) => {
   const numberVal = Number(val);
@@ -194,8 +195,11 @@ const AccountsPayable = ({ products }) => {
   };
 
   const categories = useMemo(() => {
+    // filter(Boolean) só descarta falsy — um p.category gravado como objeto (mesmo bug de
+    // corrupção já visto em outros campos "nome/categoria") passaria direto e quebraria o
+    // <option>{c}</option> abaixo ("Objects are not valid as a React child").
     const cats = new Set(
-      (products || []).map((p) => p.category).filter(Boolean),
+      (products || []).map((p) => p.category).filter((c) => typeof c === "string" && c),
     );
     return ["ALL", ...Array.from(cats)];
   }, [products]);
@@ -321,9 +325,10 @@ const AccountsPayable = ({ products }) => {
         if (!inst.dueDate.startsWith(selectedMonthStr)) return;
 
         const searchLower = searchTerm.toLowerCase();
+        const entityName = safeStr(inv.header?.entityName, "Sem nome");
         if (
           searchTerm &&
-          !inv.header.entityName.toLowerCase().includes(searchLower) &&
+          !entityName.toLowerCase().includes(searchLower) &&
           !String(inv.header.number).toLowerCase().includes(searchLower)
         ) {
           return;
@@ -336,7 +341,7 @@ const AccountsPayable = ({ products }) => {
           invoiceId: inv.id,
           noteId: inv.noteId || null,
           invoiceNumber: inv.header.number,
-          supplier: inv.header.entityName,
+          supplier: entityName,
           issueDate: inv.header.issueDate,
           fullInvoice: inv,
           installmentNum: inst.number,
@@ -412,7 +417,7 @@ const AccountsPayable = ({ products }) => {
     try {
       const batch = tenantDB.firestore.batch();
       siblings.forEach((exp) => {
-        const oldDate = new Date(`${toDateInputValue(exp.financials[0].dueDate)}T00:00:00`);
+        const oldDate = new Date(`${toDateInputValue(exp.financials?.[0]?.dueDate)}T00:00:00`);
         const year = oldDate.getFullYear();
         const month = oldDate.getMonth();
         const lastDayOfMonth = new Date(year, month + 1, 0).getDate();
@@ -882,7 +887,7 @@ const AccountsPayable = ({ products }) => {
             <div className="p-4 border-b flex justify-between items-center bg-slate-50">
               <h3 className="font-bold text-slate-800 flex items-center gap-2">
                 <Package size={18} className="text-indigo-600" />
-                Detalhes: {detailsModal.header.entityName}
+                Detalhes: {safeStr(detailsModal.header?.entityName, "Sem nome")}
               </h3>
               <div className="flex items-center gap-4">
                 <button
@@ -941,7 +946,7 @@ const AccountsPayable = ({ products }) => {
                     <tbody className="divide-y">
                       {detailsModal.items.map((item, idx) => (
                         <tr key={idx}>
-                          <td className="p-2">{item.productName}</td>
+                          <td className="p-2">{safeStr(item.productName, 'Item sem nome')}</td>
                           <td className="p-2 text-right">{item.quantity}</td>
                           <td className="p-2 text-right">
                             {formatCurrency(item.total)}
@@ -1013,7 +1018,7 @@ const AccountsPayable = ({ products }) => {
                 <option value="">-- Escolha a conta --</option>
                 {bankAccounts.map((acc) => (
                   <option key={acc.id} value={acc.id}>
-                    {acc.name} (Saldo: {formatCurrency(acc.currentBalance)})
+                    {safeStr(acc.name, 'Conta')} (Saldo: {formatCurrency(acc.currentBalance)})
                   </option>
                 ))}
               </select>
@@ -1079,7 +1084,7 @@ const AccountsPayable = ({ products }) => {
                   <option value="">-- Escolha a conta --</option>
                   {bankAccounts.map((acc) => (
                     <option key={acc.id} value={acc.id}>
-                      {acc.name} (Saldo: {formatCurrency(acc.currentBalance)})
+                      {safeStr(acc.name, 'Conta')} (Saldo: {formatCurrency(acc.currentBalance)})
                     </option>
                   ))}
                 </select>

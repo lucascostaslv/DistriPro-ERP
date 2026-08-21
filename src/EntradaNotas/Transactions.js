@@ -5,6 +5,7 @@ import AccountsPayable from './AccountsPayable';
 import FiscalInvoices from './FiscalInvoices';
 import AccountsReceivable from '../AccountsReceivable';
 import { useTenant } from '../contexts/TenantContext';
+import { safeStr } from '../utils/safeString';
 
 const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
 
@@ -268,7 +269,7 @@ const Transactions = ({ showNotification, products, initialTab, onFinalizeSale, 
                           >
                               <option value="">{expenseForm.date <= todayLocalStr() ? '-- Selecione a Conta (Obrigatório) --' : '-- Nenhuma (Apenas Agendar) --'}</option>
                               {bankAccounts.map((acc, i) => (
-                                  <option key={i} value={acc.id}>{acc.name} (Saldo: {formatCurrency(acc.currentBalance)})</option>
+                                  <option key={i} value={acc.id}>{safeStr(acc.name, 'Conta')} (Saldo: {formatCurrency(acc.currentBalance)})</option>
                               ))}
                           </select>
                           {expenseForm.date <= todayLocalStr() && !expenseForm.accountId ? (

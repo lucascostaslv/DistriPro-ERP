@@ -8,6 +8,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { useTenant } from "./contexts/TenantContext";
+import { safeStr } from "./utils/safeString";
 
 const formatCurrency = (val) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(Number(val) || 0);
 
@@ -47,9 +48,9 @@ const BottleCard = ({
         <div className="pr-6">
           <p
             className="font-bold text-slate-800 text-sm leading-tight line-clamp-2"
-            title={bottle.productName}
+            title={safeStr(bottle.productName)}
           >
-            {bottle.productName}
+            {safeStr(bottle.productName, "Produto sem nome")}
           </p>
           <p className="text-[10px] text-slate-400 mt-0.5">
             Aberta em{" "}

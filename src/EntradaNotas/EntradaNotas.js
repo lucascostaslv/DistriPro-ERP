@@ -26,6 +26,7 @@ import {
   signInWithCustomToken
 } from 'firebase/auth';
 import { useTenant } from '../contexts/TenantContext';
+import { safeStr } from '../utils/safeString';
 
 // --- CONFIGURAÇÃO FIREBASE (Fallback) ---
 const initialAuthToken = typeof window.__initial_auth_token !== 'undefined' ? window.__initial_auth_token : undefined;
@@ -935,8 +936,11 @@ const handleSaveSupplier = async () => {
               // SE O PRODUTO EXISTE, ATUALIZAMOS ELE
               else {
                   const currentHistory = Array.isArray(productData.suppliersHistory) ? productData.suppliersHistory : [];
-                  const supplierNameUpper = headerData.entityName ? headerData.entityName.toUpperCase().trim() : 'FORNECEDOR DESCONHECIDO';
-                  const supplierIndex = currentHistory.findIndex(s => s.supplierName.toUpperCase() === supplierNameUpper);
+                  // `headerData.entityName ? ... : fallback` só protege contra falsy — um objeto
+                  // (mesmo bug de dado corrompido já visto em outros campos "nome") passaria
+                  // direto e quebraria o .toUpperCase() logo a seguir.
+                  const supplierNameUpper = safeStr(headerData.entityName, 'FORNECEDOR DESCONHECIDO').toUpperCase().trim();
+                  const supplierIndex = currentHistory.findIndex(s => safeStr(s.supplierName).toUpperCase() === supplierNameUpper);
                   
                   const newHistoryEntry = { supplierId: headerData.entityId || 'xml_import', supplierName: headerData.entityName || "", supplierSku: item.code || '', lastCost: Number(item.unitPrice), lastPurchaseDate: entryDate };
                   let updatedHistory = [...currentHistory];
@@ -1113,8 +1117,8 @@ const handleSaveSupplier = async () => {
                                                 onClick={() => selectClient(c)}
                                                 className="p-2 text-xs hover:bg-blue-50 cursor-pointer border-b last:border-0 flex justify-between"
                                             >
-                                                <span className="font-bold">{c.name}</span>
-                                                <span className="text-gray-500">{c.tax_id}</span>
+                                                <span className="font-bold">{safeStr(c.name, 'Sem nome')}</span>
+                                                <span className="text-gray-500">{safeStr(c.tax_id)}</span>
                                             </div>
                                         ))}
                                     </div>
@@ -1216,7 +1220,7 @@ const handleSaveSupplier = async () => {
                                         
                                         <input 
                                             className={`w-full h-full bg-transparent outline-none uppercase font-bold text-xs ${item.productId ? 'text-emerald-900' : 'text-red-900'}`} 
-                                            value={item.productName} 
+                                            value={item.productName || ''}
                                             onChange={(e) => {
                                                 handleItemChange(item.id, 'productName', e.target.value);
                                                 setActiveRowSearch(item.id); 
@@ -1235,7 +1239,11 @@ const handleSaveSupplier = async () => {
                                                 Vincular a produto existente:
                                             </div>
                                             {products
-                                                .filter(p => p.name.toUpperCase().includes(item.productName.toUpperCase()) || (p.barcode && p.barcode.includes(item.productName)))
+                                                // Blindagem: produto com `name` ausente/não-string (mesmo padrão de dado
+                                                // corrompido já visto em categorias e em Grupos de Preço) derrubava a
+                                                // tela inteira aqui — bastava focar o campo de nome pra disparar esse
+                                                // filtro sobre TODOS os produtos da loja.
+                                                .filter(p => (p.name || '').toUpperCase().includes((item.productName || '').toUpperCase()) || (p.barcode && p.barcode.includes(item.productName || '')))
                                                 .slice(0, 10)
                                                 .map(p => (
                                                     <div 
@@ -1254,7 +1262,7 @@ const handleSaveSupplier = async () => {
                                                         }}
                                                     >
                                                         <div>
-                                                            <div className="font-bold text-slate-700 text-xs group-hover:text-indigo-700">{p.name}</div>
+                                                            <div className="font-bold text-slate-700 text-xs group-hover:text-indigo-700">{safeStr(p.name, 'Produto sem nome')}</div>
                                                             <div className="text-[10px] text-slate-500">Cód: {p.barcode || p.cbaCode || 'S/N'} • Estq: {p.stock || 0}</div>
                                                         </div>
                                                         <div className="text-indigo-600 font-bold text-xs bg-indigo-50 px-2 py-1 rounded">
@@ -1262,7 +1270,7 @@ const handleSaveSupplier = async () => {
                                                         </div>
                                                     </div>
                                             ))}
-                                            {products.filter(p => p.name.toUpperCase().includes(item.productName.toUpperCase())).length === 0 && (
+                                            {products.filter(p => (p.name || '').toUpperCase().includes((item.productName || '').toUpperCase())).length === 0 && (
                                                 <div className="p-3 text-xs text-slate-500 italic bg-slate-50">
                                                     Nenhum produto encontrado. Se prosseguir, será cadastrado como novo.
                                                 </div>
@@ -1550,7 +1558,7 @@ const handleSaveSupplier = async () => {
                                     className="bg-white p-3 rounded-lg border border-slate-200 hover:border-indigo-400 hover:shadow-md cursor-pointer flex justify-between items-center group transition-all"
                                 >
                                     <div>
-                                        <span className="font-bold text-slate-800 text-base block group-hover:text-indigo-700">{p.name}</span>
+                                        <span className="font-bold text-slate-800 text-base block group-hover:text-indigo-700">{safeStr(p.name, 'Produto sem nome')}</span>
                                         <div className="flex gap-2 text-xs text-slate-500 mt-1">
                                             <span className="bg-slate-100 px-1.5 py-0.5 rounded border">Cód: {p.cbaCode || p.barcode || 'S/ REF'}</span>
                                             <span className={`${(p.stock || 0) <= (p.minStock || 0) ? 'text-red-600 font-bold' : 'text-emerald-600 font-bold'}`}>
@@ -1729,9 +1737,9 @@ const handleSaveSupplier = async () => {
                                     <option value="">Selecione o item...</option>
                                     {products
                                         .filter(p => !p.isPack && p.unit === 'UN')
-                                        .sort((a,b) => a.name.localeCompare(b.name))
+                                        .sort((a,b) => safeStr(a.name).localeCompare(safeStr(b.name)))
                                         .map(p => (
-                                        <option key={p.id} value={p.id}>{p.name}</option>
+                                        <option key={p.id} value={p.id}>{safeStr(p.name, 'Produto sem nome')}</option>
                                     ))}
                                 </select>
                                 {/* BOTÃO PARA CRIAR NOVO */}

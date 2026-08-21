@@ -17,6 +17,7 @@ import {
   Wine,
 } from "lucide-react";
 import { useTenant } from "./contexts/TenantContext";
+import { safeStr } from "./utils/safeString";
 
 // Formatação Moeda
 const formatCurrency = (val) =>
@@ -432,7 +433,7 @@ const ComandaManager = ({
         <div className="flex-1 overflow-y-auto p-2 space-y-2">
           {comandas
             .filter((c) =>
-              c.customerName.toLowerCase().includes(searchTerm.toLowerCase()),
+              safeStr(c.customerName).toLowerCase().includes(searchTerm.toLowerCase()),
             )
             .map((comanda) => {
               const total =
@@ -452,7 +453,7 @@ const ComandaManager = ({
                   <div className="flex justify-between items-start">
                     <div>
                       <div className="font-bold text-slate-800">
-                        {comanda.customerName}
+                        {safeStr(comanda.customerName, 'Cliente')}
                       </div>
                       {comanda.tableNumber && (
                         <div className="text-xs text-slate-500 bg-slate-100 px-1.5 rounded w-fit mt-1">
@@ -488,7 +489,7 @@ const ComandaManager = ({
             <div className="min-w-0">
               <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
                 <User size={20} className="text-indigo-600 shrink-0" />
-                <span className="truncate">{selectedComanda.customerName}</span>
+                <span className="truncate">{safeStr(selectedComanda.customerName, 'Cliente')}</span>
                 {selectedComanda.tableNumber && (
                   <span className="text-sm font-normal text-slate-500 shrink-0">
                     {" "}

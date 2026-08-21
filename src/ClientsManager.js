@@ -22,6 +22,7 @@ import {
 
 // 1. IMPORTAÇÕES MULTI-TENANT
 import { useTenant } from "./contexts/TenantContext";
+import { safeStr } from "./utils/safeString";
 
 // --- MÁSCARAS ---
 const masks = {
@@ -323,7 +324,7 @@ const ClientsManager = () => {
     if (searchTerm) {
       const term = searchTerm.toLowerCase();
       list = list.filter(
-        (c) => c.name.toLowerCase().includes(term) || c.tax_id?.includes(term),
+        (c) => safeStr(c.name).toLowerCase().includes(term) || c.tax_id?.includes(term),
       );
     }
     return list;
@@ -425,7 +426,7 @@ const ClientsManager = () => {
                       )}
                     </div>
                     <h3 className="font-bold text-slate-800 text-lg truncate mb-1 group-hover:text-indigo-600 transition-colors">
-                      {client.name}
+                      {safeStr(client.name, 'Sem nome')}
                     </h3>
                     <div className="space-y-1.5 mt-3">
                       <p className="text-xs text-slate-500 flex items-center gap-2">

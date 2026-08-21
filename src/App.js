@@ -87,6 +87,7 @@ import { buildBlingNotaPayload } from "./utils/BlingPayloadBuilder";
 import { BlingService } from "./utils/BlingService";
 import { buildNFePayload } from "./utils/NFeBuilder";
 import { NFeService } from "./utils/NFeService";
+import { safeStr } from "./utils/safeString";
 import { extractCancelEventData } from "./utils/fiscalCancelHelpers";
 import ComandaManager from "./ComandaManager";
 import { downloadSmart } from "./EntradaNotas/FiscalInvoices";
@@ -656,7 +657,7 @@ const SuperAdminDashboard = ({ onLogout, showNotification }) => {
                   <tbody className="divide-y divide-slate-700">
                     {store.users.map((user) => (
                       <tr key={user.id}>
-                        <td className="p-4 font-medium">{user.username}</td>
+                        <td className="p-4 font-medium">{safeStr(user.username, "Usuário")}</td>
                         <td className="p-4 font-mono text-slate-300">
                           {visiblePasswords[user.id] ? user.password : "••••••"}
                           <button
@@ -899,7 +900,7 @@ export const printReceipt = (sale, companyInfo) => {
     const totalStr = `R$${money(totalItemVal)}`;
     const qtyStr = `${item.qty}x `;
     const maxNameLen = lineLength - qtyStr.length - totalStr.length - 1;
-    const nameStr = item.name.substring(0, maxNameLen > 0 ? maxNameLen : 1).padEnd(maxNameLen > 0 ? maxNameLen : 1, " ");
+    const nameStr = safeStr(item.name, "PRODUTO").substring(0, maxNameLen > 0 ? maxNameLen : 1).padEnd(maxNameLen > 0 ? maxNameLen : 1, " ");
     receiptContent += LEFT_MARGIN + qtyStr + nameStr + " " + totalStr + "\n";
     if (item.qty > 1) {
       const unitLabel = `   @ R$${money(item.price)} un.`;
@@ -1060,7 +1061,7 @@ const Dashboard = ({ sales, products, bankAccounts = [], onGoToReceivables }) =>
                     className={onGoToReceivables ? "cursor-pointer hover:text-amber-700 underline" : ""}
                     onClick={() => onGoToReceivables && onGoToReceivables(s.id)}
                   >
-                    • {s.clientName} — {formatCurrency(s.total)}
+                    • {safeStr(s.clientName, "Cliente")} — {formatCurrency(s.total)}
                   </div>
                 ))}
                 {dueToday.length > 3 && <div>...e mais {dueToday.length - 3}.</div>}
@@ -1124,7 +1125,7 @@ const Dashboard = ({ sales, products, bankAccounts = [], onGoToReceivables }) =>
                 className="bg-slate-50 rounded-lg border border-slate-100 p-3 flex flex-col gap-1"
               >
                 <span className="text-[10px] font-bold text-slate-400 uppercase truncate">
-                  {acc.name}
+                  {safeStr(acc.name, "Conta")}
                 </span>
                 <span
                   className={`text-lg font-bold ${acc.currentBalance < 0 ? "text-red-600" : "text-slate-800"}`}
@@ -1204,7 +1205,7 @@ const Dashboard = ({ sales, products, bankAccounts = [], onGoToReceivables }) =>
                     className="flex items-center gap-2 text-sm font-medium truncate max-w-[180px]"
                     title={item.name}
                   >
-                    <Package size={16} className="shrink-0" /> {item.name}
+                    <Package size={16} className="shrink-0" /> {safeStr(item.name, "Produto sem nome")}
                   </span>
                   <span className="text-xs font-bold bg-white px-2 py-1 rounded whitespace-nowrap border border-amber-200">
                     {getDisplayStock(item, products)} un (Mín:{" "}
@@ -2530,7 +2531,7 @@ const PDV = ({
       content += thinSep;
       sangrias.forEach((s) => {
         content += `${fmtDate(s.createdAt)}\n`;
-        content += `  ${(s.reason || "Sangria").substring(0, 28).padEnd(28)}${fmtCur(s.amount).padStart(lineLength - 28)}\n`;
+        content += `  ${safeStr(s.reason, "Sangria").substring(0, 28).padEnd(28)}${fmtCur(s.amount).padStart(lineLength - 28)}\n`;
       });
       content += thinSep;
       content += `${"TOTAL SANGRIAS".padEnd(20)}${fmtCur(totalSangrias).padStart(lineLength - 20)}\n`;
@@ -2681,7 +2682,7 @@ const PDV = ({
                 >
                   <div>
                     <div className="font-bold text-slate-700 text-sm group-hover:text-indigo-700">
-                      {p.name}
+                      {safeStr(p.name, "Produto sem nome")}
                     </div>
                     <div className="flex gap-2 text-[10px] text-slate-400 font-mono">
                       <span>{p.barcode || p.cbaCode || "S/ COD"}</span>
@@ -2841,7 +2842,7 @@ const PDV = ({
 
                   <div className="flex-1 min-w-0">
                     <div className="font-bold text-slate-800 text-sm truncate">
-                      {item.name}
+                      {safeStr(item.name, "Produto sem nome")}
                     </div>
                     <div className="flex gap-1 mt-0.5 items-center">
                       <span className="text-[10px] text-slate-500 bg-slate-100 px-1 rounded">
@@ -3193,7 +3194,7 @@ const PDV = ({
                 <option value="">-- Selecione --</option>
                 {clients.map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.name}
+                    {safeStr(c.name, "Cliente")}
                   </option>
                 ))}
               </select>
@@ -3235,7 +3236,7 @@ const PDV = ({
                       className="w-full text-left p-3 border rounded-lg hover:bg-teal-50 hover:border-teal-300 transition-colors"
                     >
                       <div className="flex justify-between items-center">
-                        <span className="font-bold text-sm text-slate-800">{c.clientName}</span>
+                        <span className="font-bold text-sm text-slate-800">{safeStr(c.clientName, "Revendedor")}</span>
                         <span className="text-[10px] px-2 py-0.5 rounded-full bg-teal-100 text-teal-700 font-bold">
                           {c.status}
                         </span>
@@ -3264,7 +3265,7 @@ const PDV = ({
                   >
                     <ArrowLeft size={12} /> Voltar
                   </button>
-                  <p className="text-sm font-bold text-slate-800">{remessa.clientName}</p>
+                  <p className="text-sm font-bold text-slate-800">{safeStr(remessa.clientName, "Revendedor")}</p>
 
                   <div className="space-y-2 max-h-72 overflow-y-auto">
                     {remessa.items.map((item) => {
@@ -3472,7 +3473,7 @@ const PDV = ({
                         <div>
                           <label className="block text-xs font-bold text-slate-500 mb-1">Perfil de Taxa</label>
                           <select className="w-full border p-2 rounded text-sm" value={selectedProfileId} onChange={(e) => setSelectedProfileId(e.target.value)}>
-                            {feeProfiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                            {feeProfiles.map((p) => <option key={p.id} value={p.id}>{safeStr(p.name, "Perfil")}</option>)}
                           </select>
                         </div>
                       )}
@@ -3499,7 +3500,7 @@ const PDV = ({
                           ) : (
                             <select className="w-full border p-1 rounded text-sm" value={fiadoClientId} onChange={(e) => setFiadoClientId(e.target.value)}>
                               <option value="">Selecione...</option>
-                              {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                              {clients.map((c) => <option key={c.id} value={c.id}>{safeStr(c.name, "Cliente")}</option>)}
                             </select>
                           )}
                           <input type="date" className="w-full border p-1 rounded text-sm" value={fiadoDueDate} onChange={(e) => setFiadoDueDate(e.target.value)} />
@@ -3914,7 +3915,7 @@ const PDV = ({
                     >
                       <option value="">Selecione...</option>
                       {bankAccountsForDeposit.map(acc => (
-                        <option key={acc.id} value={acc.id}>{acc.name}</option>
+                        <option key={acc.id} value={acc.id}>{safeStr(acc.name, "Conta")}</option>
                       ))}
                       <option value="__outros__">Outros (envelope, cofre, etc.)</option>
                     </select>
@@ -4158,7 +4159,7 @@ const FinanceSettings = ({ feeProfiles, setFeeProfiles, showNotification }) => {
           <tbody className="divide-y divide-slate-100">
             {feeProfiles.map((p) => (
               <tr key={p.id}>
-                <td className="p-4 font-medium">{p.name}</td>
+                <td className="p-4 font-medium">{safeStr(p.name, "Perfil")}</td>
                 <td className="p-4">{p.debit}%</td>
                 <td className="p-4">{p.pix}%</td>
                 <td className="p-4 text-xs text-slate-500">
@@ -4345,10 +4346,10 @@ const ExpenseHistory = ({ transactions, categories }) => {
                   <td className="p-3 font-medium text-slate-600">
                     {item.date.split("-").reverse().join("/")}
                   </td>
-                  <td className="p-3 text-slate-700">{item.description}</td>
+                  <td className="p-3 text-slate-700">{safeStr(item.description)}</td>
                   <td className="p-3">
                     <span className="bg-slate-100 text-slate-600 px-2 py-1 rounded text-xs font-bold border border-slate-200">
-                      {item.category}
+                      {safeStr(item.category, "Sem categoria")}
                     </span>
                   </td>
                   <td className="p-3 text-center">
@@ -4948,7 +4949,9 @@ const FinancialReport = ({
 
   // 4. Despesas Operacionais (Agrupadas)
   const expensesByCategory = (transactionCategories || [])
-    .filter((cat) => cat.name !== "Revenda")
+    // Categoria com `name` gravado como objeto (bug já visto — Apêndice A.1) quebrava o DRE
+    // inteiro ao renderizar {exp.name} cru mais abaixo.
+    .filter((cat) => typeof cat.name === "string" && cat.name !== "Revenda")
     .map((cat) => {
       const total = filteredTransactions
         .filter((t) => t.type === "EXPENSE" && t.category === cat.name)
@@ -4982,7 +4985,9 @@ const FinancialReport = ({
       const cost = Number(item.costPrice || item.cost) || 0;
       const qty = Number(item.qty) || 0;
       const total = cost * qty;
-      const key = item.name || item.id || 'Desconhecido';
+      // item.name || ... não protege contra objeto (truthy) — usar safeStr pra sempre virar
+      // uma chave/nome renderizável em segurança no diagnóstico de CMV abaixo.
+      const key = safeStr(item.name) || String(item.id || 'Desconhecido');
       if (!cmvByProduct[key]) cmvByProduct[key] = { name: key, totalCost: 0, totalQty: 0, unitCost: cost };
       cmvByProduct[key].totalCost += total;
       cmvByProduct[key].totalQty += qty;
@@ -5217,7 +5222,7 @@ const FinancialReport = ({
               {users &&
                 users.map((u) => (
                   <option key={u.id} value={u.id}>
-                    {u.username}
+                    {safeStr(u.username, "Usuário")}
                   </option>
                 ))}
             </select>
@@ -5717,6 +5722,9 @@ const Finance = ({
   const filteredSalesHistory = useMemo(() => {
     return sales
       .filter((s) => {
+        // Venda sem `date` válido (registro legado/incompleto) não deve derrubar a tela
+        // inteira de histórico — só fica de fora do filtro de período.
+        if (typeof s.date !== "string") return false;
         const sDate = s.date.split("T")[0];
         // Filtro de Data
         if (sDate < startDate || sDate > endDate) return false;
@@ -5930,7 +5938,7 @@ const Finance = ({
                         <span className="font-bold block">{new Date(s.date).toLocaleDateString('pt-BR')}</span>
                         <span className="text-slate-400">{new Date(s.date).toLocaleTimeString('pt-BR').slice(0,5)}</span>
                       </td>
-                      <td className="p-3 font-medium text-sm">{s.clientName || '—'}</td>
+                      <td className="p-3 font-medium text-sm">{safeStr(s.clientName, '—')}</td>
                       <td className="p-3">
                         <span className={`text-[10px] px-2 py-1 rounded font-bold ${
                           isLoss ? 'bg-red-100 text-red-700' :
@@ -6269,7 +6277,7 @@ const Finance = ({
               </strong>
             </div>
             <div className="flex justify-between">
-              <span>Cliente:</span> <strong>{viewSale?.clientName}</strong>
+              <span>Cliente:</span> <strong>{safeStr(viewSale?.clientName, "Consumidor Final")}</strong>
             </div>
             <div className="flex justify-between">
               <span>Pagamento:</span> <strong>{viewSale?.paymentMethod}</strong>
@@ -6301,7 +6309,7 @@ const Finance = ({
               <tbody className="divide-y">
                 {viewSale?.items.map((item, i) => (
                   <tr key={i}>
-                    <td className="p-2">{item.name}</td>
+                    <td className="p-2">{safeStr(item.name, "Produto sem nome")}</td>
                     <td className="p-2 text-center">{item.qty}</td>
                     <td className="p-2 text-right">
                       {formatCurrency(item.price * item.qty)}
@@ -7491,7 +7499,7 @@ const SettingsManager = ({
                 {storeUsers.map((u) => (
                   <tr key={u.id} className="hover:bg-slate-50">
                     <td className="p-3 font-bold text-slate-700">
-                      {u.username}
+                      {safeStr(u.username, "Usuário")}
                     </td>
                     <td className="p-3">
                       <span
@@ -8017,7 +8025,7 @@ const SettingsManager = ({
                     >
                       <option value="">Selecione...</option>
                       {settingsBankAccounts.map(acc => (
-                        <option key={acc.id} value={acc.id}>{acc.name}</option>
+                        <option key={acc.id} value={acc.id}>{safeStr(acc.name, "Conta")}</option>
                       ))}
                       <option value="__outros__">Outros (envelope, cofre, etc.)</option>
                     </select>

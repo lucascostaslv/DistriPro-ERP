@@ -20,6 +20,7 @@ import {
   Info,
 } from "lucide-react";
 import { useTenant } from "./contexts/TenantContext";
+import { safeStr } from "./utils/safeString";
 
 const formatCurrency = (val) =>
   new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(
@@ -771,11 +772,13 @@ const CashClosingManager = ({ showNotification }) => {
                               </td>
                               <td className="p-3">
                                 <p className="font-bold text-slate-700">
-                                  {exp.description}
+                                  {safeStr(exp.description, "Despesa")}
                                 </p>
                                 <p className="text-[9px] text-slate-400 uppercase mt-0.5">
-                                  {exp.category} •{" "}
-                                  {safeGetDate(exp.date)
+                                  {safeStr(exp.category, "Sem categoria")} •{" "}
+                                  {/* safeGetDate devolve null se date/createdAt estiverem ausentes —
+                                      encadear .split direto no retorno quebrava a tela do fechamento. */}
+                                  {(safeGetDate(exp.date) || safeGetDate(exp.createdAt) || "")
                                     .split("-")
                                     .reverse()
                                     .join("/")}
@@ -877,11 +880,11 @@ const CashClosingManager = ({ showNotification }) => {
                                       </td>
                                       <td className="p-3">
                                         <p className="font-bold text-slate-700">
-                                          {txn.description}
+                                          {safeStr(txn.description, "Transação")}
                                         </p>
                                         <p className="text-[9px] text-slate-400 uppercase mt-0.5">
-                                          {txn.category} •{" "}
-                                          {safeGetDate(txn.date)
+                                          {safeStr(txn.category, "Sem categoria")} •{" "}
+                                          {(safeGetDate(txn.date) || safeGetDate(txn.createdAt) || "")
                                             .split("-")
                                             .reverse()
                                             .join("/")}

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useTenant } from './contexts/TenantContext';
+import { safeStr } from './utils/safeString';
 import {
   DollarSign, Clock, AlertTriangle, CheckCircle2, XCircle,
   Search, Filter, ChevronDown, ChevronUp, Edit2, Trash2,
@@ -322,7 +323,7 @@ export default function AccountsReceivable({ showNotification, onFinalizeSale, h
                 >
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-bold text-slate-800 text-sm">{rec.clientName || '—'}</span>
+                      <span className="font-bold text-slate-800 text-sm">{safeStr(rec.clientName, '—')}</span>
                       <StatusBadge status={rec._status} />
                     </div>
                     <div className="flex gap-3 text-xs text-slate-500 mt-0.5 flex-wrap">
@@ -421,7 +422,7 @@ export default function AccountsReceivable({ showNotification, onFinalizeSale, h
               <CheckCircle2 className="text-green-600" size={20} /> Confirmar Recebimento
             </h3>
             <div className="bg-slate-50 rounded p-3 text-sm space-y-1">
-              <p><strong>Cliente:</strong> {receiveModal.clientName}</p>
+              <p><strong>Cliente:</strong> {safeStr(receiveModal.clientName, 'Consumidor Final')}</p>
               <p><strong>Valor:</strong> {fmt(receiveModal.amount)}</p>
               <p><strong>Vencimento:</strong> {fmtDate(receiveModal.dueDate)}</p>
             </div>

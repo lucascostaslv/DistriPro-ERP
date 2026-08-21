@@ -36,6 +36,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { calculateItemTaxes } from "./utils/TaxCalculator";
 import { useTenant } from "./contexts/TenantContext";
+import { safeStr } from "./utils/safeString";
 
 // --- UTILITÁRIOS ---
 const masks = {
@@ -465,7 +466,7 @@ const InventoryWMS = ({
 
     const supplierNameUpper = newSupplierLink.name.toUpperCase().trim();
     let matchSupplier = suppliers.find(
-      (s) => s.name.toUpperCase() === supplierNameUpper,
+      (s) => safeStr(s.name).toUpperCase() === supplierNameUpper,
     );
     let realSupplierId = "";
 
@@ -1972,7 +1973,7 @@ const InventoryWMS = ({
                         <option value="">-- Selecione --</option>
                         {suppliers.map((s) => (
                           <option key={s.id} value={s.id}>
-                            {s.name}
+                            {safeStr(s.name, 'Fornecedor')}
                           </option>
                         ))}
                       </select>
@@ -2460,7 +2461,7 @@ const InventoryWMS = ({
                           <div className="absolute top-full left-0 right-0 bg-white border border-slate-200 rounded-lg shadow-xl z-20 mt-1 max-h-48 overflow-y-auto">
                             {suppliers
                               .filter((s) =>
-                                s.name
+                                safeStr(s.name)
                                   .toLowerCase()
                                   .includes(newSupplierLink.name.toLowerCase()),
                               )
@@ -2471,16 +2472,16 @@ const InventoryWMS = ({
                                   onMouseDown={() => {
                                     setNewSupplierLink({
                                       ...newSupplierLink,
-                                      name: s.name,
+                                      name: safeStr(s.name),
                                     });
                                     setShowSupplierSuggestions(false);
                                   }}
                                 >
-                                  {s.name}
+                                  {safeStr(s.name, 'Fornecedor')}
                                 </div>
                               ))}
                             {suppliers.filter((s) =>
-                              s.name
+                              safeStr(s.name)
                                 .toLowerCase()
                                 .includes(newSupplierLink.name.toLowerCase()),
                             ).length === 0 &&
@@ -3103,7 +3104,7 @@ const InventoryWMS = ({
                       <option value="">Todas Categorias</option>
                       {[
                         ...new Set(
-                          products.map((p) => p.category).filter(Boolean),
+                          products.map((p) => p.category).filter((c) => typeof c === "string" && c),
                         ),
                       ].map((g) => (
                         <option key={g} value={g}>
@@ -3142,10 +3143,10 @@ const InventoryWMS = ({
                       >
                         <div>
                           <p className="text-sm font-bold text-slate-800">
-                            {p.name}
+                            {safeStr(p.name, 'Produto sem nome')}
                           </p>
                           <p className="text-xs text-slate-500">
-                            {p.category} • Qtd: {getDisplayStock(p)}
+                            {safeStr(p.category, 'Sem categoria')} • Qtd: {getDisplayStock(p)}
                           </p>
                         </div>
                         {isSelected ? (

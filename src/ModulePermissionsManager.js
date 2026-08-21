@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useTenant } from "./contexts/TenantContext";
+import { safeStr } from "./utils/safeString";
 import * as firebase from "./firebase";
 import {
   collection,
@@ -394,7 +395,7 @@ const ModulePermissionsManager = ({ showNotification }) => {
               <option value="">— Selecione um usuário —</option>
               {allUsers.map((u) => (
                 <option key={u.id} value={u.id}>
-                  {u.username} ({u.role === "admin" ? "Gerente" : "Caixa"})
+                  {safeStr(u.username, "Usuário")} ({u.role === "admin" ? "Gerente" : "Caixa"})
                 </option>
               ))}
             </select>

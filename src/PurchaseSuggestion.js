@@ -72,7 +72,7 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
     sales.forEach((sale) => {
       const saleDate = new Date(sale.date);
       if (saleDate >= cutoffDate && !sale.isLoss) {
-        sale.items.forEach((item) => {
+        (sale.items || []).forEach((item) => {
           const pid = item.productId || item.id;
           if (!salesMap[pid]) salesMap[pid] = 0;
           salesMap[pid] += Number(item.qty || item.quantity);

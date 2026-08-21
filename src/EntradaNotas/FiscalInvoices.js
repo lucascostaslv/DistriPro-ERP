@@ -7,6 +7,7 @@ import { BlingService } from '../utils/BlingService';
 import { NFeService } from '../utils/NFeService';
 import { useTenant } from '../contexts/TenantContext';
 import { extractCancelEventData } from '../utils/fiscalCancelHelpers';
+import { safeStr } from '../utils/safeString';
 
 const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(val) || 0);
 
@@ -411,7 +412,7 @@ const FiscalInvoices = ({ storeConfig, showNotification, currentUser}) => {
                                 {inv.nfe_key}
                             </div>
                         </td>
-                        <td className="p-4 font-medium text-slate-700">{inv.client_name}</td>
+                        <td className="p-4 font-medium text-slate-700">{safeStr(inv.client_name, 'Consumidor')}</td>
                         <td className="p-4 text-right font-bold text-slate-800">{formatCurrency(inv.total_value)}</td>
                         <td className="p-4 text-center">
                              <div className="flex flex-col items-center gap-1">
