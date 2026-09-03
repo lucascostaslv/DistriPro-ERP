@@ -54,6 +54,7 @@ import {
   XCircle,
   Truck,
   RotateCcw,
+  Zap,
 } from "lucide-react";
 import {
   collection,
@@ -6584,6 +6585,42 @@ const SettingsManager = ({
   });
   const [taxProfiles, setTaxProfiles] = useState([]);
 
+  // Modo Rápido de fechamento de venda no PDV — evita perguntar a cada venda se deve
+  // emitir NFC-e / imprimir cupom; aplica direto a preferência configurada aqui pelo gerente.
+  const [quickModeForm, setQuickModeForm] = useState({
+    enabled: false,
+    alwaysEmitNFe: false,
+    alwaysPrintCoupon: false,
+  });
+
+  useEffect(() => {
+    const loadQuickMode = async () => {
+      if (!tenantDB) return;
+      try {
+        const saved = await tenantDB.firestore.getById("pdv_settings", "config");
+        if (saved) {
+          setQuickModeForm({
+            enabled: !!saved.enabled,
+            alwaysEmitNFe: !!saved.alwaysEmitNFe,
+            alwaysPrintCoupon: !!saved.alwaysPrintCoupon,
+          });
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    };
+    loadQuickMode();
+  }, [tenantDB]);
+
+  const handleSaveQuickMode = async () => {
+    try {
+      await tenantDB.firestore.set("pdv_settings", "config", quickModeForm);
+      showNotification("Configurações do Modo Rápido salvas!", "success");
+    } catch (e) {
+      showNotification("Erro ao salvar: " + e.message, "error");
+    }
+  };
+
   // ESTADOS USUÁRIOS
   const [newUser, setNewUser] = useState({
     username: "",
@@ -7137,6 +7174,12 @@ const SettingsManager = ({
           className={`px-4 py-2 text-sm font-bold rounded-t-lg ${activeTab === "module_permissions" ? "bg-violet-600 text-white" : "bg-slate-100"}`}
         >
           Liberação de Módulos
+        </button>
+        <button
+          onClick={() => setActiveTab("pdv_quick")}
+          className={`px-4 py-2 text-sm font-bold rounded-t-lg ${activeTab === "pdv_quick" ? "bg-sky-600 text-white" : "bg-slate-100"}`}
+        >
+          Modo Rápido (PDV)
         </button>
       </div>
 
@@ -7730,6 +7773,70 @@ const SettingsManager = ({
         </div>
       )}
 
+      {/* ABA MODO RÁPIDO — reduz os popups de fechamento de venda no PDV */}
+      {activeTab === "pdv_quick" && (
+        <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
+          <h3 className="font-bold mb-1 flex items-center gap-2 text-sky-700">
+            <Zap size={20} /> Modo Rápido de Fechamento
+          </h3>
+          <p className="text-sm text-slate-500 mb-5 max-w-xl">
+            Quando ativo, o PDV não pergunta mais ao caixa se deve emitir a nota fiscal e imprimir o cupom a cada
+            venda — ele aplica direto as preferências abaixo. Vem desativado por padrão; só o gerente deve alterar.
+          </p>
+
+          <div className="bg-slate-50 border border-slate-200 rounded p-4 space-y-4 max-w-lg">
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="quickModeEnabled"
+                className="w-4 h-4 text-sky-600 rounded cursor-pointer"
+                checked={quickModeForm.enabled}
+                onChange={(e) => setQuickModeForm({ ...quickModeForm, enabled: e.target.checked })}
+              />
+              <label htmlFor="quickModeEnabled" className="text-sm font-bold text-slate-800 cursor-pointer select-none">
+                Ativar Modo Rápido
+              </label>
+            </div>
+
+            {quickModeForm.enabled && (
+              <div className="pl-6 space-y-3 border-l-2 border-sky-200 animate-in fade-in">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    id="quickAlwaysNFe"
+                    className="w-4 h-4 text-sky-600 rounded cursor-pointer"
+                    checked={quickModeForm.alwaysEmitNFe}
+                    onChange={(e) => setQuickModeForm({ ...quickModeForm, alwaysEmitNFe: e.target.checked })}
+                  />
+                  <label htmlFor="quickAlwaysNFe" className="text-xs font-bold text-slate-700 cursor-pointer select-none">
+                    Deseja emitir sempre nota fiscal (NFC-e)?
+                  </label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    id="quickAlwaysCoupon"
+                    className="w-4 h-4 text-sky-600 rounded cursor-pointer"
+                    checked={quickModeForm.alwaysPrintCoupon}
+                    onChange={(e) => setQuickModeForm({ ...quickModeForm, alwaysPrintCoupon: e.target.checked })}
+                  />
+                  <label htmlFor="quickAlwaysCoupon" className="text-xs font-bold text-slate-700 cursor-pointer select-none">
+                    Deseja emitir sempre cupom não fiscal?
+                  </label>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <button
+            onClick={handleSaveQuickMode}
+            className="mt-4 bg-sky-600 text-white px-4 py-2 rounded font-bold hover:bg-sky-700"
+          >
+            Salvar
+          </button>
+        </div>
+      )}
+
       {/* ABA CAIXAS */}
       {activeTab === "registers" && (
         <div className="p-6 bg-white border rounded-b shadow-sm animate-in fade-in">
@@ -8163,6 +8270,32 @@ const StoreApp = ({ onLogout, updateStore }) => {
   const [realtimeTransactions, setRealtimeTransactions] = useState([]);
   const [transactionCategories, setTransactionCategories] = useState([]);
   const [showNonFiscalStep, setShowNonFiscalStep] = useState(false);
+
+  // Modo Rápido de fechamento (configurado em Configurações > Modo Rápido): quando ativo,
+  // pula as perguntas de emissão de NFC-e / cupom no pós-venda e aplica a preferência salva.
+  const [pdvQuickSettings, setPdvQuickSettings] = useState({
+    enabled: false,
+    alwaysEmitNFe: false,
+    alwaysPrintCoupon: false,
+  });
+  useEffect(() => {
+    const loadQuickSettings = async () => {
+      if (!tenantDB) return;
+      try {
+        const saved = await tenantDB.firestore.getById("pdv_settings", "config");
+        if (saved) {
+          setPdvQuickSettings({
+            enabled: !!saved.enabled,
+            alwaysEmitNFe: !!saved.alwaysEmitNFe,
+            alwaysPrintCoupon: !!saved.alwaysPrintCoupon,
+          });
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    };
+    loadQuickSettings();
+  }, [tenantDB]);
 
   // Provedor de emissão fiscal ativo para esta loja ('bling' ou 'brasilnfe'),
   // definido pelo Super Admin em fiscal_provider_settings. 'bling' é o padrão
@@ -8770,6 +8903,11 @@ const cleanUndefinedFields = (obj, path = '') => {
       if (hasDoseItems) {
         printReceipt(finalSale, store.companyInfo);
         showNotification("Venda de doses registrada!", "success");
+      } else if (shouldAskToEmit && pdvQuickSettings.enabled) {
+        // Modo Rápido ativo: não pergunta, só aplica a preferência salva pelo gerente
+        if (pdvQuickSettings.alwaysEmitNFe) handleEmitNFe(finalSale);
+        if (pdvQuickSettings.alwaysPrintCoupon) printReceipt(finalSale, store.companyInfo);
+        showNotification("Venda realizada!", "success");
       } else if (shouldAskToEmit) {
         setShowCashierEmitModal({ open: true, sale: finalSale });
       } else {

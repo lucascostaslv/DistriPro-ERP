@@ -34,7 +34,9 @@ const Transactions = ({ showNotification, products, initialTab, onFinalizeSale, 
       value: '',
       date: todayLocalStr(),
       category: '',
-      accountId: ''
+      accountId: '',
+      isRecurring: false,
+      recurrenceEnd: ''
   });
 
   useEffect(() => {
@@ -51,76 +53,123 @@ const Transactions = ({ showNotification, products, initialTab, onFinalizeSale, 
       if(isExpenseModalOpen) fetchData();
   }, [isExpenseModalOpen, tenantDB]);
 
+  // Gera as datas de competência de uma despesa recorrente: mesmo dia do mês do início até o
+  // fim, com o dia ajustado para o último dia do mês quando ele não existir (ex: 31 -> 28/29 em fevereiro).
+  const buildMonthlyOccurrences = (startStr, endStr) => {
+      const dates = [];
+      const [sy, sm, sd] = startStr.split('-').map(Number);
+      let y = sy, m = sm - 1;
+      let guard = 0;
+      while (guard < 240) { // trava de segurança (20 anos) contra loop infinito
+          const lastDay = new Date(y, m + 1, 0).getDate();
+          const day = Math.min(sd, lastDay);
+          const dateStr = `${y}-${String(m + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+          if (dateStr > endStr) break;
+          dates.push(dateStr);
+          m += 1;
+          if (m > 11) { m = 0; y += 1; }
+          guard++;
+      }
+      return dates;
+  };
+
   const handleSaveExpense = async () => {
       if (!expenseForm.description || !expenseForm.value || !expenseForm.category) {
           alert("Preencha descrição, valor e categoria.");
           return;
       }
 
+      if (expenseForm.isRecurring && !expenseForm.recurrenceEnd) {
+          alert("Selecione a data final da recorrência.");
+          return;
+      }
+
+      if (expenseForm.isRecurring && expenseForm.recurrenceEnd < expenseForm.date) {
+          alert("A data final deve ser igual ou posterior à data inicial.");
+          return;
+      }
+
       const todayStr = todayLocalStr();
-      const calculatedStatus = expenseForm.date > todayStr ? 'PENDENTE' : 'PAGO';
       const amountNum = parseFloat(expenseForm.value) || 0;
 
-      if (calculatedStatus === 'PAGO' && !expenseForm.accountId) {
+      const occurrenceDates = expenseForm.isRecurring
+          ? buildMonthlyOccurrences(expenseForm.date, expenseForm.recurrenceEnd)
+          : [expenseForm.date];
+
+      const occurrences = occurrenceDates.map(date => ({ date, status: date > todayStr ? 'PENDENTE' : 'PAGO' }));
+      const dueNowCount = occurrences.filter(o => o.status === 'PAGO').length;
+      const dueNowTotal = amountNum * dueNowCount;
+
+      if (dueNowCount > 0 && !expenseForm.accountId) {
           alert("Para despesas pagas hoje ou retroativas, selecione de qual conta o dinheiro saiu.");
           return;
       }
 
-      if (calculatedStatus === 'PAGO' && expenseForm.accountId) {
+      if (dueNowCount > 0 && expenseForm.accountId) {
           const selectedAccount = bankAccounts.find(a => a.id === expenseForm.accountId);
           const currentBalance = Number(selectedAccount?.currentBalance) || 0;
-          if (currentBalance < amountNum) {
-              const msg = `Saldo insuficiente em "${selectedAccount?.name || 'conta selecionada'}". Saldo atual: ${formatCurrency(currentBalance)}, despesa: ${formatCurrency(amountNum)}.`;
+          if (currentBalance < dueNowTotal) {
+              const msg = `Saldo insuficiente em "${selectedAccount?.name || 'conta selecionada'}". Saldo atual: ${formatCurrency(currentBalance)}, total a debitar agora: ${formatCurrency(dueNowTotal)}.`;
               if (showNotification) showNotification(msg, 'error'); else alert(msg);
               return;
           }
       }
 
       try {
-          const batch = tenantDB.firestore.batch(); 
+          const batch = tenantDB.firestore.batch();
+          const recurrenceId = expenseForm.isRecurring ? `${Date.now()}_${Math.random().toString(36).slice(2, 8)}` : null;
 
-          // 1. Registo da Movimentação Financeira
-          batch.add('financial_movements', {
-              type: 'EXPENSE',
-              category: expenseForm.category,
-              description: expenseForm.description,
-              amount: amountNum,
-              date: expenseForm.date,
-              status: calculatedStatus,
-              createdAt: tenantDB.firestore.utils.serverTimestamp(),
-              userId: currentUser?.id || 'manager',
-              userName: currentUser?.name || currentUser?.username || 'Gerente',
-              accountId: expenseForm.accountId || null 
-          });
-
-          // 2. Desconto direto (Se pago e com conta selecionada)
-          if (calculatedStatus === 'PAGO' && expenseForm.accountId) {
-              // Adiciona a transação ao extrato
-              batch.add('account_transactions', {
-                  accountId: expenseForm.accountId,
-                  type: 'OUT',
-                  amount: amountNum,
-                  description: `DESPESA: ${expenseForm.description}`,
+          occurrences.forEach(({ date, status }) => {
+              // 1. Registo da Movimentação Financeira
+              batch.add('financial_movements', {
+                  type: 'EXPENSE',
                   category: expenseForm.category,
-                  date: expenseForm.date,
+                  description: expenseForm.description,
+                  amount: amountNum,
+                  date,
+                  status,
                   createdAt: tenantDB.firestore.utils.serverTimestamp(),
                   userId: currentUser?.id || 'manager',
-                  userName: currentUser?.name || currentUser?.username || 'Gerente'
+                  userName: currentUser?.name || currentUser?.username || 'Gerente',
+                  accountId: expenseForm.accountId || null,
+                  isRecurring: expenseForm.isRecurring,
+                  recurrenceId,
+                  recurrenceEnd: expenseForm.isRecurring ? expenseForm.recurrenceEnd : null
               });
 
-              // Atualiza o saldo da conta
-              batch.update('bank_accounts', expenseForm.accountId, { 
-                  currentBalance: tenantDB.firestore.utils.increment(-amountNum) 
+              // 2. Desconto direto (Se pago e com conta selecionada)
+              if (status === 'PAGO' && expenseForm.accountId) {
+                  // Adiciona a transação ao extrato
+                  batch.add('account_transactions', {
+                      accountId: expenseForm.accountId,
+                      type: 'OUT',
+                      amount: amountNum,
+                      description: `DESPESA: ${expenseForm.description}`,
+                      category: expenseForm.category,
+                      date,
+                      createdAt: tenantDB.firestore.utils.serverTimestamp(),
+                      userId: currentUser?.id || 'manager',
+                      userName: currentUser?.name || currentUser?.username || 'Gerente'
+                  });
+              }
+          });
+
+          // Atualiza o saldo da conta uma única vez com o total das parcelas já vencidas
+          if (dueNowTotal > 0 && expenseForm.accountId) {
+              batch.update('bank_accounts', expenseForm.accountId, {
+                  currentBalance: tenantDB.firestore.utils.increment(-dueNowTotal)
               });
           }
 
           await batch.commit(); // ✨ Executa tudo de forma segura
 
-          const msg = calculatedStatus === 'PENDENTE' ? "Agendado no Contas a Pagar!" : "Despesa paga e descontada da conta!";
+          const msg = expenseForm.isRecurring
+              ? `Despesa recorrente criada! ${occurrences.length} lançamento(s) gerado(s).`
+              : (occurrences[0].status === 'PENDENTE' ? "Agendado no Contas a Pagar!" : "Despesa paga e descontada da conta!");
           if (showNotification) showNotification(msg, 'success'); else alert(msg);
-          
+
           setIsExpenseModalOpen(false);
-          setExpenseForm({ description: '', value: '', date: todayStr, category: '', accountId: '' });
+          setExpenseForm({ description: '', value: '', date: todayStr, category: '', accountId: '', isRecurring: false, recurrenceEnd: '' });
       } catch (e) {
           console.error(e);
           if (showNotification) showNotification("Erro ao salvar: " + e.message, 'error'); else alert("Erro: " + e.message);
@@ -198,7 +247,7 @@ const Transactions = ({ showNotification, products, initialTab, onFinalizeSale, 
                           <input className="w-full border p-2 rounded text-sm" placeholder="Ex: Pagamento Extra, Limpeza..." value={expenseForm.description} onChange={e => setExpenseForm({...expenseForm, description: e.target.value})} autoFocus />
                       </div>
 
-                      <div className="grid grid-cols-2 gap-4">
+                      <div className={`grid gap-4 ${expenseForm.isRecurring ? 'grid-cols-1' : 'grid-cols-2'}`}>
                           <div>
                               <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Valor (R$)</label>
                               <div className="relative">
@@ -206,11 +255,41 @@ const Transactions = ({ showNotification, products, initialTab, onFinalizeSale, 
                                   <input type="number" step="0.01" className="w-full border pl-8 p-2 rounded text-sm font-bold text-red-600" placeholder="0.00" value={expenseForm.value} onChange={e => setExpenseForm({...expenseForm, value: e.target.value})} />
                               </div>
                           </div>
-                          <div>
-                              <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Data Competência</label>
-                              <input type="date" className="w-full border p-2 rounded text-sm" value={expenseForm.date} onChange={e => setExpenseForm({...expenseForm, date: e.target.value})} />
-                          </div>
+                          {!expenseForm.isRecurring && (
+                              <div>
+                                  <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Data Competência</label>
+                                  <input type="date" className="w-full border p-2 rounded text-sm" value={expenseForm.date} onChange={e => setExpenseForm({...expenseForm, date: e.target.value})} />
+                              </div>
+                          )}
                       </div>
+
+                      <div className="flex items-center gap-2">
+                          <input
+                              type="checkbox" id="isRecurringExpense"
+                              className="w-4 h-4 text-indigo-600 rounded"
+                              checked={expenseForm.isRecurring}
+                              onChange={e => setExpenseForm({...expenseForm, isRecurring: e.target.checked, recurrenceEnd: e.target.checked ? expenseForm.recurrenceEnd : ''})}
+                          />
+                          <label htmlFor="isRecurringExpense" className="text-xs font-bold text-slate-700 cursor-pointer">
+                              Despesa recorrente? <span className="text-slate-400 font-normal">(gera um lançamento por mês)</span>
+                          </label>
+                      </div>
+
+                      {expenseForm.isRecurring && (
+                          <div className="bg-indigo-50 border border-indigo-100 rounded p-3 animate-in fade-in">
+                              <p className="text-[10px] font-bold text-indigo-700 uppercase mb-2">Repetir mensalmente</p>
+                              <div className="grid grid-cols-2 gap-4">
+                                  <div>
+                                      <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Data Inicial</label>
+                                      <input type="date" className="w-full border p-2 rounded text-sm bg-white" value={expenseForm.date} onChange={e => setExpenseForm({...expenseForm, date: e.target.value})} />
+                                  </div>
+                                  <div>
+                                      <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Data Final</label>
+                                      <input type="date" className="w-full border p-2 rounded text-sm bg-white" min={expenseForm.date} value={expenseForm.recurrenceEnd} onChange={e => setExpenseForm({...expenseForm, recurrenceEnd: e.target.value})} />
+                                  </div>
+                              </div>
+                          </div>
+                      )}
 
                       <div>
                           <label className="text-xs font-bold text-slate-500 uppercase block mb-1 flex items-center gap-1"><Tag size={12}/> Categoria</label>
