@@ -1233,6 +1233,7 @@ const PDV = ({
   onNewSale,
   showNotification,
   companyInfo,
+  onEmitNFe,
 }) => {
   const { currentStore: storeConfig, currentUser, tenantDB } = useTenant();
 
@@ -3603,13 +3604,33 @@ const PDV = ({
                     {s.paymentMethod}
                   </span>
                   {!s.isLoss && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); printReceipt(s, companyInfo); }}
-                      className="p-1.5 rounded text-slate-500 hover:bg-slate-100"
-                      title="Reimprimir Cupom"
-                    >
-                      <Printer size={15} />
-                    </button>
+                    <>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); printReceipt(s, companyInfo); }}
+                        className="p-1.5 rounded text-slate-500 hover:bg-slate-100"
+                        title="Imprimir Cupom Não Fiscal"
+                      >
+                        <Printer size={15} />
+                      </button>
+                      {s.nfeStatus === "AUTORIZADA" ? (
+                        <span
+                          className="p-1.5 rounded text-emerald-600"
+                          title="Nota Fiscal já emitida"
+                        >
+                          <CheckCircle size={15} />
+                        </span>
+                      ) : (
+                        onEmitNFe && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); onEmitNFe(s); }}
+                            className="p-1.5 rounded text-blue-600 hover:bg-blue-50"
+                            title={s.nfeStatus === "REJEITADA" ? "Reemitir Nota Fiscal" : "Emitir Nota Fiscal (NFC-e)"}
+                          >
+                            <FileText size={15} />
+                          </button>
+                        )
+                      )}
+                    </>
                   )}
                 </div>
               </div>
@@ -9804,6 +9825,7 @@ const cleanUndefinedFields = (obj, path = '') => {
                 onNewSale={handleNewSale}
                 showNotification={showNotification}
                 storeConfig={store}
+                onEmitNFe={handleEmitNFe}
               />
             )}
             {canAccess(activeModule) && activeModule === "clients" && (
