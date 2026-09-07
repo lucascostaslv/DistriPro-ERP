@@ -1808,9 +1808,12 @@ const PDV = ({
         const originalProd = products.find((p) => p.id === (item.originalId || item.id));
         if (!originalProd) return;
         if (originalProd.itemType === "pack" && originalProd.parentId && originalProd.conversionFactor) {
-          batch.update("products", originalProd.parentId, {
-            stock: increment(-(item.qty * originalProd.conversionFactor)),
-          });
+          const parentExists = products.find((p) => p.id === originalProd.parentId);
+          if (parentExists) {
+            batch.update("products", originalProd.parentId, {
+              stock: increment(-(item.qty * originalProd.conversionFactor)),
+            });
+          }
         } else {
           batch.update("products", originalProd.id, { stock: increment(-item.qty) });
         }
@@ -1886,7 +1889,10 @@ const PDV = ({
         const prod = products.find((p) => p.id === ri.productId);
         if (!prod) return;
         if (prod.itemType === "pack" && prod.parentId && prod.conversionFactor) {
-          batch.update("products", prod.parentId, { stock: increment(ri.qty * prod.conversionFactor) });
+          const parentExists = products.find((p) => p.id === prod.parentId);
+          if (parentExists) {
+            batch.update("products", prod.parentId, { stock: increment(ri.qty * prod.conversionFactor) });
+          }
         } else {
           batch.update("products", prod.id, { stock: increment(ri.qty) });
         }
@@ -5654,9 +5660,12 @@ const Finance = ({
         const originalProd = products.find((p) => p.id === (item.originalId || item.id));
         if (!originalProd) return;
         if (originalProd.itemType === "pack" && originalProd.parentId && originalProd.conversionFactor) {
-          batch.update("products", originalProd.parentId, {
-            stock: inc(item.qty * originalProd.conversionFactor),
-          });
+          const parentExists = products.find((p) => p.id === originalProd.parentId);
+          if (parentExists) {
+            batch.update("products", originalProd.parentId, {
+              stock: inc(item.qty * originalProd.conversionFactor),
+            });
+          }
         } else {
           batch.update("products", originalProd.id, { stock: inc(item.qty) });
         }
