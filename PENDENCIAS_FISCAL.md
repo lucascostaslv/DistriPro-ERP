@@ -144,7 +144,11 @@ Passos que faltam, na ordem:
       janela de manutenção dedicada, não de passagem.
 - [ ] **Exportação SPED real** — hoje é um esqueleto (modelo fixo em "55", maioria dos
       campos tributários zerados). Implementar EFD ICMS/IPI de verdade é um projeto
-      próprio (dezenas de registros/blocos do layout oficial).
+      próprio (dezenas de registros/blocos do layout oficial). **Antes de começar,
+      confirmar com a contadora se a empresa é sequer obrigada a entregar EFD
+      ICMS/IPI completo** — muita empresa do Simples Nacional não é, depende do
+      estado e de regras específicas. Decisão explícita em 2026-09-14: aguardar essa
+      confirmação antes de iniciar.
 
 ---
 
