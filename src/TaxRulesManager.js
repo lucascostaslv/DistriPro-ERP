@@ -31,6 +31,9 @@ export default function TaxRulesManager({ showNotification }) {
   const [migrationOk, setMigrationOk] = useState(
     () => localStorage.getItem('tax_migration_v2_ok') === 'true'
   );
+  const [icmsMigrationOk, setIcmsMigrationOk] = useState(
+    () => localStorage.getItem('tax_migration_v3_icms_ok') === 'true'
+  );
 
   const emptyForm = {
     name: '',
@@ -42,6 +45,8 @@ export default function TaxRulesManager({ showNotification }) {
     is_monofasico: false,
     pis_rate: '',
     cofins_rate: '',
+    icms_rate: '',
+    icms_st_rate: '',
     notes: '',
   };
 
@@ -59,6 +64,11 @@ export default function TaxRulesManager({ showNotification }) {
         setMigrationOk(true);
         localStorage.setItem('tax_migration_v2_ok', 'true');
       }
+      // Idem para as colunas de ICMS/ICMS-ST (icms_rate/icms_st_rate)
+      if (data && data.length > 0 && data[0].icms_st_rate !== undefined) {
+        setIcmsMigrationOk(true);
+        localStorage.setItem('tax_migration_v3_icms_ok', 'true');
+      }
     }
     setLoading(false);
   };
@@ -67,11 +77,21 @@ export default function TaxRulesManager({ showNotification }) {
 
   const selectedCstInfo = CST_PIS_COFINS_OPTIONS.find(o => o.value === formData.cst_pis_cofins);
   const needsRates = formData.cst_pis_cofins === '01';
+  const CSOSN_ST_JA_RETIDO = ['500'];
+  const CSOSN_ST_RETEM_AGORA = ['201', '202', '203'];
+  const needsIcmsStRate = [...CSOSN_ST_JA_RETIDO, ...CSOSN_ST_RETEM_AGORA].includes(formData.cst_nfe);
+  const needsIcmsNormalRate = formData.cst_nfe === '900';
 
   const handleSave = async () => {
     if (!formData.name) return showNotification('Nome da regra é obrigatório.', 'error');
     if (needsRates && (!formData.pis_rate || !formData.cofins_rate)) {
       return showNotification('Informe as alíquotas de PIS e COFINS para CST 01.', 'error');
+    }
+    if (needsIcmsStRate && !formData.icms_st_rate) {
+      return showNotification('Informe a alíquota efetiva de ICMS-ST (peça à contabilidade) para este CSOSN.', 'error');
+    }
+    if (needsIcmsNormalRate && !formData.icms_rate) {
+      return showNotification('Informe a alíquota de ICMS para CSOSN 900.', 'error');
     }
 
     try {
@@ -85,6 +105,8 @@ export default function TaxRulesManager({ showNotification }) {
         is_monofasico: formData.cst_pis_cofins === '04',
         pis_rate: needsRates ? Number(formData.pis_rate) : 0,
         cofins_rate: needsRates ? Number(formData.cofins_rate) : 0,
+        icms_rate: needsIcmsNormalRate ? Number(formData.icms_rate) : 0,
+        icms_st_rate: needsIcmsStRate ? Number(formData.icms_st_rate) : 0,
         notes: formData.notes,
       };
 
@@ -118,6 +140,8 @@ export default function TaxRulesManager({ showNotification }) {
       is_monofasico: profile.is_monofasico ?? (profile.cst_pis_cofins === '04'),
       pis_rate: profile.pis_rate ?? '',
       cofins_rate: profile.cofins_rate ?? '',
+      icms_rate: profile.icms_rate ?? '',
+      icms_st_rate: profile.icms_st_rate ?? '',
       notes: profile.notes || '',
     });
   };
@@ -154,6 +178,31 @@ export default function TaxRulesManager({ showNotification }) {
           </div>
           <button
             onClick={() => { setMigrationOk(true); localStorage.setItem('tax_migration_v2_ok', 'true'); }}
+            className="text-red-400 hover:text-red-600 text-xs underline shrink-0"
+          >
+            Já executei
+          </button>
+        </div>
+      )}
+
+      {!icmsMigrationOk && (
+        <div className="bg-red-50 border border-red-300 p-3 rounded-lg flex items-start gap-3">
+          <AlertTriangle className="text-red-500 mt-0.5 shrink-0" size={18} />
+          <div className="text-sm text-red-800 flex-1">
+            <p className="font-bold">Migration necessária no Supabase — ICMS/ICMS-ST</p>
+            <p className="text-xs mt-1">
+              Execute o arquivo
+              <code className="bg-red-100 px-1 rounded mx-1">supabase_migration_icms_st.sql</code>
+              no <strong>Supabase → SQL Editor</strong> para adicionar as colunas
+              <code className="bg-red-100 px-1 rounded mx-1">icms_rate</code> e
+              <code className="bg-red-100 px-1 rounded mx-1">icms_st_rate</code>.
+              Sem elas, produtos com CSOSN 500/201/202/203 não conseguem emitir NF-e via
+              BrasilNFe (a emissão fica bloqueada até a alíquota ser configurada). Este
+              aviso some automaticamente após a execução.
+            </p>
+          </div>
+          <button
+            onClick={() => { setIcmsMigrationOk(true); localStorage.setItem('tax_migration_v3_icms_ok', 'true'); }}
             className="text-red-400 hover:text-red-600 text-xs underline shrink-0"
           >
             Já executei
@@ -253,6 +302,42 @@ export default function TaxRulesManager({ showNotification }) {
                 Cerveja com ST: use <strong>500</strong> (ICMS já recolhido pelo fabricante).
               </p>
             </div>
+
+            {/* Alíquota ICMS-ST: visível para CSOSN 500/201/202/203 */}
+            {needsIcmsStRate && (
+              <div className="p-2 bg-purple-50 rounded border border-purple-200">
+                <label className="text-xs font-bold text-purple-700 block mb-1">
+                  Alíquota efetiva de ICMS-ST (%)
+                </label>
+                <input
+                  type="number" step="0.01" min="0" max="100"
+                  className="w-full border border-purple-300 p-2 rounded text-sm"
+                  value={formData.icms_st_rate}
+                  onChange={e => setFormData({ ...formData, icms_st_rate: e.target.value })}
+                  placeholder="Peça este número à contabilidade"
+                />
+                <p className="text-[10px] text-purple-700 mt-1">
+                  {CSOSN_ST_JA_RETIDO.includes(formData.cst_nfe)
+                    ? 'CSOSN 500: o ICMS-ST já foi retido por quem vendeu para você — este percentual só aparece na nota como informação (STRetido), não é cobrado de novo.'
+                    : 'Este CSOSN exige que você retenha o ICMS-ST nesta venda — informe a alíquota efetiva já considerando MVA/redução de base, se houver.'}
+                  {' '}Sem preencher, a emissão de NF-e/NFC-e (via BrasilNFe) é bloqueada para produtos com este perfil.
+                </p>
+              </div>
+            )}
+
+            {/* Alíquota ICMS normal: visível para CSOSN 900 (Outros) */}
+            {needsIcmsNormalRate && (
+              <div className="p-2 bg-purple-50 rounded border border-purple-200">
+                <label className="text-xs font-bold text-purple-700 block mb-1">Alíquota de ICMS (%)</label>
+                <input
+                  type="number" step="0.01" min="0" max="100"
+                  className="w-full border border-purple-300 p-2 rounded text-sm"
+                  value={formData.icms_rate}
+                  onChange={e => setFormData({ ...formData, icms_rate: e.target.value })}
+                  placeholder="Peça este número à contabilidade"
+                />
+              </div>
+            )}
 
             {/* CST PIS/COFINS */}
             <div>
@@ -386,6 +471,8 @@ export default function TaxRulesManager({ showNotification }) {
               {profiles.map(p => {
                 const isM = p.is_monofasico || p.cst_pis_cofins === '04';
                 const cstLabel = CST_PIS_COFINS_OPTIONS.find(o => o.value === p.cst_pis_cofins);
+                const isStProfile = ['500', '201', '202', '203'].includes(p.cst_nfe);
+                const icmsStMissing = isStProfile && !(Number(p.icms_st_rate) > 0);
                 return (
                   <div key={p.id} className="p-3 hover:bg-slate-50">
                     <div className="flex items-start justify-between gap-2">
@@ -395,6 +482,11 @@ export default function TaxRulesManager({ showNotification }) {
                           {isM && (
                             <span className="flex items-center gap-1 bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded text-[10px] font-bold">
                               <CheckCircle size={10} /> MONOFÁSICO
+                            </span>
+                          )}
+                          {icmsStMissing && (
+                            <span className="flex items-center gap-1 bg-red-100 text-red-700 px-1.5 py-0.5 rounded text-[10px] font-bold" title="Sem alíquota de ICMS-ST configurada — emissão via BrasilNFe bloqueada para produtos com este perfil">
+                              <AlertTriangle size={10} /> ICMS-ST PENDENTE
                             </span>
                           )}
                         </div>
@@ -408,6 +500,12 @@ export default function TaxRulesManager({ showNotification }) {
                           <span className="text-slate-500 font-mono">CFOP {p.cfop_state}/{p.cfop_inter}</span>
                           {p.pis_rate > 0 && (
                             <span className="text-orange-600 font-mono">PIS {p.pis_rate}% · COF {p.cofins_rate}%</span>
+                          )}
+                          {Number(p.icms_st_rate) > 0 && (
+                            <span className="text-purple-600 font-mono">ICMS-ST {p.icms_st_rate}%</span>
+                          )}
+                          {Number(p.icms_rate) > 0 && (
+                            <span className="text-purple-600 font-mono">ICMS {p.icms_rate}%</span>
                           )}
                         </div>
                         {p.notes && <p className="text-[10px] text-slate-400 mt-1 italic">{p.notes}</p>}

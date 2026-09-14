@@ -1,0 +1,604 @@
+====================================================================
+GUIA TÉCNICO — API BLING
+Notas Fiscais Eletrônicas (NF-e)
+Fonte: https://developer.bling.com.br/referencia#/Notas%20Fiscais%20Eletrônicas
+(extraído de HTML fornecido pelo usuário, com áreas expandidas)
+====================================================================
+
+--------------------------------------------------------------------
+1. VISÃO GERAL DA API
+--------------------------------------------------------------------
+
+Documento: Bling API 3.0 (OAS 3.0)
+Schema OpenAPI bruto: https://developer.bling.com.br/build/assets/openapi-DKXp8d1e.json
+(nome do arquivo gerado por build — pode mudar entre deploys)
+
+Servers:
+  Produção:              https://api.bling.com.br/Api/v3
+  Teste da documentação:  https://developer.bling.com.br/api/bling
+
+Todos os endpoints abaixo têm como base o path "/nfe" dentro desses
+servers (ex.: produção -> https://api.bling.com.br/Api/v3/nfe).
+
+Autenticação: a API usa autorização via OAuth/JWT (há uma seção
+"Migração para autenticação JWT" e "Authorize" no portal). Um token
+Bearer é necessário no header Authorization das requisições (não
+detalhado nos exemplos coletados, mas indicado pelo botão
+"Authorize" no topo da referência).
+
+Padrão de erro (formato replicado em praticamente todas as
+respostas 400/404 dos endpoints de NF-e):
+{
+  "error": {
+    "type": "VALIDATION_ERROR",
+    "message": "Não foi possível salvar a venda",
+    "description": "A venda não pode ser salva, pois ocorreram
+      problemas em sua validação.",
+    "fields": [
+      {
+        "code": 49,
+        "msg": "Uma ou mais parcelas da venda possuem erros de
+          validação",
+        "element": "parcelas",
+        "namespace": "VENDAS",
+        "collection": [
+          {
+            "index": 1,
+            "code": 12,
+            "msg": "Id da forma de pagamento inválido.",
+            "element": "formaPagamento",
+            "namespace": "VENDAS"
+          }
+        ]
+      }
+    ]
+  }
+}
+Estrutura do erro: "fields" é um array de erros de campo, cada um
+com "code", "msg", "element" e "namespace". Quando o campo é uma
+lista (ex: parcelas, itens), o erro específico do item problemático
+vem dentro de "collection", com o "index" indicando a posição no
+array original.
+
+--------------------------------------------------------------------
+2. LISTA DE ENDPOINTS DE NF-e (recurso "/nfe")
+--------------------------------------------------------------------
+
+  DELETE /nfe                                    - Remove múltiplas notas fiscais
+  GET    /nfe                                     - Obtém notas fiscais (lista paginada)
+  GET    /nfe/{idNotaFiscal}                      - Obtém uma nota fiscal
+  GET    /nfe/documento/{chaveAcesso}             - Obtém o documento (PDF/XML) de uma nota
+  POST   /nfe                                     - Cria uma nota fiscal
+  PUT    /nfe/{idNotaFiscal}                      - Altera uma nota fiscal
+  POST   /nfe/{idNotaFiscal}/enviar               - Envia uma nota fiscal para emissão na Sefaz
+  POST   /nfe/{idNotaFiscal}/lancar-contas        - Lança as contas de uma nota fiscal
+  POST   /nfe/{idNotaFiscal}/estornar-contas      - Estorna as contas de uma nota fiscal
+  POST   /nfe/{idNotaFiscal}/lancar-estoque       - Lança estoque no depósito padrão
+  POST   /nfe/{idNotaFiscal}/lancar-estoque/{idDeposito} - Lança estoque em depósito específico
+  POST   /nfe/{idNotaFiscal}/estornar-estoque     - Estorna o estoque de uma nota fiscal
+
+Observação: no material coletado não há um endpoint explícito de
+"cancelar nota" nesta seção — o cancelamento pode estar embutido na
+alteração de "situacao" via PUT, ou em outro endpoint não capturado
+na área visível do HTML fornecido. Vale conferir diretamente na
+referência (campo "situacao" tem o valor 2 = Cancelada, sugerindo
+que o cancelamento passa por atualização de status).
+
+--------------------------------------------------------------------
+3. DELETE /nfe — Remove múltiplas notas fiscais
+--------------------------------------------------------------------
+Remove múltiplas notas fiscais por IDs.
+
+Parâmetros (query):
+  idsNotas[]  *obrigatório  array<integer>  — IDs das notas fiscais
+
+Respostas:
+  200 — sucesso parcial/total, corpo:
+    {
+      "data": {
+        "alertas": ["12345677: Apenas notas pendentes podem ser
+          excluídas."],
+        "idsExcluidos": [12345678]
+      }
+    }
+  204 — No content (sucesso sem corpo)
+  400 — erro de validação (ver formato padrão na seção 1)
+
+--------------------------------------------------------------------
+4. GET /nfe — Obtém notas fiscais (lista paginada)
+--------------------------------------------------------------------
+Parâmetros (query):
+  pagina           integer  — nº da página (default: 1)
+  limite            integer  — registros por página (default: 100)
+  numeroLoja        string   — número do pedido na loja
+  idTransportador   integer  — ID do contato do transportador
+  chaveAcesso       integer  — chave de acesso
+  numero            integer  — número da nota fiscal
+  serie             integer  — série
+  situacao          integer  — filtro de situação (ver tabela abaixo)
+  tipo              string   — 0=Entrada, 1=Saída (default: 1)
+  dataEmissaoInicial  string ($date) — data/hora inicial de emissão
+  dataEmissaoFinal    string ($date) — data/hora final de emissão
+
+Tabela de valores de "situacao":
+  1  = Pendente
+  2  = Cancelada
+  3  = Aguardando recibo
+  4  = Rejeitada
+  5  = Autorizada
+  6  = Emitida DANFE
+  7  = Registrada
+  8  = Aguardando protocolo
+  9  = Denegada
+  10 = Consulta situação
+  11 = Bloqueada
+  Observação: se este parâmetro não for informado, as notas
+  canceladas NÃO são incluídas na consulta por padrão.
+
+Resposta 200 (estrutura de cada item em "data[]"):
+  id, tipo, situacao, numero, dataEmissao, dataOperacao,
+  chaveAcesso,
+  contato: { id, nome, numeroDocumento, ie, rg, telefone, email,
+    endereco: { endereco, numero, complemento, bairro, cep,
+      municipio, uf, pais } },
+  naturezaOperacao: { id },
+  loja: { id }
+
+--------------------------------------------------------------------
+5. GET /nfe/{idNotaFiscal} — Obtém uma nota fiscal
+--------------------------------------------------------------------
+Parâmetros (path):
+  idNotaFiscal  *obrigatório  integer  — ID da nota fiscal
+
+Resposta 200 — estrutura completa em "data" (superset do item da
+listagem, incluindo campos fiscais e itens):
+  id, tipo, situacao, numero, dataEmissao, dataOperacao,
+  chaveAcesso,
+  contato { id, nome, numeroDocumento, ie, rg, telefone, email,
+    endereco {...} },
+  naturezaOperacao { id },
+  loja { id },
+  serie, valorNota, valorFrete, finalidade, tipoNota,
+  xml, linkDanfe, linkPDF,
+  optanteSimplesNacional (boolean),
+  numeroPedidoLoja,
+  transporte {
+    fretePorConta,
+    transportador { nome, numeroDocumento },
+    volumes [ { id } ],
+    etiqueta { nome, endereco, numero, complemento, municipio, uf,
+      cep, bairro }
+  },
+  vendedor { id },
+  itens [ {
+    codigo, descricao, unidade, quantidade, valor, valorTotal,
+    tipo ("P"=produto, presumivelmente "S"=serviço),
+    pesoBruto, pesoLiquido, numeroPedidoCompra,
+    classificacaoFiscal (NCM), cest, codigoServico,
+    origem (integer — origem da mercadoria),
+    informacoesAdicionais, gtin, cfop,
+    impostos {
+      valorAproximadoTotalTributos,
+      icms { st, origem, modalidade, aliquota, valor }
+    },
+    unidadeTributavel { unidade, quantidade },
+    exportacao { drawback, registroExportacao, chaveAcessoNFe }
+  } ],
+  parcelas [ {
+    data, valor, observacoes, caut,
+    formaPagamento { id }
+  } ],
+  intermediador { cnpj, nomeUsuario }
+
+Resposta 404 — erro de validação padrão (nota não encontrada).
+
+--------------------------------------------------------------------
+6. GET /nfe/documento/{chaveAcesso} — Obtém o documento da NF-e
+--------------------------------------------------------------------
+Obtém o PDF (DANFE) ou XML de uma nota fiscal pela chave de acesso.
+
+Parâmetros:
+  chaveAcesso  *obrigatório  string  (path)  — chave de acesso (44 dígitos)
+  formato      *obrigatório  string  (query) — "pdf" (DANFE em PDF)
+                                                 ou "xml" (XML da NF-e)
+
+Resposta 200:
+  {
+    "data": [
+      {
+        "nome": "string",
+        "conteudo": "<conteúdo em base64/gzip, ex.:
+          H4sIAAAAAAACA8z9BVgcTdc2iiIJGjxAsDBBg...>"
+      }
+    ]
+  }
+  Observação: "conteudo" aparenta estar comprimido (cabeçalho
+  "H4sI..." é assinatura de gzip em base64) — pode ser necessário
+  descomprimir após decodificar o base64, dependendo do formato
+  solicitado.
+
+Resposta 400 — erro de validação padrão.
+
+--------------------------------------------------------------------
+7. POST /nfe — Cria uma nota fiscal
+--------------------------------------------------------------------
+Sem parâmetros de query/path. Corpo em application/json.
+
+7.1 ESTRUTURA DO REQUEST BODY (schema completo do exemplo)
+--------------------------------------------------------------
+tipo (integer)            — tipo da nota (1 = Saída, análogo ao
+                              filtro "tipo" da listagem)
+numero (string)            — número da nota (ex: "6541")
+dataOperacao (string, date-time) — ex: "2023-01-12 09:52:12"
+
+contato (object) — dados do destinatário:
+  nome, tipoPessoa ("J"=jurídica/"F"=física, presumido),
+  numeroDocumento (CPF/CNPJ), ie, rg,
+  contribuinte (integer — indicador de contribuinte ICMS),
+  telefone, email,
+  endereco { endereco, numero, complemento, bairro, cep,
+    municipio, uf, pais }
+
+naturezaOperacao (object) — { id }
+loja (object) — { id, numero }  (numero ex: "LOJA_8864")
+operacaoComExterior (boolean)
+exportacao (object) — { localEmbarque, ufEmbarque }
+finalidade (integer) — 1 = Normal (análogo aos códigos de
+  finalidade fiscal padrão da NF-e)
+tipoNota (string) — ex: "01"
+seguro (number)
+despesas (number)
+desconto (number)
+observacoes (string)
+
+documentoReferenciado (object) — referência a UM documento:
+  { modelo, data, numero, serie, contadorOrdemOperacao, chaveAcesso }
+
+documentosReferenciados (object[]) — lista de referências (mesma
+  estrutura de documentoReferenciado, permite múltiplas)
+
+itens (object[]) — produtos/serviços da nota:
+  codigo, descricao, unidade, quantidade, valor,
+  tipo ("P"=produto),
+  pesoBruto, pesoLiquido, numeroPedidoCompra,
+  classificacaoFiscal (NCM), cest, codigoServico,
+  origem (integer),
+  informacoesAdicionais,
+  documentoReferenciado { chaveAcesso, numeroItem } — referência
+    específica do item (não confundir com o de nível de nota),
+  unidadeTributavel { unidade, quantidade },
+  exportacao { drawback, registroExportacao, chaveAcessoNFe }
+
+parcelas (object[]) — ver seção 8 (pagamentos/parcelamento)
+
+transporte (object):
+  fretePorConta (integer — indicador de responsabilidade pelo frete),
+  frete (number — valor do frete),
+  veiculo { placa, uf, marca },
+  transportador { nome, numeroDocumento, ie,
+    endereco { endereco, municipio, uf } },
+  volume { quantidade, especie, numero, pesoBruto, pesoLiquido }
+    — volume único,
+  volumes [ { servico, codigoRastreamento } ] — lista de volumes
+    (para múltiplos pacotes/rastreios),
+  etiqueta { nome, endereco, numero, complemento, municipio, uf,
+    cep, bairro }
+
+notaFiscalProdutorRuralReferenciada (object):
+  { numero, serie, data }
+
+intermediador (object):
+  { cnpj, nomeUsuario } — dados do marketplace/intermediador
+
+7.2 RESPOSTAS
+----------------
+201 — criado com sucesso:
+  {
+    "data": {
+      "id": 12345678,
+      "numero": "6541",
+      "serie": "1",
+      "contato": { "nome": "Contato do Bling" }
+    }
+  }
+
+400 — erro de validação padrão (ver seção 1). Exemplo real do
+  documento: erro de "formaPagamento" inválido dentro de "parcelas".
+
+--------------------------------------------------------------------
+8. PUT /nfe/{idNotaFiscal} — Altera uma nota fiscal
+--------------------------------------------------------------------
+Altera uma nota fiscal pelo ID.
+
+RESTRIÇÃO IMPORTANTE (explícita na documentação):
+  "Notas com vínculos possuem restrições de atualização. Notas
+  autorizadas não podem ter dados fiscais alterados: valores,
+  impostos, informações do destinatário e qualquer outro dado
+  transmitido no XML da nota."
+  Ou seja: uma vez autorizada pela SEFAZ, a nota é IMUTÁVEL nos
+  campos fiscais — só é possível alterar dados não-fiscais
+  (observações internas etc., presumivelmente).
+
+Parâmetros (path):
+  idNotaFiscal  *obrigatório  integer
+
+Corpo da requisição: MESMA estrutura do POST /nfe (seção 7.1) —
+mesmos campos (tipo, numero, dataOperacao, contato,
+naturezaOperacao, loja, operacaoComExterior, exportacao, finalidade,
+tipoNota, seguro, despesas, desconto, observacoes,
+documentoReferenciado, documentosReferenciados, itens, parcelas,
+transporte, notaFiscalProdutorRuralReferenciada, intermediador).
+
+Respostas:
+  200 — sucesso:
+    {
+      "data": {
+        "id": 12345678,
+        "numero": "6541",
+        "serie": "1",
+        "contato": { "nome": "Contato do Bling" },
+        "alertas": [
+          {
+            "code": 49,
+            "msg": "Uma ou mais parcelas da venda possuem erros de
+              validação",
+            "element": "parcelas",
+            "namespace": "VENDAS",
+            "collection": [ { "index": 1, "code": 12,
+              "msg": "Id da forma de pagamento inválido.",
+              "element": "formaPagamento", "namespace": "VENDAS" } ]
+          }
+        ]
+      }
+    }
+    Observação: mesmo em uma resposta 200 (sucesso), a API pode
+    retornar "alertas" não-bloqueantes com a MESMA estrutura dos
+    erros de validação (code/msg/element/namespace/collection).
+  400 — erro de validação padrão.
+  404 — nota não encontrada (mesmo formato de erro).
+
+--------------------------------------------------------------------
+9. POST /nfe/{idNotaFiscal}/enviar — Envia uma nota fiscal
+--------------------------------------------------------------------
+Envia uma nota fiscal pelo ID para emissão na Sefaz.
+
+Parâmetros:
+  idNotaFiscal  *obrigatório  integer  (path)
+  enviarEmail   boolean  (query) — define se deve enviar e-mail
+    após emissão (default: false)
+
+Respostas:
+  200 — sucesso:
+    { "data": { "xml": "string" } }
+    (retorna o XML da nota após a transmissão à Sefaz)
+  400 — erro de validação padrão.
+  404 — nota não encontrada.
+
+--------------------------------------------------------------------
+10. ENDPOINTS DE CONTAS E ESTOQUE (ações vinculadas à NF-e)
+--------------------------------------------------------------------
+
+10.1 POST /nfe/{idNotaFiscal}/lancar-contas
+  Lança as contas (financeiro a pagar/receber) geradas pela nota.
+  Parâmetros: idNotaFiscal *obrigatório integer (path)
+  Respostas: 204 (sem conteúdo) | 400 | 404 (erro padrão)
+
+10.2 POST /nfe/{idNotaFiscal}/estornar-contas
+  Estorna as contas lançadas de uma nota fiscal.
+  Parâmetros: idNotaFiscal *obrigatório integer (path)
+  Respostas: 204 | 400 | 404 (erro padrão)
+
+10.3 POST /nfe/{idNotaFiscal}/lancar-estoque
+  Lança o estoque da nota no DEPÓSITO PADRÃO.
+  Parâmetros: idNotaFiscal *obrigatório integer (path)
+  Respostas: 204 | 400 | 404 (erro padrão)
+
+10.4 POST /nfe/{idNotaFiscal}/lancar-estoque/{idDeposito}
+  Lança o estoque especificando um depósito específico.
+  Parâmetros:
+    idNotaFiscal *obrigatório integer (path)
+    idDeposito   *obrigatório integer (path) — ID do depósito
+  Respostas: 204 | 400 | 404 (erro padrão)
+
+10.5 POST /nfe/{idNotaFiscal}/estornar-estoque
+  Estorna o estoque de uma nota fiscal pelo ID.
+  Parâmetros: idNotaFiscal *obrigatório integer (path)
+  Respostas: 204 | 404 (erro padrão)
+
+--------------------------------------------------------------------
+11. PAGAMENTOS PARCELADOS — objeto "parcelas[]"
+--------------------------------------------------------------------
+
+Diferente da Brasil NFe (que separa Pagamentos[] de Cobranca), o
+Bling usa UM ÚNICO array — "parcelas" — tanto para representar
+parcelamento financeiro quanto a forma de pagamento de cada parcela.
+Isto é, cada parcela JÁ carrega sua própria forma de pagamento.
+
+Estrutura de cada item em "parcelas[]":
+  data (string, date)         — data de vencimento/pagamento da
+                                  parcela (ex: "2023-01-12")
+  valor (number)                — valor da parcela (ex: 123.45)
+  observacoes (string)          — observação livre da parcela
+  caut (string)                 — código de autorização (ex:
+                                  transação de cartão), campo
+                                  "123456789" no exemplo
+  formaPagamento (object)       — { id } — ID cadastrado da forma
+                                  de pagamento no Bling (consultar
+                                  recurso "Formas de Pagamentos" da
+                                  própria API para obter os IDs
+                                  válidos)
+
+11.1 PAGAMENTO ÚNICO (à vista)
+------------------------------------
+"parcelas": [
+  {
+    "data": "2026-09-14",
+    "valor": 2500.00,
+    "formaPagamento": { "id": 123456 }
+  }
+]
+
+11.2 PAGAMENTO DIVIDIDO EM VALOR — DINHEIRO + CRÉDITO
+-----------------------------------------------------------
+Para dividir o valor total entre duas formas diferentes de
+pagamento no mesmo ato (ex: parte em dinheiro, parte em cartão de
+crédito), basta adicionar DOIS objetos ao array "parcelas", cada um
+com sua própria "formaPagamento.id" e o "valor" correspondente à
+fração paga naquela forma — normalmente com a MESMA data (ou datas
+muito próximas), já que ambos são pagos no ato da venda:
+
+"parcelas": [
+  {
+    "data": "2026-09-14",
+    "valor": 500.00,
+    "observacoes": "Pago em dinheiro",
+    "formaPagamento": { "id": 111111 }
+  },
+  {
+    "data": "2026-09-14",
+    "valor": 2000.00,
+    "observacoes": "Pago em cartão de crédito",
+    "caut": "A123456",
+    "formaPagamento": { "id": 222222 }
+  }
+]
+Observação: a estrutura do Bling é mais enxuta que a da Brasil NFe
+— não há campos dedicados para CNPJ da credenciadora, bandeira do
+cartão, número de autorização por transação (NSU) etc. dentro de
+"parcelas". O único campo aproximado é "caut" (provável referência
+a "código de autorização", usado tipicamente para registrar o NSU/
+autorização de cartão). Se a integração precisar registrar
+detalhes completos de cartão (bandeira, credenciadora, etc.), é
+necessário verificar se esses dados são geridos em outro recurso
+da API do Bling (ex: financeiro / formas de pagamento) e não dentro
+do payload da NF-e.
+
+11.3 PAGAMENTO PARCELADO (ex: 3x no boleto/crediário)
+-----------------------------------------------------------
+Para representar parcelamento no tempo (várias datas de
+vencimento), adicionar um objeto por parcela, cada um com sua
+própria "data" e "valor" (mesma formaPagamento em geral, ex: boleto
+ou carnê):
+
+"parcelas": [
+  { "data": "2026-10-14", "valor": 816.67,
+    "formaPagamento": { "id": 333333 } },
+  { "data": "2026-11-14", "valor": 816.67,
+    "formaPagamento": { "id": 333333 } },
+  { "data": "2026-12-14", "valor": 816.66,
+    "formaPagamento": { "id": 333333 } }
+]
+(ajustar centavos residuais na última parcela, como no exemplo)
+
+11.4 CENÁRIO MISTO — DINHEIRO + CRÉDITO PARCELADO
+-----------------------------------------------------------
+Combinando os dois casos acima: parte à vista em dinheiro, parte no
+cartão de crédito parcelado em N vezes — cada parcela do cartão
+também é um item separado no MESMO array "parcelas", com sua
+própria data futura e a mesma (ou formas diferentes de)
+"formaPagamento.id":
+
+"parcelas": [
+  { "data": "2026-09-14", "valor": 500.00,
+    "observacoes": "Entrada em dinheiro",
+    "formaPagamento": { "id": 111111 } },
+  { "data": "2026-10-14", "valor": 666.67,
+    "formaPagamento": { "id": 222222 } },
+  { "data": "2026-11-14", "valor": 666.67,
+    "formaPagamento": { "id": 222222 } },
+  { "data": "2026-12-14", "valor": 666.66,
+    "formaPagamento": { "id": 222222 } }
+]
+
+11.5 ERRO TÍPICO DE VALIDAÇÃO DE PAGAMENTO
+-----------------------------------------------
+O exemplo de erro documentado, reproduzido em quase todos os
+códigos 400/404 dos endpoints de NF-e, mostra exatamente um erro
+de "formaPagamento" inválido, indicando que esse é um ponto de
+validação sensível:
+  code 49, "Uma ou mais parcelas da venda possuem erros de
+    validação", element "parcelas", namespace "VENDAS",
+  dentro de "collection": code 12, "Id da forma de pagamento
+    inválido.", element "formaPagamento", index indicando a
+    posição da parcela problemática no array.
+Ou seja: cada "formaPagamento.id" enviado DEVE corresponder a um
+ID válido e cadastrado (recurso "Formas de Pagamentos" na API do
+Bling) — IDs inexistentes ou incorretos disparam esse erro
+apontando o índice exato da parcela problemática.
+
+--------------------------------------------------------------------
+12. RESUMO COMPARATIVO — BLING vs BRASIL NFE (pagamentos)
+--------------------------------------------------------------------
+
+| Conceito                          | Brasil NFe                          | Bling                                   |
+|-----------------------------------|--------------------------------------|------------------------------------------|
+| Split de forma de pagamento       | array "Pagamentos[]" dedicado         | mesmo array "parcelas[]", um item por forma |
+| Parcelamento financeiro           | objeto "Cobranca.Parcelas[]"          | mesmo array "parcelas[]", um item por data  |
+| Dados de cartão (bandeira, NSU)   | campos ricos por item de Pagamentos    | apenas "caut" (genérico)                  |
+| Referência à forma de pagamento   | código string (ex: "17") direto       | objeto { id } referenciando cadastro prévio |
+| Coexistência split + parcelamento | dois blocos distintos e independentes | tudo unificado em um único array          |
+
+--------------------------------------------------------------------
+13. URLS DE REFERÊNCIA CITADAS NA PÁGINA
+--------------------------------------------------------------------
+Portal/Home:                  https://developer.bling.com.br/home
+Referência da API:             https://developer.bling.com.br/referencia
+Schema OpenAPI (JSON bruto):   https://developer.bling.com.br/build/assets/openapi-DKXp8d1e.json
+Server de Produção:            https://api.bling.com.br/Api/v3
+Server de Teste (docs):        https://developer.bling.com.br/api/bling
+Política de privacidade:       https://www.bling.com.br/politicas
+Termos de serviço:             https://www.bling.com.br/termos-de-uso
+
+--------------------------------------------------------------------
+14. OUTROS RECURSOS RELACIONADOS (mencionados no menu lateral,
+    fora do escopo detalhado deste documento)
+--------------------------------------------------------------------
+- Notas Fiscais de Consumidor Eletrônicas (NFC-e)
+- Notas Fiscais de Serviço Eletrônicas (NFS-e)
+- Formas de Pagamentos (cadastro — necessário para obter os IDs
+  usados em "parcelas[].formaPagamento.id")
+- Contatos / Contatos - Tipos
+- Naturezas de Operações
+- Logísticas / Logísticas - Etiquetas / Remessas / Serviços
+- Contas a Pagar / Contas a Receber / Contas Financeiras
+- Produtos e variações
+- Documentos Compartilhados
+- Depósitos / Estoques
+
+--------------------------------------------------------------------
+15. BOAS PRÁTICAS / PONTOS DE ATENÇÃO
+--------------------------------------------------------------------
+1. Sempre validar previamente os IDs de "formaPagamento" contra o
+   recurso "Formas de Pagamentos" antes de montar o payload — é a
+   causa de erro mais documentada nos exemplos.
+2. Notas autorizadas são IMUTÁVEIS em campos fiscais via PUT —
+   planeje o fluxo de emissão (criar -> revisar -> enviar) antes de
+   transmitir, pois após a emissão não há mais como corrigir
+   valores/itens/destinatário pela API.
+3. O fluxo de emissão é em duas etapas: primeiro POST /nfe (cria a
+   nota em rascunho/pendente), depois POST /nfe/{id}/enviar (efetiva
+   a transmissão à Sefaz). Isso permite validar/ajustar antes de
+   gastar uma tentativa de emissão real.
+4. Use os endpoints de lançar-estoque / estornar-estoque e
+   lancar-contas / estornar-contas de forma pareada e idempotente —
+   evitar chamar lançar duas vezes sem estornar, para não duplicar
+   movimentações.
+5. Ao consultar GET /nfe, lembre-se que notas canceladas (situacao=2)
+   são omitidas por padrão — inclua explicitamente o parâmetro
+   "situacao" se precisar enxergá-las.
+6. O conteúdo retornado por GET /nfe/documento/{chaveAcesso} parece
+   vir comprimido (prefixo típico de gzip em base64) — trate a
+   decodificação/descompressão no client antes de tentar interpretar
+   como XML/PDF puro.
+7. Para split de pagamento (dinheiro + crédito) sem parcelamento no
+   tempo, use datas iguais (ou muito próximas) nos itens de
+   "parcelas[]" — a API não distingue estruturalmente "forma de
+   pagamento no ato" de "parcela futura"; a diferença é apenas
+   semântica, dada pela data e pelo valor de cada item.
+8. Sempre trate "alertas" retornados mesmo em respostas de sucesso
+   (200/201) — a mesma estrutura de erro de validação pode aparecer
+   como aviso não-bloqueante.
+
+====================================================================
+FIM DO DOCUMENTO
+====================================================================

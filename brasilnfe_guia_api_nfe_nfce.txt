@@ -1,0 +1,1153 @@
+====================================================================
+GUIA TÉCNICO — API BRASIL NFE
+Emissão de NF-e (modelo 55) e NFC-e (modelo 65)
+Fonte: https://brasilnfe.com.br/api/nf-e-e-nfc-e
+====================================================================
+
+--------------------------------------------------------------------
+1. VISÃO GERAL
+--------------------------------------------------------------------
+
+A Brasil NFe é uma plataforma de API para emissão de documentos
+fiscais eletrônicos brasileiros. Esta seção da documentação cobre
+NF-e e NFC-e.
+
+- NF-e (Nota Fiscal Eletrônica, modelo 55): documento fiscal digital
+  usado em operações entre empresas ou com consumidor final quando
+  há circulação de mercadorias. Substitui a nota fiscal em papel.
+
+- NFC-e (Nota Fiscal de Consumidor Eletrônica, modelo 65): voltada
+  ao comércio varejista e operações com consumidor final não
+  contribuinte. Substitui o cupom fiscal e a NF modelo 2.
+
+O que esta seção cobre:
+- Transmissão da NF-e/NFC-e para a SEFAZ: o XML é validado,
+  assinado digitalmente e enviado ao ambiente autorizador, que
+  retorna Autorizado, Rejeitado ou Denegado.
+
+Resultados possíveis da transmissão:
+- AUTORIZADO – a nota foi validada e aceita pela SEFAZ.
+- REJEITADO – alguma regra de validação foi violada (XML inválido,
+  CFOP incorreto, dados inconsistentes, etc.).
+- DENEGADO – a operação não pode ser realizada devido a
+  irregularidades cadastrais do emitente ou destinatário.
+
+Nota: a pré-visualização de documentos (todos os modelos) fica na
+seção "Consultas". Os eventos da NF-e/NFC-e (carta de correção,
+cancelamento, manifestação do destinatário, inutilização de
+numeração) ficam agrupados na seção "Eventos NF-e / NFC-e".
+
+--------------------------------------------------------------------
+2. ENDPOINTS DE TRANSMISSÃO
+--------------------------------------------------------------------
+
+2.1 TRANSMITIR NFE / NFCE (SÍNCRONO)
+-------------------------------------
+Método: POST
+URL:    https://api.brasilnfe.com.br/services/fiscal/EnviarNotaFiscal
+
+Descrição: transmite UMA NF-e ou NFC-e por requisição para o
+ambiente autorizador da SEFAZ. A resposta HTTP já contém o
+protocolo da SEFAZ, XML em base64 e o DANFE.
+
+Quando usar: sempre que precisar emitir uma única NF-e ou NFC-e
+(homologação ou produção), registrando oficialmente a operação
+na SEFAZ.
+
+Como funciona internamente:
+  1. Validação do XML conforme o schema oficial.
+  2. Assinatura digital utilizando o certificado da empresa.
+  3. Transmissão ao ambiente autorizador da SEFAZ.
+  4. Retorno com o protocolo de autorização e detalhes da resposta.
+
+IMPORTANTE: esta rota NÃO dispara webhook.
+
+Headers obrigatórios:
+  Token (string, obrigatório) — token de identificação da empresa.
+  Obrigatório em todas as operações fiscais (NF-e, NFC-e, NFS-e,
+  CT-e, MDF-e, DC-e, Consultas, Escriturações, Energia e
+  Comunicação) e nos métodos de "Empresas" que atuam sobre uma
+  empresa específica. NÃO é exigido em "Adicionar" nem em
+  "Buscar Todas".
+
+2.2 TRANSMITIR NFE EM LOTE (ASSÍNCRONO)
+-----------------------------------------
+Método: POST
+URL:    https://api.brasilnfe.com.br/services/fiscal/EnviarNotaFiscalLote
+
+Descrição: transmite MÚLTIPLAS NF-e em um único lote e dispara um
+webhook ao final do processamento (evento nfe.lote.finalizado).
+
+Quando usar: emissão de várias notas em sequência sem manter a
+conexão HTTP aberta — ideal para integrações de alto volume,
+importações em lote vindas de ERP e cargas de retaguarda.
+
+Diferença em relação a /EnviarNotaFiscal:
+  - /EnviarNotaFiscal: síncrona, uma nota por requisição, resposta
+    já contém protocolo + XML + DANFE. NÃO dispara webhook.
+  - /EnviarNotaFiscalLote: aceita lista de notas (nFInfos). A
+    resposta HTTP é apenas o ACEITE do lote. O resultado real
+    (autorização, rejeição, chaves de acesso) chega de forma
+    assíncrona via webhook no evento "nfe.lote.finalizado".
+
+Pré-requisito: webhook ativo cadastrado no painel e vinculado à
+empresa. Se nenhum webhook estiver configurado (ou as 5 tentativas
+de entrega falharem), o lote continua sendo processado normalmente
+— basta consultar depois via:
+  POST/consulta: /ConsultarLoteNFe (endpoint em Consultas)
+  URL de referência: 
+  https://brasilnfe.com.br/api/nf-e-e-nfc-e#tag/consultas/post/-consultarlotenfe
+  usando o CodLote retornado pelo endpoint de lote.
+
+Documentação de webhooks (cadastro, envelope, headers, verificação
+HMAC): https://brasilnfe.com.br/docs/webhooks
+
+Fluxo completo:
+  1. Cliente envia POST /EnviarNotaFiscalLote com a lista de notas.
+  2. Brasil NFe valida os payloads, persiste as notas e inicia a
+     transmissão à SEFAZ.
+  3. Cliente recebe resposta HTTP confirmando o aceite (com CodLote).
+  4. Ao concluir, Brasil NFe faz POST no webhook do cliente com o
+     evento "nfe.lote.finalizado".
+  5. Cliente deve responder 2xx em até 15 segundos.
+
+Headers obrigatórios:
+  Token (string, obrigatório) — token de identificação da empresa.
+
+Campos de nível envelope (lote):
+  TipoAmbiente (integer, obrigatório) — 1=Produção, 2=Homologação.
+  nFInfos (object[], obrigatório, minItems 1) — lista de notas,
+    cada item segue a MESMA estrutura usada em /EnviarNotaFiscal
+    (schema "Envio").
+  ModeloDocumento (integer, default 55) — 55=NF-e, 65=NFC-e.
+  Lote (integer/int64) — número do lote; se omitido, controle
+    automático.
+
+--------------------------------------------------------------------
+3. ESTRUTURA COMPLETA DO PAYLOAD (schema "Envio")
+--------------------------------------------------------------------
+
+Usada tanto em /EnviarNotaFiscal (objeto raiz) quanto em cada item
+de nFInfos[] em /EnviarNotaFiscalLote.
+
+3.1 CAMPOS DE NUMERAÇÃO / CONTROLE
+------------------------------------
+Serie (integer, int32)
+  Série da Nota Fiscal. Informar SOMENTE se usar mais de uma série
+  ou quiser controlar manualmente. Se vazio, controle automático
+  pelo painel Brasil NFe.
+
+Numero (integer, int64)
+  Número da nota. Preencher apenas para controle manual; se vazio,
+  controle automático.
+
+Lote (integer, int64)
+  Lote da Nota Fiscal. Preencher apenas para controle manual.
+
+>> Regra de controle automático: se Serie, Numero e Lote forem
+   deixados em branco, são gerenciados automaticamente pela Brasil
+   NFe (próximo número disponível por empresa + modelo + série +
+   ambiente). Enviar valores apenas se precisar de controle manual
+   (ex: migração de sistema, múltiplas séries).
+   Ver também: https://brasilnfe.com.br/conceitos-fiscais/numeracao-e-series
+
+Codigo (string)
+  Código numérico que compõe a Chave de Acesso (gerado pelo
+  emitente para cada NF-e). Preencher apenas se quiser controle
+  manual; se vazio, a API gera automaticamente.
+
+3.2 DATAS
+----------
+DataEntradaSaida (string, date-time)
+DataEmissao (string, date-time)
+  Ambas: data/hora de saída ou entrada do produto/serviço.
+  Default automático: se não enviadas, a API usa data/hora atual do
+  servidor (timezone -03:00 Brasília). Enviar apenas para
+  backdating autorizado (ajuste, complementar) — a SEFAZ aceita até
+  30 dias antes da transmissão.
+  Exemplo: "2025-06-01T10:00:00-03:00"
+
+3.3 CONTINGÊNCIA
+------------------
+Justificativa (string)
+  Usar quando o tipo de emissão for diferente de "normal".
+  Obrigatória quando TipoEmissao ≠ 1.
+
+  Acionamento automático: a Brasil NFe comuta automaticamente para
+  contingência quando a SEFAZ fica offline além do limite
+  configurado na empresa. Modos (TipoEmissao):
+    1 = Normal (online)
+    3 = SCAN (Sistema de Contingência do Ambiente Nacional)
+    4 = EPEC (Evento Prévio de Emissão em Contingência — SEFAZ
+        autoriza depois)
+    5 = FS-Offline (Formulário de Segurança offline)
+  Ver também: https://brasilnfe.com.br/conceitos-fiscais/contingencia
+
+3.4 REFERÊNCIAS
+------------------
+NFReferencia (string[])
+  Lista de Chaves de Acesso de Notas Fiscais de referência.
+
+NFPagamentoAntecipado (string[], maxItems 99)
+  Grupo gPagAntecipado (Reforma Tributária). Chaves de acesso (44
+  dígitos) de NF-e de antecipação de pagamento (nota de débito,
+  Finalidade 6) a abater na nota de fornecimento do bem/serviço.
+  Máximo 99 chaves. Somente modelo 55.
+
+3.5 CONTEXTO DA OPERAÇÃO
+---------------------------
+IndicadorPresenca (integer, int32)
+  Indicador de presença do comprador no estabelecimento no
+  momento da operação.
+  Valores possíveis:
+    0 = Não se aplica
+    1 = Operação presencial
+    2 = Operação não presencial, pela Internet
+    3 = Operação não presencial, Teleatendimento
+    4 = NFC-e com entrega a domicílio
+    5 = Presencial fora do estabelecimento
+    9 = Operação não presencial, outros
+  Rejeição SEFAZ 787: NFC-e com IndicadorPresenca=4 (entrega a
+  domicílio) exige identificação do destinatário (Cliente com
+  CPF/CNPJ e endereço).
+  Ver: https://brasilnfe.com.br/conceitos-fiscais/rejeicoes/index
+
+Intermediador (object)
+  Dados do intermediador/marketplace (site/plataforma de
+  terceiros). Omitir se não houver intermediador (indIntermed=0).
+  Preencher se operação em site/plataforma de terceiros
+  (indIntermed=1). Só válido quando IndicadorPresenca = 2, 3, 4 ou 9.
+  Campos: Cnpj, IdCadIntTran.
+
+ConsumidorFinal (boolean)
+  false = Normal | true = Consumidor final.
+
+CalcularIBPT (boolean)
+  Efetua cálculo automático do IBPT. Só se aplica quando
+  ConsumidorFinal também é true — em operações que não são para
+  consumidor final, o IBPT NÃO é calculado mesmo com
+  CalcularIBPT=true.
+  Com CalcularIBPT=true, a API consulta a tabela IBPT por NCM e
+  preenche vTotTrib (tributos federais, estaduais e municipais
+  estimados) em cada item e no total da nota. Exigência da Lei
+  12.741/2012.
+
+NaturezaOperacao (string)
+  Ex: "Venda de Mercadoria Adquirida ou Recebida de Terceiros"
+
+3.6 MODELO E FINALIDADE
+--------------------------
+ModeloDocumento (integer, int32)
+  55 = NF-e | 65 = NFC-e
+  Restrição: NFC-e (65) aceita apenas CFOPs de saída de venda a
+  consumidor final (5101, 5102, 5103, 5104, 5115, 5405, 5656, 5667,
+  5933, 6108, 6109, 6110). Outros CFOPs são rejeitados.
+  Rejeições SEFAZ:
+    725 = CFOP inválido para NFC-e
+    386 = CFOP incompatível com CSOSN em NFC-e
+
+Finalidade (integer, int32)
+  1 = Normal
+  2 = Complementar
+  3 = Ajuste
+  4 = Devolução
+  5 = Nota de crédito
+  6 = Nota de débito
+
+TpNFDebito (integer, int32) — obrigatório quando Finalidade = 6
+  1 = Transferência de créditos para Cooperativas
+  2 = Anulação de Crédito por Saídas Imunes/Isentas
+  3 = Débitos de notas fiscais não processadas na apuração
+  4 = Multa e juros
+  5 = Transferência de crédito de sucessão
+  6 = Pagamento antecipado
+  7 = Perda em estoque
+
+TpNFCredito (integer, int32) — obrigatório quando Finalidade = 5
+  1 = Multa e juros
+  2 = Apropriação de crédito presumido de IBS sobre saldo devedor
+      na ZFM
+  3 = Retorno por recusa total na entrega ou por não localização
+      do destinatário
+  4 = Redução de valores
+  5 = Transferência de crédito na sucessão
+  6 = Retorno por recusa parcial na entrega
+
+3.7 DANFE E AMBIENTE
+------------------------
+TipoDanfe (integer|null, int32)
+  Não informado = padrão atual (1 para NF-e, 4 para NFC-e).
+  0 = Sem geração de DANFE
+  1 = DANFE normal, Retrato (padrão NF-e)
+  2 = DANFE normal, Paisagem
+  3 = DANFE Simplificado
+  4 = DANFE NFC-e (padrão NFC-e; somente modelo 65)
+  5 = DANFE NFC-e em mensagem eletrônica (somente modelo 65)
+  6 = DANFE Simplificado Tipo 2 (NT 2026.002/2026.003, Ajuste
+      SINIEF 13/26; somente modelo 55) — NF-e de varejo em bobina
+      com QR Code
+
+TipoAmbiente (string)
+  1 = Produção — documento com VALIDADE FISCAL REAL, reportado ao
+      destinatário.
+  2 = Homologação — ambiente de teste; a SEFAZ descarta o documento
+      após alguns dias, sem efeito fiscal.
+  Recomendação: usar homologação durante desenvolvimento/integração
+  e só alternar para produção depois que o fluxo estiver validado.
+
+3.8 OBSERVAÇÕES E IDENTIFICAÇÃO INTERNA
+-------------------------------------------
+Observacao (string)
+ObservacaoFisco (string)
+IdentificadorInterno (string) — ID do sistema emissor
+  (ex: "PEDIDO-12345")
+
+3.9 OBJETOS ANINHADOS PRINCIPAIS
+------------------------------------
+Cliente (object) — dados do destinatário (ver seção 4)
+Produtos (object[]) — itens da nota (ver seção 5)
+Pagamentos (object[]) — pagamentos efetuados (ver seção 6)
+Cobranca (object) — fatura e parcelas (ver seção 6)
+Transporte (object) — transportador, veículo, volumes
+EnviarEmail (boolean) — enviar e-mail da nota ao destinatário após
+  autorização
+Entrega (object) — local de entrega, se diferente do destinatário
+Exporta (object) — dados de exportação (LocalDespacho, UFSaidaPais,
+  LocalEmbarqueTransp)
+Retencoes (object) — retenções federais totais da nota (gera tag
+  retTrib no XML): BaseCalculoIRRF, ValorIRRF, ValorRetidoPIS,
+  ValorRetidoCOFINS, ValorRetidoCSLL, BaseCalculoRetencaoPrevidencia,
+  ValorRetencaoPrevidencia
+
+3.10 VALORES DE VALIDAÇÃO GLOBAL
+-------------------------------------
+ValorFrete (number|null, decimal)
+  Valor total do frete da nota. Se informado, é distribuído
+  proporcionalmente entre os itens (proporção pelo ValorTotal de
+  cada item), SUBSTITUINDO o ValorFrete de cada produto. Se nulo,
+  o frete de cada item é usado como enviado.
+
+ValorTotal (number|null, decimal)
+  Valor total esperado da nota (vNF), usado apenas para validação.
+  Se informado e DIFERENTE do valor total calculado (produtos -
+  descontos + frete + seguro + outras despesas + impostos que
+  compõem o total), a emissão é BLOQUEADA e o erro detalha o
+  cálculo. Se nulo, sem validação.
+
+--------------------------------------------------------------------
+4. OBJETO "CLIENTE" (destinatário)
+--------------------------------------------------------------------
+CpfCnpj, NmCliente, IndicadorIe, Ie, IsUf
+Endereco: Cep, Logradouro, Complemento, Numero, Bairro,
+  CodMunicipio, Municipio, Uf, CodPais, Pais
+Contato: Telefone, Email, Fax
+
+O objeto "Entrega" segue estrutura equivalente (CpfCnpj, Nome, Ie,
+Endereco, Contato), usado quando o local de entrega difere do
+destinatário.
+
+--------------------------------------------------------------------
+5. ESTRUTURA DE "PRODUTOS[]" (cada item)
+--------------------------------------------------------------------
+
+Campos básicos:
+  NmProduto, CodProdutoServico, EAN, NCM, CEST,
+  UnidadeComercial, UnidadeComercialTributavel,
+  Quantidade, QuantidadeTributavel,
+  ValorUnitario, ValorUnitarioTributavel, ValorTotal,
+  ValorDesconto, ValorSeguro, ValorFrete, ValorOutrasDespesas,
+  CFOP, NItemPed, xPed, InformacaoAdicional,
+  OrigemProduto, cBenef, CodTributacao
+
+Sub-objeto Imposto:
+  ICMS: CodSituacaoTributaria, AliquotaICMS, AliquotaICMSST,
+    AliquotaMVA, AliquotaCredito, RedICMS, RedICMSST, BaseCalculo,
+    ValorIcms, motivoDesoneracaoIcms, valorDesoneracaoIcms,
+    aliquotaDiferimento, modalidadeBcIcms,
+    STRetido { BaseCalculo, AliquotaConsumidorFinal,
+      ValorICMSSubstituto, ValorICMSST, BaseCalculoFCP,
+      AliquotaFCP, PercentualReducaoBaseEfetiva,
+      BaseCalculoEfetiva, AliquotaEfetiva },
+    AliquotaAdRemRetido, QuantidadeMonoRetido, ValorIcmsMonoRetido
+
+  IPI: CodEnquadramento, CodSituacaoTributaria, Aliquota,
+    ValorIpiDevolvido, PercentualMercadoriaDevolvida
+
+  PIS: CodSituacaoTributaria, Aliquota, BaseCalculo
+
+  COFINS: CodSituacaoTributaria, Aliquota, BaseCalculo
+
+  IBSCBS (Reforma Tributária): CodClassificacaoTributaria,
+    BaseCalculo, AliquotaIBSUF, AliquotaIBSMun, AliquotaCBS,
+    PercentualReducaoIBS, PercentualReducaoCBS,
+    PercentualDiferimento
+
+  Importacao: BaseCalculo, DespesasAduaneiras, Valor, ValorIOF
+
+Outros sub-blocos por item:
+  nFCI (string, ex: UUID de Ficha de Conteúdo de Importação)
+  Combustivel: CodProdutoANP, DescricaoProdutoANP, UFConsumo
+  DeclaracaoImportacao: Numero, DataRegistro, LocalDesenbaraco,
+    UfDesenbaraco, DataDesenbaraco, TipoViaTransporte, ValorAFRMM,
+    TipoIntermedio, Cnpj, Uf, CodExportador, CodFabricante
+  Rastros[]: NumeroLote, QuantidadeLote, DataFabricacao,
+    DataValidade, CodigoAgregacao
+  Agropecuaria:
+    Defensivos[]: NumeroReceituario, CpfResponsavelTecnico
+    GuiaTransito: TipoGuia, UfGuia, SerieGuia, NumeroGuia
+  ChaveAcessoReferenciada, NItemReferenciado
+
+--------------------------------------------------------------------
+6. PAGAMENTOS — DINHEIRO + CRÉDITO E PARCELAMENTO
+--------------------------------------------------------------------
+
+A API separa dois conceitos distintos:
+  (A) Pagamentos[] — forma(s) de pagamento usadas NO ATO da venda
+      (ex: split dinheiro + cartão de crédito à vista).
+  (B) Cobranca — parcelamento FINANCEIRO do valor a receber
+      (ex: boleto em N parcelas).
+Os dois podem coexistir na mesma nota.
+
+6.1 ARRAY "Pagamentos[]" — MÚLTIPLAS FORMAS DE PAGAMENTO
+-------------------------------------------------------------
+Cada forma de pagamento usada é um objeto separado nesse array.
+Para dividir "dinheiro + crédito", enviar DOIS objetos: um para
+dinheiro e outro para cartão de crédito, cada um com seu VlPago
+correspondente à parte do valor total pago naquela forma.
+
+Campos de cada item de Pagamentos[]:
+  IndicadorPagamento (integer)
+    0 = à vista (conforme exemplo da documentação)
+  Desconto (number) — desconto associado a este pagamento
+  Descricao (string) — descrição livre (ex: "Pagamento em Dinheiro")
+  FormaPagamento (string) — código da forma de pagamento
+    (ex: "17" no exemplo, tipicamente correspondente a "Dinheiro"
+    na tabela SEFAZ de formas de pagamento)
+  VlPago (number) — valor pago nesta forma
+  VlTroco (number) — troco, se houver
+  DataPagamento (string, date-time) — data/hora do pagamento
+  CNPJPagamento (string)
+  UFPagamento (string)
+  TipoIntegracao (boolean) — indica se é pagamento integrado
+    (ex: TEF / integração com maquininha)
+  CNPJCredenciadora (string) — CNPJ da credenciadora (cartão)
+  BandeiraOperadora (string) — código da bandeira
+    (ex: "01" no exemplo)
+  NumeroAutorizacao (string) — número de autorização da transação
+    (ex: "A123456")
+  CNPJRecebedor (string)
+  IdTerminalPagamento (string) — ID do terminal/POS
+
+EXEMPLO — split dinheiro + cartão de crédito:
+{
+  "Pagamentos": [
+    {
+      "IndicadorPagamento": 0,
+      "Descricao": "Pagamento em Dinheiro",
+      "FormaPagamento": "01",
+      "VlPago": 500.00,
+      "VlTroco": 0,
+      "DataPagamento": "2026-09-14T10:00:00-03:00"
+    },
+    {
+      "IndicadorPagamento": 0,
+      "Descricao": "Pagamento em Cartão de Crédito",
+      "FormaPagamento": "03",
+      "VlPago": 2000.00,
+      "CNPJCredenciadora": "12345678000199",
+      "BandeiraOperadora": "01",
+      "NumeroAutorizacao": "A123456",
+      "CNPJRecebedor": "12345678000199",
+      "IdTerminalPagamento": "POS0001",
+      "DataPagamento": "2026-09-14T10:00:00-03:00"
+    }
+  ]
+}
+Observação: os códigos de FormaPagamento seguem a tabela oficial
+de meios de pagamento da SEFAZ (dinheiro, cheque, cartão de
+crédito, cartão de débito, crédito loja, vale alimentação, vale
+refeição, vale presente, vale combustível, boleto, depósito
+bancário, PIX, transferência bancária/carteira digital, fidelidade/
+cashback/voucher, sem pagamento, outros) — a documentação usa "17"
+e "01"/"03" apenas como exemplos ilustrativos; confirme a tabela
+completa de códigos válidos com o suporte/documentação de
+referência antes de mapear cada forma real.
+
+6.2 OBJETO "Cobranca" — PARCELAMENTO FINANCEIRO
+-----------------------------------------------------
+Usado para modelar o parcelamento do valor a receber
+(ex: boleto, financiamento, faturamento a prazo) — NÃO é a forma de
+pagamento em si, e sim como o valor total é dividido no tempo.
+
+Cobranca.Fatura (object):
+  Numero (string) — número da fatura (ex: "FAT0001")
+  Valor (number) — valor bruto da fatura
+  Desconto (number) — desconto aplicado
+  ValorLiquido (number) — valor líquido (Valor - Desconto)
+
+Cobranca.Parcelas (object[]):
+  Vencimento (string, date-time) — data de vencimento da parcela
+  Valor (number) — valor da parcela
+
+EXEMPLO — parcelamento em 3x:
+{
+  "Cobranca": {
+    "Fatura": {
+      "Numero": "FAT0001",
+      "Valor": 2500.00,
+      "Desconto": 50.00,
+      "ValorLiquido": 2450.00
+    },
+    "Parcelas": [
+      { "Vencimento": "2026-10-14T00:00:00-03:00", "Valor": 816.67 },
+      { "Vencimento": "2026-11-14T00:00:00-03:00", "Valor": 816.67 },
+      { "Vencimento": "2026-12-14T00:00:00-03:00", "Valor": 816.66 }
+    ]
+  }
+}
+Nota: some-se as parcelas para bater com ValorLiquido (ajustar
+centavos na última parcela, como no exemplo acima).
+
+6.3 COMBINANDO OS DOIS — CENÁRIO MISTO
+--------------------------------------------
+Uma nota pode registrar, ao mesmo tempo:
+  - parte do pagamento já recebida à vista, dividida entre
+    dinheiro e cartão de crédito à vista (Pagamentos[] com dois
+    itens), e
+  - o restante financiado em parcelas futuras (Cobranca.Parcelas[]).
+
+Nesse caso: os valores em Pagamentos[].VlPago somados representam
+o que já foi efetivamente pago no ato; Cobranca representa o
+saldo/estrutura de recebimento a prazo. Ambos os blocos são
+independentes na estrutura do payload e devem ser preenchidos de
+forma consistente com o ValorTotal da nota (campo raiz ValorTotal,
+usado para validação global do valor esperado da NF).
+
+--------------------------------------------------------------------
+7. OBJETO "Transporte"
+--------------------------------------------------------------------
+ModalidadeFrete, NmTransportador, CNPJ, NmMunicipio, DsEndereco,
+IE, UF, Vagao, Balsa
+Veiculo: Placa, UF, RNTC
+Reboque[]: Placa, UF, RNTC
+Volumes[]: Numero, QuantidadeVolume, Especie, Marca, PesoBruto,
+  PesoLiquido, Lacres[]
+
+--------------------------------------------------------------------
+8. RESPOSTAS
+--------------------------------------------------------------------
+
+8.1 RESPOSTA DE /EnviarNotaFiscal (200)
+-------------------------------------------
+Base64Xml (string) — XML da nota fiscal em Base64
+Base64File (string) — arquivo da nota (ex: PDF/DANFE) em Base64
+ReturnNF (object):
+  Numero, Serie, ChaveNF, NumeroProtocolo,
+  CodTipoAmbiente, DsTipoAmbiente,
+  CodStatusRespostaSefaz (ex: 100), DsStatusRespostaSefaz
+    (ex: "Autorizado o uso da NF-e"), Ok (boolean),
+  Detalhes: valorNf, valorIcms, valorIpi, valorPis, valorCofins
+Error (string) — mensagem de erro (vazia em sucesso)
+Avisos (string[]) — avisos não-bloqueantes (vazio se não houver)
+
+8.2 RESPOSTA DE /EnviarNotaFiscalLote (200) — ACEITE DO LOTE
+-------------------------------------------------------------------
+(status agregado; resultado final chega por webhook)
+CodLote (string) — código do lote (ex: "L-2026-0042")
+StatusLote (integer):
+  1 = Aguardando salvar
+  2 = Aguardando transmissão SEFAZ
+  3 = Aguardando finalização
+  4 = Lote finalizado
+  5 = Lote finalizado com erro
+DsStatusLote (string) — descrição textual do StatusLote
+QtdTotal (integer) — quantidade total de notas no lote
+QtdEmitida (integer) — notas autorizadas (status 100 ou 150)
+QtdErro (integer) — notas com resposta da SEFAZ mas não autorizadas
+  (código diferente de 100/150)
+Notas (object[]) — detalhe de cada nota processada, incluindo
+  IdentificadorInterno, ReturnNF (mesma estrutura da seção 8.1),
+  Base64Xml, Base64File
+erros (object[]) — erros ocorridos na consulta/processamento
+avisos (string[]) — avisos não-bloqueantes
+status (integer) — 0 = OK; 2 = há erros em "erros"
+
+--------------------------------------------------------------------
+9. EVENTOS NF-e / NFC-e (pós-autorização)
+--------------------------------------------------------------------
+Fonte: https://brasilnfe.com.br/api/eventos-nf-e-nfc-e
+
+Eventos são vinculados a uma NF-e/NFC-e JÁ AUTORIZADA. Cada evento é
+um registro legal que ALTERA, COMPLEMENTA ou ANULA o documento
+fiscal original, sem substituí-lo.
+
+Todos os endpoints de evento usam:
+  Base URL: https://api.brasilnfe.com.br/services/fiscal
+  Header Token (string, obrigatório) — mesmo token de empresa usado
+    na transmissão da nota.
+
+Todos retornam um objeto de resposta padrão:
+  DsMotivo (string) — descrição do status (ex: "Autorizado o uso da
+    NF-e")
+  DsEvento (string) — descrição do evento (ex: "Cancelamento")
+  DsAmbiente (string) — ambiente (ex: "Ambiente de Produção")
+  NuProtocolo (string) — protocolo de autorização do evento
+  CodStatusRespostaSefaz (integer) — código de status SEFAZ (ex: 100)
+  NumeroSequencial (integer) — número sequencial do evento
+  Status (integer): 1 = Evento Processado | 2 = Aguardando
+    Processamento | 3 = Ocorreu um erro ao processar
+  Error (string) — descrição do erro, se houver
+  Avisos (string[]) — avisos não-bloqueantes
+
+9.1 CARTA DE CORREÇÃO (CC-e)
+------------------------------------
+POST /EnviarCartaCorrecao
+
+Corrige erros FORMAIS de uma NF-e já emitida (ex.: descrição de
+mercadoria, códigos sem impacto fiscal).
+
+NÃO pode ser usada para alterar:
+  - Valores fiscais (base de cálculo, alíquota, diferença de preço,
+    quantidade)
+  - Dados cadastrais que impliquem mudança do remetente/destinatário
+  - Data de emissão ou de saída
+  - Série ou número da nota
+
+Se a alteração necessária não se enquadra nessas regras: é preciso
+emitir uma NF de devolução para anular os efeitos fiscais da nota
+original, e depois emitir uma NOVA NF-e com os dados corrigidos.
+
+Corpo da requisição:
+  TipoAmbiente (integer, 1-2, obrigatório)
+  ChaveNF (string, 44 caracteres, obrigatório) — chave de acesso
+  Correcao (string, 15-1000 caracteres, obrigatório) — texto da
+    correção
+  NumeroSequencial (integer, opcional) — se omitido, controle
+    automático pela Brasil NFe
+  Correcoes (object[], opcional) — lista de correções ESTRUTURADAS
+    (Grupo/Campo/Valor) — uso EXCLUSIVO para CT-e
+
+9.2 CONCILIAÇÃO FINANCEIRA (ECONF)
+------------------------------------------
+POST /EnviarEconf
+
+Evento da NT 2024.002/2025.002 que vincula transações financeiras
+(recebimentos) a uma NF-e/NFC-e já autorizada (tpEvento 110750).
+
+Corpo da requisição:
+  Chave (string, 44 caracteres, obrigatório)
+  TipoAmbiente (integer, 1-2, obrigatório) — deve ser o MESMO
+    ambiente da nota original
+  NumeroSequencial (integer, 1-20, opcional)
+  DataEvento (date-time, opcional) — default: agora
+  Pagamentos (object[], 1-100 itens) — obrigatório no registro
+    (tpEvento 110750). Cada item:
+    IndicadorPagamento, FormaPagamento, DescricaoPagamento, Valor,
+    DataPagamento, CnpjPagamento, UfPagamento, CnpjRecebedor,
+    UfRecebedor, CnpjInstituicaoFinanceira, BandeiraCartao,
+    CodAutorizacao
+  Cancelar (boolean) — true envia CANCELAMENTO do ECONF (tpEvento
+    110751) em vez do registro
+  NumeroProtocoloEconf (string) — obrigatório quando Cancelar=true;
+    é o protocolo do ECONF original a cancelar
+
+9.3 EVENTOS DA REFORMA TRIBUTÁRIA (NT 2025.002)
+-----------------------------------------------------
+POST /EnviarEvento
+
+Endpoint GENÉRICO: o campo TipoEvento decide qual evento é enviado
+e quais campos do payload são usados.
+
+Corpo da requisição:
+  TipoAmbiente (integer, 1-2, obrigatório)
+  Chave (string, 44 caracteres, obrigatório)
+  TipoEvento (integer, obrigatório) — códigos disponíveis:
+    112110 = Confirmação de pagamento integral p/ liberar crédito
+             presumido do adquirente (usa IndicadorQuitacao)
+    112120 = Importação em ALC/ZFM não convertida em isenção (usa
+             Itens: ValorIBS, ValorCBS, Quantidade, Unidade)
+    112130 = Perecimento/perda/roubo/furto no transporte contratado
+             pelo FORNECEDOR (usa Itens + EstornoCreditoIBS/CBS)
+    112140 = Fornecimento não realizado com pagamento antecipado
+             (usa Itens: ValorIBS, ValorCBS, Quantidade, Unidade)
+    112150 = Atualização da Data de Previsão de Entrega (usa
+             DataPrevisaoEntrega)
+    211110 = Solicitação de Apropriação de crédito presumido (usa
+             Itens: ValorBaseCalculo + grupos de crédito presumido
+             IBS/CBS)
+    211124 = Perecimento/perda/roubo/furto no transporte contratado
+             pelo ADQUIRENTE (usa Itens: ValorIBS, ValorCBS,
+             Quantidade, Unidade)
+    211128 = Aceite de débito na apuração por emissão de nota de
+             crédito (usa IndicadorAceitacao)
+    211130 = Imobilização de Item (usa Itens: ValorIBS, ValorCBS,
+             Quantidade, Unidade)
+    211140 = Solicitação de Apropriação de Crédito de Combustível
+             (usa Itens: ValorIBS, ValorCBS, Quantidade, Unidade)
+    211150 = Solicitação de Apropriação de Crédito para bens/
+             serviços que dependem de atividade do adquirente (usa
+             Itens: ValorCreditoIBS, ValorCreditoCBS)
+    212110 = Manifestação sobre Pedido de Transferência de Crédito
+             de IBS em Operação de Sucessão (usa IndicadorAceitacao)
+    212120 = Manifestação sobre Pedido de Transferência de Crédito
+             de CBS em Operação de Sucessão (usa IndicadorAceitacao)
+    110001 = Cancelamento de Evento (usa TipoEventoCancelado e
+             ProtocoloEvento)
+  NumeroSequencial (integer, 1-20, opcional)
+  DataEvento (date-time, opcional)
+  IndicadorQuitacao (integer) — usado no evento 112110 (valor 1)
+  IndicadorAceitacao (integer, 0-1) — usado nos eventos 211128,
+    212110, 212120 (0=Não aceite, 1=Aceite)
+  DataPrevisaoEntrega (date-time) — usado no evento 112150
+  TipoEventoCancelado (integer) — obrigatório no evento 110001
+  ProtocoloEvento (string) — obrigatório no evento 110001
+  Itens (object[]) — obrigatório nos eventos com grupo de itens
+    (112120, 112130, 112140, 211110, 211124, 211130, 211140,
+    211150). Campos possíveis por item: NumeroItem, ValorIBS,
+    ValorCBS, Quantidade, Unidade, EstornoCreditoIBS,
+    EstornoCreditoCBS, ValorBaseCalculo, CodCredPresIBS,
+    PercCredPresIBS, ValorCredPresIBS, CodCredPresCBS,
+    PercCredPresCBS, ValorCredPresCBS, ValorCreditoIBS,
+    ValorCreditoCBS
+
+Cancelamento de um evento da Reforma Tributária já registrado: usar
+TipoEvento=110001, informando TipoEventoCancelado e ProtocoloEvento
+do evento original.
+
+9.4 CANCELAMENTO
+--------------------
+POST /CancelarNotaFiscal
+
+Uma NF-e só pode ser cancelada se:
+  - Já tiver sido AUTORIZADA pelo Fisco.
+  - NÃO tiver ocorrido o fato gerador (mercadoria ainda não saiu do
+    estabelecimento).
+
+Prazos:
+  NF-e: até 24 HORAS após a autorização.
+  NFC-e: até 30 MINUTOS após a autorização.
+
+Se o prazo já passou ou a mercadoria já circulou: emitir uma NF-e
+de DEVOLUÇÃO, ou solicitar cancelamento EXTEMPORÂNEO se a UF
+permitir.
+
+Corpo da requisição:
+  ChaveNF (string, 44 caracteres, obrigatório)
+  Justificativa (string, 15-1000 caracteres, obrigatório)
+  NumeroProtocolo (string) — obrigatório SE a nota foi emitida por
+    OUTRO sistema (não pela Brasil NFe)
+  NumeroSequencial (integer, opcional) — se omitido, controle
+    automático
+  DataEvento (date-time, opcional) — default: agora
+  CpfCnpjRemetenteDCe (string) — obrigatório no cancelamento de DC-e
+    quando a nota não está cadastrada no sistema
+
+9.5 MANIFESTAÇÃO DO DESTINATÁRIO
+--------------------------------------
+POST /ManifestarNotaFiscal
+
+Permite ao DESTINATÁRIO confirmar, negar ou controlar sua
+participação comercial numa NF-e emitida contra seu CNPJ.
+
+Corpo da requisição:
+  TipoAmbiente (integer, 1-2, obrigatório)
+  TipoManifestacao (integer, 1-4, obrigatório):
+    1 = Confirmação da Operação
+    2 = Ciência da Operação
+    3 = Desconhecimento da Operação
+    4 = Operação não Realizada
+  Chave (string, 44 caracteres)
+  Justificativa (string, 15-255 caracteres) — OBRIGATÓRIA quando
+    TipoManifestacao=4 (mín. 15 caracteres); opcional nos demais
+  NumeroSequencial (integer, opcional)
+
+9.6 INUTILIZAR NUMERAÇÃO
+----------------------------
+POST /InutilizarNumeracao
+
+Comunica à SEFAZ números que NÃO serão utilizados (quebra de
+sequência). Aceita ModeloDocumento 55 (NF-e), 65 (NFC-e) e 57 (CT-e).
+
+Só pode ser usada quando o número NUNCA foi utilizado em nenhum
+documento (nem autorizado, nem cancelado, nem denegado), e a
+comunicação deve ser feita até o 10º DIA DO MÊS SUBSEQUENTE à falha
+de sequência.
+
+A inutilização NÃO substitui o cancelamento — serve apenas para
+números que nunca chegaram a gerar um documento fiscal.
+
+Corpo da requisição:
+  Justificativa (string, 15-1000 caracteres, obrigatório)
+  TipoAmbiente (integer, 1-2)
+  ModeloDocumento (integer: 55, 65 ou 57)
+  Serie (integer, mín. 1)
+  NumeracaoInicial (integer, mín. 1)
+  NumeracaoFinal (integer, mín. 1)
+
+--------------------------------------------------------------------
+10. EMPRESAS — CADASTRO, CERTIFICADO DIGITAL E NUMERAÇÃO
+--------------------------------------------------------------------
+Fonte: https://brasilnfe.com.br/api/empresas
+
+Métodos responsáveis por DEFINIR E GERENCIAR as configurações
+essenciais das empresas cadastradas na plataforma. Essas
+configurações impactam diretamente: emissão de documentos fiscais
+(NF-e, NFC-e, CT-e, MDF-e, NFS-e, DC-e), geração de SPED/SINTEGRA/
+arquivos magnéticos, armazenamento/consultas/eventos, e a
+vinculação/validação de certificados digitais.
+
+Base URL: https://api.brasilnfe.com.br/services/empresa
+
+10.1 HEADERS OBRIGATÓRIOS DA SEÇÃO
+----------------------------------------
+  UserToken (obrigatório em TODOS os métodos) — identifica o
+    usuário autenticado.
+  Token (obrigatório em TODOS os métodos EXCETO Adicionar e Buscar
+    Todas) — identifica QUAL empresa será manipulada.
+  Content-Type: application/json
+
+10.2 ENDPOINTS DA SEÇÃO
+----------------------------
+  POST /AdicionarEmpresa        - cadastra nova empresa
+  POST /EditarEmpresa           - edita empresa existente
+  POST /DeletarEmpresa          - exclui uma empresa (irreversível via API)
+  POST /BuscarEmpresa           - obtém dados de uma empresa
+  POST /BuscarTodasEmpresas     - lista todas as empresas do usuário
+  POST /AlterarCertificado      - troca o certificado digital
+  POST /VerificarCertificado    - verifica validade do certificado
+  POST /ConsultarNumeracao      - lista numerações (Serie/Numero) por modelo/ambiente
+  POST /AtualizarNumeracao      - atualiza/cria contador de numeração
+  POST /AtivarAssinatura        - ativa assinatura de serviços (sem checkout web)
+  POST /CancelarAssinatura      - cancela assinatura de serviços
+  POST /ConsultarServicos       - lista catálogo de serviços contratáveis/ativos
+  POST /ConsultarFaturas        - lista faturas de assinatura
+  POST /ConsultarFatura         - consulta uma fatura específica (PIX/boleto)
+  POST /GerarLinkAtivacao       - gera link de checkout/ativação de serviços
+
+10.3 POST /AdicionarEmpresa — CADASTRO DE EMPRESA
+------------------------------------------------------
+Cadastra uma nova empresa, habilitando o uso dos serviços fiscais.
+Retorna o Token que identifica a empresa nas demais operações.
+Apenas o header UserToken é necessário aqui (o Token da empresa
+ainda não existe no momento do cadastro).
+
+Próximos passos recomendados após o cadastro:
+  1. Editar dados, se necessário (EditarEmpresa)
+  2. Vincular o certificado digital (AlterarCertificado)
+  3. Gerar o link de ativação para liberar o uso fiscal
+     (GerarLinkAtivacao) ou ativar assinatura diretamente
+     (AtivarAssinatura)
+
+Campos do corpo da requisição (mesma estrutura em Editar/Buscar/
+Buscar Todas):
+  CNPJ (string) — CNPJ ou CPF (14 ou 11 dígitos)
+  CodigoInterno (string) — código livre do integrador para
+    correlacionar com o próprio ERP (ecoado na resposta)
+  NmFantasia (string), RzSocial (string)
+  IE (string) — inscrição estadual
+  IM (string) — inscrição municipal
+  CRT (integer) — Código de Regime Tributário:
+    1 = Simples Nacional
+    2 = Simples Nacional - Excesso Sublimite
+    3 = Lucro Presumido (Regime Normal)
+    4 = Lucro Real (Regime Normal)
+    Regra de compatibilidade: CRT 1 ou "CRT 4/MEI" usam CSOSN (101,
+    102, 103, 201, 202, 203, 300, 400, 500, 900); CRT 2 usa CSOSN;
+    CRT 3 (Regime Normal) usa CST (00, 10, 20, 30, 40, 41, 50, 51,
+    60, 70, 90). O validador REJEITA a emissão se o código
+    informado no item da nota for incompatível com o CRT da empresa.
+  CNAE (string)
+  Token (string) — apenas para leitura (devolvido nas operações)
+  Site (string)
+  CodGrupo (integer)
+  Endereco (object) — Cep, Logradouro, Complemento, Numero, Bairro,
+    CodMunicipio, Municipio, Uf, CodPais, Pais
+  Contato (object) — Telefone, Email
+  Configuracao (object) — agrupamento por tipo de documento/papel:
+    NFSe { TokenProcurador, LoginWebService, SenhaWebService,
+      CpfWebService }
+    NFe { AutoManifestarCienciaOperacao (boolean) }
+    NFCe { IdCSCProducao, CSCProducao, IdCSCHomologacao,
+      CSCHomologacao } — CSC = Código de Segurança do Contribuinte,
+      necessário para o QR Code da NFC-e
+    Transportador { RNTRC }
+
+Resposta (200):
+  token (string) — token da empresa criada/editada
+  status (boolean) — true=sucesso, false=falha (ver Error)
+  codigoInterno (string) — eco do CodigoInterno enviado
+  Error (string), Avisos (string[])
+
+10.4 CERTIFICADO DIGITAL — ALTERAR E VERIFICAR
+----------------------------------------------------
+### POST /AlterarCertificado
+Troca o certificado digital vinculado à empresa. Obrigatório
+sempre que o certificado expirar ou for substituído. Sem
+certificado válido, os métodos de emissão de NF-e, NFC-e, CT-e,
+MDF-e e NFS-e (em alguns municípios) deixam de funcionar.
+
+TIPO DE CERTIFICADO SUPORTADO: exclusivamente A1 (.pfx/.p12).
+CERTIFICADOS A3 (TOKEN/CARTÃO) NÃO SÃO SUPORTADOS.
+
+O certificado deve ser enviado em BASE64, junto com a senha de
+proteção.
+
+Corpo da requisição:
+  Senha (string, obrigatório) — senha do certificado
+  Base64CertificateFile (string, obrigatório) — conteúdo do .pfx/
+    .p12 em Base64
+
+Resposta (200):
+  Expirado (boolean) — true=expirado
+  DtExpiracao (date) — data de expiração do certificado
+  status (integer): 1=alterado com sucesso | 2=não foi possível
+    alterar
+  Error (string), Avisos (string[]) — ex: aviso de certificado
+    próximo do vencimento
+
+### POST /VerificarCertificado
+Verifica a situação do certificado (válido, próximo do vencimento
+ou expirado) sem substituí-lo.
+
+REQUISITO EXPLÍCITO DA DOCUMENTAÇÃO: "A Brasil NFe exige
+certificado A1 ICP-Brasil (arquivo .pfx/.p12) válido, com CN
+contendo o CNPJ da empresa. Certificados A3 (token/cartão) não são
+suportados. O vencimento do certificado bloqueia novas emissões -
+configure alerta com antecedência."
+Ver também: https://brasilnfe.com.br/conceitos-fiscais/certificado-digital
+
+Corpo da requisição:
+  Senha (string) — senha do certificado
+  Base64CertificateFile (string) — conteúdo em Base64
+  Interno (boolean, default false):
+    true  = verifica o certificado JÁ CADASTRADO na empresa
+    false = verifica o certificado ENVIADO no próprio payload
+      (Base64CertificateFile), sem substituir o cadastrado
+
+Resposta (200): mesma estrutura de AlterarCertificado (Expirado,
+  DtExpiracao, status, Error, Avisos).
+
+10.5 NUMERAÇÃO — CONSULTAR E ATUALIZAR
+--------------------------------------------
+### POST /ConsultarNumeracao
+Lista todas as numerações cadastradas da empresa, ordenadas por
+modelo, ambiente e série. Cada entrada é o contador interno para a
+combinação Empresa + Modelo + Série + Ambiente, indicando o
+PRÓXIMO número usado em emissões automáticas (quando Serie/Numero/
+Lote são omitidos no payload de emissão).
+
+Quando a empresa é criada via AdicionarEmpresa, a API já inicializa
+automaticamente Numero=1 para cada modelo suportado, em ambos os
+ambientes: 55 (NF-e), 65 (NFC-e), 10 (NFS-e), 57 (CT-e), 58 (MDF-e),
+6 (Energia Elétrica), 21 (Comunicação), 22 (Telecomunicação).
+
+Resposta (200):
+  status (boolean)
+  Numeracoes (object[]): TipoAmbiente, ModeloDocumento, Serie,
+    Numero, Padrao (boolean — indica a série padrão daquele modelo/
+    ambiente)
+  Error (string), Avisos (string[])
+
+### POST /AtualizarNumeracao
+Atualiza (ou cria, se ainda não existir) o contador de numeração
+para Empresa + Modelo + Série + Ambiente.
+
+Casos de uso: migração de ERP (alinhar próximo número ao último
+autorizado no sistema antigo), abertura de nova série, definir
+série padrão, correção pós-incidente.
+
+ATENÇÃO CRÍTICA: nunca definir Numero igual ou inferior a um número
+JÁ AUTORIZADO pela SEFAZ na mesma série/modelo/ambiente — provoca
+REJEIÇÃO por chave de acesso duplicada na próxima emissão
+automática. Para descartar números pulados, usar o evento
+/InutilizarNumeracao (seção 9.6), não este endpoint.
+
+Corpo da requisição:
+  TipoAmbiente (integer: 1 ou 2)
+  ModeloDocumento (integer): 55, 65, 10, 57, 58, 6, 21, 22
+  Serie (string) — aceita numérico ou alfanumérico (Energia/
+    Comunicação)
+  Numero (integer) — próximo número a vigorar como contador
+  Padrao (boolean) — quando true, marca esta série como PADRÃO
+    para o modelo+ambiente; as demais séries do mesmo modelo/
+    ambiente são desmarcadas automaticamente (só pode haver uma
+    padrão por combinação); quando uma emissão omite Serie, a API
+    usa a série marcada como padrão
+
+Resposta (200): status (boolean), Numeracao (object — eco da
+  configuração aplicada), Error (string), Avisos (string[])
+
+10.6 EXCLUSÃO DE EMPRESA — IMPACTO NO CERTIFICADO
+--------------------------------------------------------
+POST /DeletarEmpresa — operação IRREVERSÍVEL pela API (sem endpoint
+de restauração). Ao excluir uma empresa:
+  1. O certificado digital A1 (.pfx/.p12) e a senha criptografada
+     são REMOVIDOS PERMANENTEMENTE do armazenamento — nem o
+     certificado nem a senha ficam em backup recuperável via API.
+     Emissões que exigem assinatura passam a FALHAR imediatamente;
+     para voltar a operar, é necessário recadastrar a empresa e
+     reenviar o certificado via AlterarCertificado.
+  2. Todos os serviços fiscais ativos são desativados.
+  3. A empresa some de BuscarTodasEmpresas e seu Token é invalidado
+     imediatamente.
+  Documentos fiscais JÁ EMITIDOS não são apagados — permanecem
+  armazenados para auditoria; a exclusão é do CADASTRO, não do
+  histórico fiscal.
+
+10.7 ASSINATURA E FATURAMENTO (contratação de serviços)
+--------------------------------------------------------------
+### POST /AtivarAssinatura
+Ativa diretamente uma assinatura de serviços para a empresa, sem
+checkout web. A assinatura é criada aguardando pagamento; os
+serviços ativam automaticamente quando o pagamento é confirmado.
+
+Corpo: Servicos (string[], obrigatório) — nomes dos serviços a
+  ativar: "NF-e/NFC-e", "NFS-e", "CT-e", "MDF-e", "DC-e", "SPED",
+  "SINTEGRA", "FCI", "Sincronizar Docs" (comparação
+  case-insensitive)
+  FormaPagamento: BOLETO_PIX (padrão) | CREDIT_CARD | PIX
+  Representante (object, opcional) — responsável financeiro/pagador
+    diferente da empresa, se aplicável
+
+Resposta: Mensagem, Reaproveitada (boolean — true se reaproveitou
+  cobrança pendente idêntica), SemCobrancaImediata (boolean),
+  Servicos, Valor, FaturaId, PixCopiaECola, PixQrCode, BoletoPdf,
+  LinhaDigitavel, erros[], avisos[], status
+
+### POST /CancelarAssinatura
+Cancela assinaturas em andamento que contêm os serviços informados.
+Corpo: Servicos (string[], obrigatório)
+Resposta: Mensagem, AssinaturasCanceladas (integer[]),
+  AcessoAteFimDoPeriodo (boolean — true=acesso mantido até o fim do
+  período pago; false=desativação imediata), AcessoAte (date-time),
+  erros[], avisos[], status
+
+### POST /ConsultarServicos
+Retorna o catálogo de serviços contratáveis e a situação (ativo ou
+não) de cada um. O campo "Nome" de cada serviço é exatamente o
+texto aceito em Servicos de Ativar/Cancelar Assinatura.
+
+### POST /ConsultarFaturas / POST /ConsultarFatura
+Lista faturas (mais recente primeiro) ou consulta uma específica
+pelo FaturaId, com status (PENDING/PAID/EXPIRED/CANCELED), valores,
+datas e dados de pagamento (PIX copia-e-cola, QR Code, boleto PDF,
+linha digitável).
+
+### POST /GerarLinkAtivacao
+Gera um link de checkout (ex: https://fintely.com/checkout/id-do-pagamento)
+para ativação de serviços pela interface web, alternativa ao fluxo
+direto de AtivarAssinatura.
+
+--------------------------------------------------------------------
+11. URLS DE REFERÊNCIA CITADAS NA DOCUMENTAÇÃO
+--------------------------------------------------------------------
+Site institucional:           https://www.brasilnfe.com.br/
+Documentação:                 https://brasilnfe.com.br/docs
+Referência da API:             https://brasilnfe.com.br/api
+Painel:                        https://api.brasilnfe.com.br
+Página NF-e/NFC-e:             https://brasilnfe.com.br/api/nf-e-e-nfc-e
+Página Eventos NF-e/NFC-e:     https://brasilnfe.com.br/api/eventos-nf-e-nfc-e
+Página Empresas:               https://brasilnfe.com.br/api/empresas
+Consultar Lote NF-e:           https://brasilnfe.com.br/api/nf-e-e-nfc-e#tag/consultas/post/-consultarlotenfe
+Webhooks:                      https://brasilnfe.com.br/docs/webhooks
+Numeração e Séries:            https://brasilnfe.com.br/conceitos-fiscais/numeracao-e-series
+Contingência:                  https://brasilnfe.com.br/conceitos-fiscais/contingencia
+Rejeições SEFAZ:               https://brasilnfe.com.br/conceitos-fiscais/rejeicoes/index
+Certificado Digital (conceito):https://brasilnfe.com.br/conceitos-fiscais/certificado-digital
+CSOSN vs CST:                  https://brasilnfe.com.br/conceitos-fiscais/csosn-vs-cst
+Regimes Tributários (CRT):     https://brasilnfe.com.br/conceitos-fiscais/regimes-tributarios
+
+Endpoints fiscais (base): https://api.brasilnfe.com.br/services/fiscal
+  POST /EnviarNotaFiscal
+  POST /EnviarNotaFiscalLote
+  POST /EnviarCartaCorrecao
+  POST /EnviarEconf
+  POST /EnviarEvento (eventos da Reforma Tributária)
+  POST /CancelarNotaFiscal
+  POST /ManifestarNotaFiscal
+  POST /InutilizarNumeracao
+
+Endpoints de empresa (base): https://api.brasilnfe.com.br/services/empresa
+  POST /AdicionarEmpresa
+  POST /EditarEmpresa
+  POST /DeletarEmpresa
+  POST /BuscarEmpresa
+  POST /BuscarTodasEmpresas
+  POST /AlterarCertificado
+  POST /VerificarCertificado
+  POST /ConsultarNumeracao
+  POST /AtualizarNumeracao
+  POST /AtivarAssinatura
+  POST /CancelarAssinatura
+  POST /ConsultarServicos
+  POST /ConsultarFaturas
+  POST /ConsultarFatura
+  POST /GerarLinkAtivacao
+
+--------------------------------------------------------------------
+12. BOAS PRÁTICAS / PONTOS DE ATENÇÃO
+--------------------------------------------------------------------
+1. Sempre testar em TipoAmbiente=2 (Homologação) antes de produção.
+2. Deixar Serie/Numero/Lote em branco sempre que possível para
+   evitar conflitos de numeração — só controlar manualmente em
+   migrações de sistema ou múltiplas séries.
+3. Para NFC-e (modelo 65), validar o CFOP contra a lista restrita
+   antes de enviar (evita rejeições 725 e 386).
+4. Se ConsumidorFinal=true e quiser cálculo automático de tributos
+   aproximados, usar CalcularIBPT=true (não altera nada se
+   ConsumidorFinal=false).
+5. Ao usar ValorTotal como validação, garantir que o cálculo
+   (produtos - descontos + frete + seguro + outras despesas +
+   impostos que compõem o total) bate exatamente, ou a emissão é
+   bloqueada.
+6. Para emissão em lote de alto volume, configurar webhook ativo
+   no painel ANTES de transmitir — caso contrário, será necessário
+   consultar manualmente via ConsultarLoteNFe.
+7. Ao dividir pagamento em dinheiro + cartão, cada forma de
+   pagamento é um objeto separado em Pagamentos[], nunca somados em
+   um único objeto.
+8. Parcelamento financeiro (boleto/prazo) vai em Cobranca.Parcelas,
+   não em Pagamentos — são conceitos diferentes e podem coexistir.
+9. Ajustar centavos residuais na última parcela para bater o total
+   com Cobranca.Fatura.ValorLiquido.
+10. O IndicadorPresenca=4 (entrega a domicílio) em NFC-e exige
+    dados completos do Cliente (CPF/CNPJ + endereço) — caso
+    contrário, rejeição SEFAZ 787.
+11. Certificado digital: use SOMENTE A1 (.pfx/.p12) — A3 (token/
+    cartão físico) não é suportado pela Brasil NFe. Monitore a
+    expiração via VerificarCertificado periodicamente (ex: rotina
+    diária) e programe a renovação com antecedência, já que a
+    expiração BLOQUEIA toda emissão fiscal da empresa.
+12. Respeite os prazos de evento: Cancelamento tem 24h (NF-e) ou
+    30min (NFC-e); Inutilizar Numeração deve ser feita até o 10º
+    dia do mês seguinte à quebra de sequência. Fora do prazo, a
+    alternativa é NF-e de devolução ou cancelamento extemporâneo
+    (conforme a UF).
+13. Carta de Correção NUNCA corrige valores fiscais, partes
+    envolvidas, datas ou número/série — para esses casos, o caminho
+    correto é NF de devolução + nova NF-e.
+14. Ao excluir uma empresa (DeletarEmpresa), o certificado digital é
+    removido PERMANENTEMENTE e sem backup recuperável via API —
+    trate esse endpoint como destrutivo e irreversível.
+15. COMPARAÇÃO COM O BLING (ver documento "bling_guia_api_notas_
+    fiscais_eletronicas.txt"): ao contrário do Bling, a Brasil NFe
+    NÃO possui nenhum recurso equivalente a "cadastro de produtos"
+    ou "grupo de produtos" para cálculo automático de impostos —
+    não há endpoint de produtos, grupos, tributação automática por
+    NCM/CFOP, nem qualquer motor de cálculo fiscal embutido. TODO o
+    dado fiscal (CFOP, CST/CSOSN, alíquotas, bases de cálculo,
+    valores de cada imposto) deve ser calculado e enviado pelo
+    INTEGRADOR em cada requisição de emissão (seção 5, sub-objeto
+    "Imposto" de cada item). A Brasil NFe atua estritamente como
+    validador + assinador + transmissor para a SEFAZ, nunca como
+    calculadora fiscal. Isso torna a Brasil NFe mais simples de
+    "encaixar" sobre um sistema que já calcula seus próprios
+    impostos (e mais rápida para emitir avulso), mas exige que o
+    integrador (ou um sistema terceiro, como uma tabela fiscal
+    própria) seja responsável por toda a parte tributária — não há
+    rede de segurança automática como a que o Bling oferece via
+    Grupo de Produto + Natureza de Operação.
+
+====================================================================
+FIM DO DOCUMENTO
+====================================================================

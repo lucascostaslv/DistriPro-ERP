@@ -49,7 +49,7 @@ export const NFeService = {
     async verifyCertificate(token, password, base64Content, interno = false) {
         return this.request('empresa/VerificarCertificado', {
             "Senha": password,
-            "Base64File": base64Content || "",
+            "Base64CertificateFile": base64Content || "",
             "Interno": interno
         }, token);
     },
@@ -57,7 +57,7 @@ export const NFeService = {
     async updateCertificate(token, password, base64Content) {
         return this.request('empresa/AlterarCertificado', {
             "Senha": password,
-            "Base64File": base64Content
+            "Base64CertificateFile": base64Content
         }, token);
     },
 
@@ -80,22 +80,26 @@ export const NFeService = {
     },
 
     async correct(token, nfeKey, correctionText, env) {
-        return this.request('fiscal/CartaCorrecaoNotaFiscal', {
+        // Endpoint corrigido: /CartaCorrecaoNotaFiscal não existe na referência oficial
+        // (seção "Eventos NF-e/NFC-e") — o nome real é /EnviarCartaCorrecao.
+        return this.request('fiscal/EnviarCartaCorrecao', {
             token: token,
             TipoAmbiente: env === 'PRODUCAO' ? 1 : 2,
             ChaveNF: nfeKey,
             Correcao: correctionText,
-            NumeroSequencial: 1 
+            NumeroSequencial: 1
         });
     },
 
     async inutilize(token, series, model, numStart, numEnd, justification, env) {
-        return this.request('fiscal/InutilizarNumeracaoNotaFiscal', {
+        // Endpoint corrigido: /InutilizarNumeracaoNotaFiscal não existe na referência
+        // oficial — o nome real é /InutilizarNumeracao. Serie também é integer, não string.
+        return this.request('fiscal/InutilizarNumeracao', {
             token: token,
             TipoAmbiente: env === 'PRODUCAO' ? 1 : 2,
             ModeloDocumento: Number(model),
             Justificativa: justification,
-            Serie: String(series),
+            Serie: Number(series),
             NumeracaoInicial: Number(numStart),
             NumeracaoFinal: Number(numEnd)
         });

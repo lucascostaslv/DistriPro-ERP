@@ -29,6 +29,7 @@ const BlingIntegrationPanel = ({ showNotification }) => {
     forma_pagamento_debito_id: "",
     forma_pagamento_pix_id: "",
     forma_pagamento_outros_id: "",
+    sync_estoque_bling: false,
   });
 
   useEffect(() => {
@@ -53,6 +54,7 @@ const BlingIntegrationPanel = ({ showNotification }) => {
             forma_pagamento_debito_id: blingSettings.forma_pagamento_debito_id || "",
             forma_pagamento_pix_id: blingSettings.forma_pagamento_pix_id || "",
             forma_pagamento_outros_id: blingSettings.forma_pagamento_outros_id || "",
+            sync_estoque_bling: !!blingSettings.sync_estoque_bling,
           });
         }
       } catch (err) {
@@ -75,13 +77,23 @@ const BlingIntegrationPanel = ({ showNotification }) => {
         forma_pagamento_debito_id: blingConfig.forma_pagamento_debito_id || null,
         forma_pagamento_pix_id: blingConfig.forma_pagamento_pix_id || null,
         forma_pagamento_outros_id: blingConfig.forma_pagamento_outros_id || null,
+        sync_estoque_bling: blingConfig.sync_estoque_bling,
       });
 
-      const { data, error } = await supabase
+      let { data, error } = await supabase
         .from("fiscal_bling_settings")
         .upsert(payload, { onConflict: "firebase_store_id" })
         .select()
         .single();
+      // Coluna sync_estoque_bling ainda não existe (migration não rodada) — tenta de novo sem ela
+      if (error && String(error.message || "").includes("sync_estoque_bling")) {
+        const { sync_estoque_bling, ...withoutSync } = payload;
+        ({ data, error } = await supabase
+          .from("fiscal_bling_settings")
+          .upsert(withoutSync, { onConflict: "firebase_store_id" })
+          .select()
+          .single());
+      }
       if (error) throw error;
 
       setBlingConfig((prev) => ({ ...prev, id: data.id }));
@@ -323,6 +335,21 @@ const BlingIntegrationPanel = ({ showNotification }) => {
               )}
             </div>
           ))}
+
+          <label className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded cursor-pointer">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={blingConfig.sync_estoque_bling}
+              onChange={(e) => setBlingConfig({ ...blingConfig, sync_estoque_bling: e.target.checked })}
+            />
+            <span className="text-xs text-amber-800">
+              <span className="font-bold block">Também dar baixa de estoque dentro do Bling ao autorizar a nota</span>
+              O PDV já debita o estoque no próprio sistema (fonte de verdade) no momento da venda.
+              Marque isto SÓ se o estoque do Bling for realmente usado para algo (relatório, outro canal de venda) —
+              senão o mesmo item fica debitado duas vezes em dois lugares diferentes. Desmarcado por padrão.
+            </span>
+          </label>
         </div>
       </div>
 

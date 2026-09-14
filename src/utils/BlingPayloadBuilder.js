@@ -24,6 +24,31 @@ function mapPaymentMethodId(method, blingConfig) {
   return blingConfig.forma_pagamento_outros_id;
 }
 
+// O Bling representa split de pagamento (ex: metade dinheiro, metade cartão) como um item
+// por forma de pagamento em "parcelas[]" (ver guia da API, seção 11.2) — nunca um valor único
+// coberto pela forma "dominante". `sale.paymentMethods` (quando existe) já tem essa quebra real
+// vinda do PDV; sem ele, cai para um único pagamento pelo valor total (venda de método único).
+function buildParcelas(sale, blingConfig) {
+  const dataStr = getSafeDateTime().split(' ')[0];
+  const entries =
+    Array.isArray(sale.paymentMethods) && sale.paymentMethods.length > 0
+      ? sale.paymentMethods
+      : [{ method: sale.paymentMethod, amount: sale.total }];
+
+  return entries.map((entry) => {
+    const formaPagamentoId = mapPaymentMethodId(entry.method, blingConfig);
+    if (!formaPagamentoId) {
+      throw new Error(`Forma de pagamento "${entry.method}" sem ID do Bling configurado.`);
+    }
+    return {
+      data: dataStr,
+      valor: Number(entry.amount),
+      observacoes: `Venda PDV #${sale.id} — ${entry.method}`,
+      formaPagamento: { id: formaPagamentoId },
+    };
+  });
+}
+
 function buildContato(client) {
   if (!client || !client.tax_id) {
     return { nome: 'Consumidor Final', tipoPessoa: 'F', contribuinte: 9 };
@@ -72,11 +97,6 @@ export const buildBlingNotaPayload = (sale, client, blingConfig, tipoDocumento =
     );
   }
 
-  const formaPagamentoId = mapPaymentMethodId(sale.paymentMethod, blingConfig);
-  if (!formaPagamentoId) {
-    throw new Error(`Forma de pagamento "${sale.paymentMethod}" sem ID do Bling configurado.`);
-  }
-
   const itens = sale.items.map((item) => {
     let ncm = item.ncm ? String(item.ncm).replace(/\D/g, '') : '';
     if (ncm.length !== 8) {
@@ -115,13 +135,6 @@ export const buildBlingNotaPayload = (sale, client, blingConfig, tipoDocumento =
     ...(blingConfig.loja_id ? { loja: { id: blingConfig.loja_id } } : {}),
     finalidade: 1,
     itens,
-    parcelas: [
-      {
-        data: getSafeDateTime().split(' ')[0],
-        valor: Number(sale.total),
-        observacoes: `Venda PDV #${sale.id}`,
-        formaPagamento: { id: formaPagamentoId },
-      },
-    ],
+    parcelas: buildParcelas(sale, blingConfig),
   };
 };

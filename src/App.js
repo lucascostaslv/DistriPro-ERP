@@ -90,6 +90,7 @@ import { buildNFePayload } from "./utils/NFeBuilder";
 import { NFeService } from "./utils/NFeService";
 import { safeStr } from "./utils/safeString";
 import { resolveStockTarget, getDisplayStock as getDisplayStockShared } from "./utils/packStock";
+import { isValidCpfCnpj } from "./utils/cpfCnpj";
 import { extractCancelEventData } from "./utils/fiscalCancelHelpers";
 import ComandaManager from "./ComandaManager";
 import { downloadSmart } from "./EntradaNotas/FiscalInvoices";
@@ -134,6 +135,20 @@ const isToday = (dateString) => {
 
 const getDisplayStock = (product, allProducts) => {
   return getDisplayStockShared(product, allProducts);
+};
+
+// Insere o registro em fiscal_invoices tentando incluir client_document (CPF/CNPJ do
+// comprador). Enquanto a coluna `client_document` não existir na tabela (precisa de
+// `ALTER TABLE fiscal_invoices ADD COLUMN client_document text;`, rodado manualmente —
+// não temos acesso de DDL aqui), o PostgREST rejeita o insert inteiro por causa do campo
+// desconhecido; nesse caso, tenta de novo sem ele para não perder o registro da nota.
+const insertFiscalInvoice = async (invoiceData) => {
+  const first = await supabase.from("fiscal_invoices").insert(invoiceData);
+  if (first.error && String(first.error.message || "").includes("client_document")) {
+    const { client_document, ...withoutDoc } = invoiceData;
+    return supabase.from("fiscal_invoices").insert(withoutDoc);
+  }
+  return first;
 };
 
 // --- COMPONENTS ---
@@ -7228,6 +7243,7 @@ const SettingsManager = ({
                 }
               >
                 <option value="1">Simples Nacional</option>
+                <option value="2">Simples Nacional — Excesso de Sublimite</option>
                 <option value="3">Normal</option>
               </select>
             </div>
@@ -8267,7 +8283,10 @@ const StoreApp = ({ onLogout, updateStore }) => {
   });
   const [realtimeTransactions, setRealtimeTransactions] = useState([]);
   const [transactionCategories, setTransactionCategories] = useState([]);
-  const [showNonFiscalStep, setShowNonFiscalStep] = useState(false);
+  // Wizard do modal de emissão: 'ask' (emitir?) -> 'cpfCnpj' (informar documento?) -> 'nonFiscal' (imprimir cupom?)
+  const [emitModalStep, setEmitModalStep] = useState("ask");
+  const [emitCpfCnpjInput, setEmitCpfCnpjInput] = useState("");
+  const [emitCpfCnpjError, setEmitCpfCnpjError] = useState("");
 
   // Modo Rápido de fechamento (configurado em Configurações > Modo Rápido): quando ativo,
   // pula as perguntas de emissão de NFC-e / cupom no pós-venda e aplica a preferência salva.
@@ -8455,15 +8474,45 @@ const StoreApp = ({ onLogout, updateStore }) => {
   // --- NAVEGAÇÃO POR TECLADO NO MODAL DE EMISSÃO ---
   const [focusedModalOption, setFocusedModalOption] = useState(1); // 1 = Botão da Direita (Padrão)
 
+  // Confirma (ou pula) o CPF/CNPJ e efetivamente dispara a emissão — usado tanto
+  // pelo clique nos botões quanto pelo Enter no passo "cpfCnpj".
+  const submitCpfCnpjStep = (skip) => {
+    let docDigits = null;
+    if (!skip) {
+      const digits = emitCpfCnpjInput.replace(/\D/g, "");
+      if (digits) {
+        if (!isValidCpfCnpj(digits)) {
+          setEmitCpfCnpjError("CPF/CNPJ inválido. Confira os números ou deixe em branco.");
+          return;
+        }
+        docDigits = digits;
+      }
+    }
+    handleEmitNFe(showCashierEmitModal.sale, docDigits);
+    setEmitCpfCnpjInput("");
+    setEmitCpfCnpjError("");
+    setEmitModalStep("nonFiscal");
+  };
+
   // Reseta o foco quando o modal abre ou muda de passo
   useEffect(() => {
     if (showCashierEmitModal.open) setFocusedModalOption(1);
-  }, [showCashierEmitModal.open, showNonFiscalStep]);
+  }, [showCashierEmitModal.open, emitModalStep]);
 
   useEffect(() => {
     if (!showCashierEmitModal.open) return;
 
     const handleKeyDown = (e) => {
+      // Passo de CPF/CNPJ tem campo de texto — não sequestra as setas (cursor do input),
+      // só o Enter (e só quando o foco não está dentro do próprio input, que já submete naturalmente)
+      if (emitModalStep === "cpfCnpj") {
+        if (e.key === "Enter" && document.activeElement?.tagName !== "INPUT") {
+          e.preventDefault();
+          submitCpfCnpjStep(focusedModalOption === 0);
+        }
+        return;
+      }
+
       if (e.key === "ArrowRight") {
         e.preventDefault();
         setFocusedModalOption(1);
@@ -8472,23 +8521,20 @@ const StoreApp = ({ onLogout, updateStore }) => {
         setFocusedModalOption(0);
       } else if (e.key === "Enter") {
         e.preventDefault();
-        if (!showNonFiscalStep) {
-          // Passo 1: NF-e
-          if (focusedModalOption === 0) setShowNonFiscalStep(true);
-          else {
-            handleEmitNFe(showCashierEmitModal.sale);
-            setShowNonFiscalStep(true);
-          }
+        if (emitModalStep === "ask") {
+          // Passo 1: emitir NF-e?
+          if (focusedModalOption === 0) setEmitModalStep("nonFiscal");
+          else setEmitModalStep("cpfCnpj");
         } else {
-          // Passo 2: Cupom Simples
+          // Passo 3: Cupom Simples
           if (focusedModalOption === 0) {
             setShowCashierEmitModal({ open: false, sale: null });
-            setShowNonFiscalStep(false);
+            setEmitModalStep("ask");
             showNotification("Venda salva sem documento.", "success");
           } else {
             printReceipt(showCashierEmitModal.sale, store.companyInfo);
             setShowCashierEmitModal({ open: false, sale: null });
-            setShowNonFiscalStep(false);
+            setEmitModalStep("ask");
             showNotification("Cupom enviado para impressão.", "success");
           }
         }
@@ -8499,9 +8545,10 @@ const StoreApp = ({ onLogout, updateStore }) => {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
     showCashierEmitModal,
-    showNonFiscalStep,
+    emitModalStep,
     focusedModalOption,
     store.companyInfo,
+    emitCpfCnpjInput,
   ]);
 
   // 🔍 FUNÇÃO DE RASTREABILIDADE E HIGIENIZAÇÃO MULTI-TENANT
@@ -8681,6 +8728,14 @@ const cleanUndefinedFields = (obj, path = '') => {
       const appId = String(store.id);
       const batch = tenantDB.firestore.batch();
 
+      // Pré-checagem fiscal: só decide o status inicial da venda (ela ainda nem foi
+      // criada no Firestore neste ponto — `sale.id` aqui é só o timestamp local gerado
+      // no PDV, não o ID real do documento). NÃO grava nada ainda; isso só acontece
+      // depois do batch.commit() abaixo, junto com o resto da venda.
+      let precheckNfeStatus = null;
+      let precheckNfeMessage = null;
+      let precheckSkipsEmission = false;
+
       if (nfeProvider === "brasilnfe") {
         const { data: nfeConfig } = await tenantDB.supabase
           .query("fiscal_settings")
@@ -8692,18 +8747,9 @@ const cleanUndefinedFields = (obj, path = '') => {
           : false;
 
         if (isExpired) {
-          await tenantDB.firestore.update("sales", String(sale.id), {
-            nfeStatus: "CONTINGÊNCIA",
-            nfeMessage: "Venda realizada com certificado expirado.",
-          });
-
-          showNotification(
-            "Certificado expirado. Imprimindo Cupom Não Fiscal.",
-            "warning",
-          );
-          printReceipt(sale, store.companyInfo);
-          setIsEmitting(false);
-          return;
+          precheckNfeStatus = "CONTINGÊNCIA";
+          precheckNfeMessage = "Venda realizada com certificado expirado.";
+          precheckSkipsEmission = true;
         }
       } else {
         const { data: blingConfig } = await tenantDB.supabase
@@ -8711,24 +8757,15 @@ const cleanUndefinedFields = (obj, path = '') => {
           .single();
 
         if (!blingConfig?.connected) {
-          await tenantDB.firestore.update("sales", String(sale.id), {
-            nfeStatus: "SEM_INTEGRACAO",
-            nfeMessage: "Bling não conectado no momento da venda.",
-          });
-
-          showNotification(
-            "Bling não conectado. Imprimindo Cupom Não Fiscal.",
-            "warning",
-          );
-          printReceipt(sale, store.companyInfo);
-          setIsEmitting(false);
-          return;
+          precheckNfeStatus = "SEM_INTEGRACAO";
+          precheckNfeMessage = "Bling não conectado no momento da venda.";
+          precheckSkipsEmission = true;
         }
       }
 
       // 1. Gera o ID da venda antes para poder referenciar
       const saleId = tenantDB.firestore.generateId("sales");
-      
+
       // Monta o objeto da venda usando o serverTimestamp nativo já importado no topo do App.js
       const finalSale = {
         ...sale,
@@ -8736,6 +8773,7 @@ const cleanUndefinedFields = (obj, path = '') => {
         createdAt: serverTimestamp(),
         userId: currentUser?.id || "anon",
         userName: currentUser?.username || "Sistema",
+        ...(precheckNfeStatus ? { nfeStatus: precheckNfeStatus, nfeMessage: precheckNfeMessage } : {}),
       };
 
       // 🔍 Higienização robusta em tempo de execução para converter qualquer 'undefined' das comandas em ""
@@ -8872,6 +8910,20 @@ const cleanUndefinedFields = (obj, path = '') => {
             });
           }
         }
+      }
+
+      // Venda já salva, mas a pré-checagem acima já sabia que não dá pra emitir
+      // (Bling desconectado / certificado expirado) — não faz sentido perguntar.
+      if (precheckSkipsEmission) {
+        showNotification(
+          precheckNfeStatus === "CONTINGÊNCIA"
+            ? "Certificado expirado. Imprimindo Cupom Não Fiscal."
+            : "Bling não conectado. Imprimindo Cupom Não Fiscal.",
+          "warning",
+        );
+        printReceipt(finalSale, store.companyInfo);
+        setIsEmitting(false);
+        return;
       }
 
       // Fluxo de perguntar sobre a emissão de nota
@@ -9077,12 +9129,12 @@ const cleanUndefinedFields = (obj, path = '') => {
   // Modificado para receber targetModel ('55' ou '65')
   // --- FUNÇÃO DE EMISSÃO INTELIGENTE (AUTOMÁTICA) ---
 
-  const handleEmitNFe = (sale) =>
+  const handleEmitNFe = (sale, extraCpfCnpj = null) =>
     nfeProvider === "brasilnfe"
-      ? handleEmitNFeBrasilNFe(sale)
-      : handleEmitNFeBling(sale);
+      ? handleEmitNFeBrasilNFe(sale, extraCpfCnpj)
+      : handleEmitNFeBling(sale, extraCpfCnpj);
 
-  const handleEmitNFeBling = async (sale) => {
+  const handleEmitNFeBling = async (sale, extraCpfCnpj = null) => {
     setIsEmitting(true);
     showNotification("Emitindo nota fiscal via Bling...", "info");
 
@@ -9131,6 +9183,12 @@ const cleanUndefinedFields = (obj, path = '') => {
             },
           };
         }
+      }
+
+      // 3b. CPF/CNPJ informado na hora (consumidor sem cadastro em fiscal_clients) —
+      // não cria/atualiza cadastro, só identifica o comprador nesta nota específica.
+      if (!clientFull && extraCpfCnpj) {
+        clientFull = { tax_id: extraCpfCnpj, name: sale.clientName || "Consumidor Final", ie_indicator: "9" };
       }
 
       // 4. Modelo
@@ -9232,25 +9290,34 @@ const cleanUndefinedFields = (obj, path = '') => {
           link_pdf: notaFinal.linkPDF || null,
           xml_content: notaFinal.xml ? btoa(unescape(encodeURIComponent(notaFinal.xml))) : null,
           client_name: clientFull?.name || sale.clientName || "Consumidor",
+          client_document: clientFull?.tax_id ? clientFull.tax_id.replace(/\D/g, "") : null,
           total_value: notaFinal.valorNota || sale.total,
         };
 
-        const { error: dbError } = await supabase.from("fiscal_invoices").insert(invoiceData);
+        const { error: dbError } = await insertFiscalInvoice(invoiceData);
         if (dbError) console.error("Erro SQL:", dbError);
 
-        // Reflexo financeiro/estoque no Bling (best-effort, não bloqueia a emissão)
+        // Reflexo financeiro no Bling (best-effort, não bloqueia a emissão)
         BlingService.lancarContas(tipoDocumento, accessToken, blingNfeId).catch((e) =>
           console.warn("Falha ao lançar contas no Bling:", e.message),
         );
-        BlingService.lancarEstoque(tipoDocumento, accessToken, blingNfeId).catch((e) =>
-          console.warn("Falha ao lançar estoque no Bling:", e.message),
-        );
+        // Baixa de estoque DENTRO do Bling é opt-in — o PDV já debita o estoque no
+        // Firestore (fonte de verdade) na hora da venda; ligar isso sem necessidade
+        // duplica a baixa em dois sistemas. Ver Configurações > Integração Fiscal > Bling.
+        if (blingConfig.sync_estoque_bling) {
+          BlingService.lancarEstoque(tipoDocumento, accessToken, blingNfeId).catch((e) =>
+            console.warn("Falha ao lançar estoque no Bling:", e.message),
+          );
+        }
 
         await updateDoc(saleRef, {
           nfeStatus: "AUTORIZADA",
           nfeKey: notaFinal.chaveAcesso,
           nfeMessage: "Emitida com Sucesso",
           nfeAuthorizedAt: serverTimestamp(),
+          // fiscal_invoices (Supabase) não tem coluna para o documento do comprador —
+          // guarda aqui pra não perder a rastreabilidade de quem pediu CPF/CNPJ na nota.
+          nfeCpfCnpj: clientFull?.tax_id ? clientFull.tax_id.replace(/\D/g, "") : null,
         });
 
         showNotification(`Nota ${invoiceData.nfe_number} Autorizada!`, "success");
@@ -9271,7 +9338,7 @@ const cleanUndefinedFields = (obj, path = '') => {
   };
 
   // --- FUNÇÃO DE EMISSÃO NF-E VIA BRASILNFE (legado) ---
-  const handleEmitNFeBrasilNFe = async (sale) => {
+  const handleEmitNFeBrasilNFe = async (sale, extraCpfCnpj = null) => {
     setIsEmitting(true);
     showNotification("Calculando numeração e emitindo...", "info");
 
@@ -9319,6 +9386,12 @@ const cleanUndefinedFields = (obj, path = '') => {
         }
       }
 
+      // 3b. CPF/CNPJ informado na hora (consumidor sem cadastro em fiscal_clients) —
+      // não cria/atualiza cadastro, só identifica o comprador nesta nota específica.
+      if (!clientFull && extraCpfCnpj) {
+        clientFull = { tax_id: extraCpfCnpj, name: sale.clientName || "Consumidor Final", ie_indicator: "9" };
+      }
+
       // 4. Modelo
       let targetModel = "65";
       if (clientFull) {
@@ -9330,24 +9403,6 @@ const cleanUndefinedFields = (obj, path = '') => {
           targetModel = "55";
         }
       }
-
-      // --- 4.1 CÁLCULO DE NUMERAÇÃO ---
-      // Busca a última nota emitida DESTE modelo NESTE ambiente
-      const { data: lastInvoice } = await supabase
-        .from("fiscal_invoices")
-        .select("nfe_number")
-        .eq("firebase_store_id", appId)
-        .eq("nfe_model", targetModel)
-        .eq("environment", nfeConfig.environment) // Não mistura numeração de teste com produção
-        .order("nfe_number", { ascending: false })
-        .limit(1)
-        .single();
-
-      // Se achou última, soma 1. Se não, começa do 1.
-      const nextNumber = (lastInvoice?.nfe_number || 0) + 1;
-      console.log(
-        `🔢 Próximo Número calculado: ${nextNumber} (Modelo ${targetModel})`,
-      );
 
       // 5. Recálculo Itens (Com trava de segurança para campos undefined)
       const itemsWithFreshTaxes = sale.items.map((item) => {
@@ -9387,14 +9442,13 @@ const cleanUndefinedFields = (obj, path = '') => {
 
       const saleWithFreshTaxes = { ...sale, items: itemsWithFreshTaxes };
 
-      // 6. Payload (Passando o nextNumber)
+      // 6. Payload — Serie/Numero/Lote ficam a cargo do controle automático da Brasil NFe
       const payload = buildNFePayload(
         saleWithFreshTaxes,
         store.companyInfo,
         clientFull,
         nfeConfig,
         targetModel,
-        nextNumber,
       );
 
       console.log("🚨 PAYLOAD FINAL:", JSON.stringify(payload, null, 2));
@@ -9428,20 +9482,19 @@ const cleanUndefinedFields = (obj, path = '') => {
           sale_id: String(sale.id),
           environment: nfeConfig.environment,
           nfe_model: targetModel,
-          nfe_number: returnData.Numero || nextNumber, // Usa o retornado ou o calculado
-          nfe_series: returnData.Serie || 55,
+          nfe_number: returnData.Numero, // controle automático da Brasil NFe — não calculamos mais localmente
+          nfe_series: returnData.Serie,
           nfe_key: returnData.ChaveNF || returnData.ChaveNFe,
           nfe_protocol: returnData.Protocolo || returnData.nProt,
           status: returnData.DsStatusRespostaSefaz || "AUTORIZADA",
           pdf_base64: apiResponse.Base64File || null,
           xml_content: apiResponse.Base64Xml || null,
           client_name: clientFull?.name || sale.clientName || "Consumidor",
+          client_document: clientFull?.tax_id ? clientFull.tax_id.replace(/\D/g, "") : null,
           total_value: returnData.Detalhes?.valorNf || sale.total,
         };
 
-        const { error: dbError } = await supabase
-          .from("fiscal_invoices")
-          .insert(invoiceData);
+        const { error: dbError } = await insertFiscalInvoice(invoiceData);
         if (dbError) console.error("Erro SQL:", dbError);
 
         await updateDoc(saleRef, {
@@ -9449,6 +9502,9 @@ const cleanUndefinedFields = (obj, path = '') => {
           nfeKey: returnData.ChaveNF || returnData.ChaveNFe,
           nfeMessage: "Emitida com Sucesso",
           nfeAuthorizedAt: serverTimestamp(),
+          // fiscal_invoices (Supabase) não tem coluna para o documento do comprador —
+          // guarda aqui pra não perder a rastreabilidade de quem pediu CPF/CNPJ na nota.
+          nfeCpfCnpj: clientFull?.tax_id ? clientFull.tax_id.replace(/\D/g, "") : null,
         });
 
         showNotification(
@@ -9859,12 +9915,14 @@ const cleanUndefinedFields = (obj, path = '') => {
               isOpen={showCashierEmitModal.open}
               onClose={() => {
                 setShowCashierEmitModal({ open: false, sale: null });
-                setShowNonFiscalStep(false);
+                setEmitModalStep("ask");
+                setEmitCpfCnpjInput("");
+                setEmitCpfCnpjError("");
               }}
               title="Emissão Fiscal"
             >
               <div className="text-center p-4">
-                {!showNonFiscalStep ? (
+                {emitModalStep === "ask" && (
                   // PASSO 1: Emitir NF-e?
                   <>
                     <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4 text-blue-600">
@@ -9878,24 +9936,72 @@ const cleanUndefinedFields = (obj, path = '') => {
                     </p>
                     <div className="grid grid-cols-2 gap-3">
                       <button
-                        onClick={() => setShowNonFiscalStep(true)}
+                        onClick={() => setEmitModalStep("nonFiscal")}
                         className={`py-3 border rounded font-bold transition-all ${focusedModalOption === 0 ? "ring-4 ring-slate-300 border-slate-400 bg-slate-50 text-slate-700 transform scale-105" : "border-slate-300 text-slate-600 hover:bg-slate-50"}`}
                       >
                         Não Emitir
                       </button>
                       <button
-                        onClick={() => {
-                          handleEmitNFe(showCashierEmitModal.sale);
-                          setShowNonFiscalStep(true);
-                        }}
+                        onClick={() => setEmitModalStep("cpfCnpj")}
                         className={`py-3 rounded font-bold transition-all text-white shadow-lg ${focusedModalOption === 1 ? "ring-4 ring-blue-300 bg-blue-700 transform scale-105" : "bg-blue-600 hover:bg-blue-700"}`}
                       >
                         SIM, EMITIR
                       </button>
                     </div>
                   </>
-                ) : (
-                  // PASSO 2: Emitir Cupom Não Fiscal?
+                )}
+
+                {emitModalStep === "cpfCnpj" && (
+                  // PASSO 2: Deseja informar CPF/CNPJ na nota?
+                  <>
+                    <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4 text-blue-600">
+                      <FileText size={32} />
+                    </div>
+                    <h3 className="text-xl font-bold text-slate-800 mb-2">
+                      CPF/CNPJ na Nota
+                    </h3>
+                    <p className="text-slate-600 mb-4">
+                      O cliente quer informar CPF ou CNPJ na nota? (opcional)
+                    </p>
+                    <input
+                      type="text"
+                      autoFocus
+                      value={emitCpfCnpjInput}
+                      onChange={(e) => {
+                        setEmitCpfCnpjInput(e.target.value);
+                        setEmitCpfCnpjError("");
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          submitCpfCnpjStep(false);
+                        }
+                      }}
+                      placeholder="Somente números (CPF ou CNPJ)"
+                      className="w-full border rounded p-3 text-center text-lg tracking-wide mb-2"
+                    />
+                    {emitCpfCnpjError && (
+                      <p className="text-red-600 text-xs mb-3">{emitCpfCnpjError}</p>
+                    )}
+                    <div className="grid grid-cols-2 gap-3 mt-3">
+                      <button
+                        onClick={() => submitCpfCnpjStep(true)}
+                        className={`py-3 border rounded font-bold transition-all ${focusedModalOption === 0 ? "ring-4 ring-slate-300 border-slate-400 bg-slate-50 text-slate-700 transform scale-105" : "border-slate-300 text-slate-600 hover:bg-slate-50"}`}
+                      >
+                        Emitir sem CPF/CNPJ
+                      </button>
+                      <button
+                        onClick={() => submitCpfCnpjStep(false)}
+                        className={`py-3 rounded font-bold transition-all text-white shadow-lg ${focusedModalOption === 1 ? "ring-4 ring-blue-300 bg-blue-700 transform scale-105" : "bg-blue-600 hover:bg-blue-700"}`}
+                      >
+                        Confirmar e Emitir
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {emitModalStep === "nonFiscal" && (
+                  // PASSO 3: Emitir Cupom Não Fiscal?
                   <>
                     <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4 text-amber-600">
                       <Printer size={32} />
@@ -9910,7 +10016,7 @@ const cleanUndefinedFields = (obj, path = '') => {
                       <button
                         onClick={() => {
                           setShowCashierEmitModal({ open: false, sale: null });
-                          setShowNonFiscalStep(false);
+                          setEmitModalStep("ask");
                           showNotification(
                             "Venda salva sem documento.",
                             "success",
@@ -9927,7 +10033,7 @@ const cleanUndefinedFields = (obj, path = '') => {
                             store.companyInfo,
                           );
                           setShowCashierEmitModal({ open: false, sale: null });
-                          setShowNonFiscalStep(false);
+                          setEmitModalStep("ask");
                           showNotification(
                             "Cupom enviado para impressão.",
                             "success",
@@ -9939,7 +10045,7 @@ const cleanUndefinedFields = (obj, path = '') => {
                       </button>
                     </div>
                     <button
-                      onClick={() => setShowNonFiscalStep(false)}
+                      onClick={() => setEmitModalStep("ask")}
                       className="mt-3 text-xs text-slate-400 hover:underline"
                     >
                       ← Voltar

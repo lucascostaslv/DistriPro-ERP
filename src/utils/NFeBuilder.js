@@ -19,7 +19,7 @@ const NATUREZA_OPERACAO_BY_TYPE = {
     RETORNO_CONSIGNACAO: 'RETORNO DE MERCADORIA NAO VENDIDA (CONSIGNACAO)',
 };
 
-export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = '65', customNumber = 0, operationType = 'VENDA') => {
+export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = '65', operationType = 'VENDA') => {
 
     if (!company.cnpj) throw new Error("Empresa sem CNPJ configurado.");
     if (!sale.items || sale.items.length === 0) throw new Error("Venda sem itens.");
@@ -58,19 +58,17 @@ export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = 
         else clientePayload = null; 
     }
 
-    const serieCorreta = targetModel === '55' ? 55 : 65;
-    const dataAtual = getSafeDate(); 
-    const numeroFinal = customNumber > 0 ? customNumber : 1;
+    const dataAtual = getSafeDate();
 
     return {
         "Token": cleanToken,
         "IdentificadorInterno": sale.id,
-    
-        
 
-        "Serie": serieCorreta,
-        "Numero": numeroFinal, 
-        "Lote": String(Math.floor(Date.now() / 1000)),
+        // Serie/Numero/Lote deliberadamente OMITIDOS: a própria documentação da Brasil NFe
+        // recomenda deixá-los em branco sempre que possível ("controle automático pelo
+        // painel Brasil NFe, próximo número disponível por empresa + modelo + série +
+        // ambiente"). Calcular manualmente aqui (como antes) arrisca dessincronizar do
+        // contador real da Brasil NFe e gerar rejeição por "chave de acesso duplicada".
         "DataEmissao": dataAtual,
         "DataEntradaSaida": dataAtual,
         "NaturezaOperacao": NATUREZA_OPERACAO_BY_TYPE[operationType]
@@ -96,6 +94,14 @@ export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = 
                 } else {
                     throw new Error(`O produto "${item.name}" tem NCM inválido (${ncmRaw}). Corrija no cadastro.`);
                 }
+            }
+
+            // Perfil com ICMS-ST (CSOSN 500/201/202/203/60/70) sem alíquota configurada —
+            // melhor travar a emissão do que sair silenciosamente com ICMS-ST zerado
+            // (ver TaxCalculator.js). Não se aplica ao Bling: ele calcula ICMS no servidor
+            // dele a partir do cadastro fiscal do próprio produto, não deste payload.
+            if (taxes.icmsStPendente) {
+                throw new Error(`Produto "${item.name}" tem perfil de ICMS-ST (CSOSN ${taxes.csosn}) sem a alíquota configurada. Preencha em Configurações > Perfis Tributários antes de emitir.`);
             }
 
             const qtd = Number(item.quantity || item.qty);
@@ -139,7 +145,22 @@ export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = 
                 "Imposto": {
                     "ICMS": {
                         "CodSituacaoTributaria": taxes.csosn || "102",
-                        "AliquotaICMS": 0,
+                        "AliquotaICMS": taxes.pICMS || 0,
+                        "BaseCalculo": taxes.vBC || 0,
+                        "ValorIcms": taxes.vICMS || 0,
+                        // CSOSN 201/202/203/60/70 — esta empresa retém o ICMS-ST desta venda
+                        ...(taxes.vICMSST ? {
+                            "AliquotaICMSST": taxes.pICMSST,
+                            "BaseCalculoST": taxes.vBCST,
+                            "ValorIcmsST": taxes.vICMSST,
+                        } : {}),
+                        // CSOSN 500 — ICMS-ST já retido por elo anterior, só informativo
+                        ...(taxes.vICMSSTRet ? {
+                            "STRetido": {
+                                "BaseCalculo": taxes.vBCSTRet,
+                                "ValorICMSST": taxes.vICMSSTRet,
+                            },
+                        } : {}),
                         "AliquotaCredito": 0
                     },
                     "PIS": pisBlock,
@@ -154,14 +175,26 @@ export const buildNFePayload = (sale, company, client, nfeConfig, targetModel = 
             };
         }),
 
-        "Pagamentos": [{
-            "IndicadorPagamento": 0, 
-            "FormaPagamento": mapPaymentMethod(sale.paymentMethod),
-            "VlPago": Number(sale.total),
-            "Descricao": "Pagamento PDV"
-        }]
+        "Pagamentos": buildPagamentos(sale)
     };
 };
+
+// A Brasil NFe representa split de pagamento (ex: metade dinheiro, metade cartão) como um
+// objeto por forma de pagamento em "Pagamentos[]" (cada um com seu próprio VlPago) — nunca um
+// valor único coberto pela forma "dominante". `sale.paymentMethods` (quando existe) já tem essa
+// quebra real vinda do PDV; sem ele, cai para um único pagamento pelo valor total.
+function buildPagamentos(sale) {
+    const entries = Array.isArray(sale.paymentMethods) && sale.paymentMethods.length > 0
+        ? sale.paymentMethods
+        : [{ method: sale.paymentMethod, amount: sale.total }];
+
+    return entries.map((entry) => ({
+        "IndicadorPagamento": 0,
+        "FormaPagamento": mapPaymentMethod(entry.method),
+        "VlPago": Number(entry.amount),
+        "Descricao": `Pagamento PDV — ${entry.method}`
+    }));
+}
 
 function buildClientBlock(client) {
     return {

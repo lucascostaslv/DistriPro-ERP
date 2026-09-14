@@ -186,16 +186,20 @@ export const BlingService = {
   },
 
   /**
-   * Cancela uma nota autorizada. ATENÇÃO: `/nfe/{id}/cancelar` e `/nfce/{id}/cancelar` não
-   * aparecem na referência oficial nem em SDKs de terceiros que espelham a API v3 do Bling
-   * (essas SDKs só implementam "cancelar" para NFS-e). É bem provável que este endpoint
-   * não exista para NF-e/NFC-e — o cancelamento pode só ser possível pela própria tela do
-   * Bling. Confirme em developer.bling.com.br/referencia antes de expor este botão em produção.
+   * Cancela uma nota autorizada. ATUALIZAÇÃO (guia oficial de referência lido na íntegra):
+   * `/nfe/{id}/cancelar` NÃO existe na lista de endpoints de NF-e do Bling — a lista completa
+   * é DELETE/GET/POST /nfe, GET /nfe/{id}, PUT /nfe/{id}, POST /nfe/{id}/enviar,
+   * lancar-contas/estornar-contas, lancar-estoque/estornar-estoque. O próprio guia sinaliza
+   * que "situacao" (2 = Cancelada na tabela de status) é alterado via PUT /nfe/{id} — é a
+   * única via plausível dado o que está documentado. NÃO CONFIRMADO em produção: PUT também
+   * diz explicitamente que "notas autorizadas não podem ter dados fiscais alterados" — não
+   * está 100% claro se "situacao" conta como dado fiscal para esse efeito. Testar em
+   * homologação antes de confiar neste botão para cancelar nota real.
    */
   async cancelarNota(tipo, accessToken, id, justificativa) {
-    return this.request(`${tipo}/${id}/cancelar`, accessToken, {
-      method: 'POST',
-      body: { justificativa },
+    return this.request(`${tipo}/${id}`, accessToken, {
+      method: 'PUT',
+      body: { situacao: 2, observacoes: justificativa },
     });
   },
 

@@ -87,6 +87,54 @@ export const calculateItemTaxes = (product, client, companyInfo, taxProfile, ope
     taxes.csosn = taxProfile.cst_nfe || '102';
     taxes.origin = String(taxProfile.origin || product.origin || '0');
 
+    // --- ICMS / ICMS-ST ---
+    // CSOSN 102/103/300/400: Simples Nacional não destaca ICMS na nota (fica embutido no
+    // DAS) — vICMS/vBC permanecem zero corretamente, nada a calcular.
+    //
+    // CSOSN 500: mercadoria já chegou com ICMS-ST retido por um elo anterior da cadeia
+    // (indústria/importador) — o valor retido é só INFORMATIVO no bloco STRetido do XML,
+    // não é um imposto novo cobrado por esta venda. Precisa da alíquota efetiva informada
+    // pela contabilidade (`taxProfile.icms_st_rate`); sem ela, fica marcado como pendente
+    // em vez de sair silenciosamente como zero.
+    //
+    // CSOSN 201/202/203: esta empresa É a responsável por reter o ICMS-ST desta venda para
+    // o próximo elo — usa o bloco normal (BaseCalculo/AliquotaICMSST/ValorIcms), também
+    // dependente de `taxProfile.icms_st_rate`.
+    const STOSN_JA_RETIDO = ['500'];
+    const CSOSN_RETEM_AGORA = ['201', '202', '203', '60', '70'];
+    const icmsStRate = Number(taxProfile.icms_st_rate || 0);
+
+    if (STOSN_JA_RETIDO.includes(taxes.csosn)) {
+        if (icmsStRate > 0) {
+            taxes.vBCSTRet = Number(totalValue.toFixed(2));
+            taxes.vICMSSTRet = Number((totalValue * icmsStRate / 100).toFixed(2));
+            log(`ICMS-ST já retido (CSOSN 500), informativo: ${icmsStRate}% = R$${taxes.vICMSSTRet}`);
+        } else {
+            taxes.icmsStPendente = true;
+            log('ATENÇÃO: CSOSN 500 (ICMS-ST retido) sem alíquota configurada no perfil — confirmar com a contabilidade antes de emitir em produção.');
+        }
+    } else if (CSOSN_RETEM_AGORA.includes(taxes.csosn)) {
+        if (icmsStRate > 0) {
+            taxes.vBCST = Number(totalValue.toFixed(2));
+            taxes.pICMSST = icmsStRate;
+            taxes.vICMSST = Number((totalValue * icmsStRate / 100).toFixed(2));
+            log(`ICMS-ST retido nesta venda (CSOSN ${taxes.csosn}): ${icmsStRate}% = R$${taxes.vICMSST}`);
+        } else {
+            taxes.icmsStPendente = true;
+            log(`ATENÇÃO: CSOSN ${taxes.csosn} (com ST) sem alíquota configurada no perfil — confirmar com a contabilidade antes de emitir em produção.`);
+        }
+    }
+
+    // ICMS normal destacado — só se aplica a perfis fora do "sem destaque" do Simples
+    // Nacional (102/103/300/400/500) e com alíquota configurada.
+    const icmsNormalRate = Number(taxProfile.icms_rate || 0);
+    if (icmsNormalRate > 0 && !['102', '103', '300', '400', '500'].includes(taxes.csosn)) {
+        taxes.vBC = Number(totalValue.toFixed(2));
+        taxes.pICMS = icmsNormalRate;
+        taxes.vICMS = Number((totalValue * icmsNormalRate / 100).toFixed(2));
+        log(`ICMS normal: ${icmsNormalRate}% = R$${taxes.vICMS}`);
+    }
+
     // PIS/COFINS — repassa CST e alíquotas do perfil tributário
     taxes.cst_pis_cofins = taxProfile.cst_pis_cofins || '49';
     taxes.is_monofasico   = taxProfile.is_monofasico ?? (taxes.cst_pis_cofins === '04');
