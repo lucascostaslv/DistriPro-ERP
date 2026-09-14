@@ -959,10 +959,16 @@ const handleSaveSupplier = async () => {
                   // ✨ Troquei update() por set(). Isso impede qualquer travamento se o doc sumir milissegundos antes
                   batch.set('products', targetId, updatePayload); 
 
-                  // CASCATA DA CAIXA
+                  // CASCATA DA CAIXA — só existe se o produto pai realmente existir. Se o
+                  // vínculo estiver órfão (pai excluído), o pack passa a ser tratado como
+                  // unidade normal: o próprio estoque, já incrementado acima, é a fonte da
+                  // verdade — nada a cascatear.
                   if (productData.itemType === 'pack' && productData.parentId && productData.conversionFactor) {
-                      const qtyToAdd = (Number(item.quantity) || 0) * Number(productData.conversionFactor);
-                      batch.set('products', productData.parentId, { stock: utils.increment(qtyToAdd) }); 
+                      const parentData = await tenantDB.firestore.getById('products', productData.parentId);
+                      if (parentData) {
+                          const qtyToAdd = (Number(item.quantity) || 0) * Number(productData.conversionFactor);
+                          batch.set('products', productData.parentId, { stock: utils.increment(qtyToAdd) });
+                      }
                   }
               }
           }

@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
+import { getDisplayStock as getDisplayStockShared } from "./utils/packStock";
 
 // --- UTILITÁRIOS ---
 const formatCurrency = (val) =>
@@ -36,14 +37,7 @@ export default function PurchaseSuggestion({ products, sales, suppliers }) {
   // `stock` do próprio pack nunca é escrito (fica 0), igual à mesma lógica usada em
   // InventoryWMS.js (getDisplayStock). Sem isso, todo produto tipo pack aparece com estoque
   // zerado aqui e a sugestão de compra fica sistematicamente inflada para esses SKUs.
-  const getDisplayStock = (prod) => {
-    if (prod.itemType === "pack" && prod.parentId) {
-      const parent = products.find((p) => p.id === prod.parentId);
-      const factor = prod.conversionFactor || prod.packQuantity || 1;
-      return parent ? Math.floor((parent.stock || 0) / factor) : 0;
-    }
-    return prod.stock;
-  };
+  const getDisplayStock = (prod) => getDisplayStockShared(prod, products);
 
   // --- CONFIGURAÇÕES DE ANÁLISE ---
   const [daysAnalysis, setDaysAnalysis] = useState(30);

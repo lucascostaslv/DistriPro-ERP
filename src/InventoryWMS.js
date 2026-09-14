@@ -37,6 +37,7 @@ import autoTable from "jspdf-autotable";
 import { calculateItemTaxes } from "./utils/TaxCalculator";
 import { useTenant } from "./contexts/TenantContext";
 import { safeStr } from "./utils/safeString";
+import { resolveStockTarget, getDisplayStock as getDisplayStockShared } from "./utils/packStock";
 
 // --- UTILITÁRIOS ---
 const masks = {
@@ -718,16 +719,10 @@ const InventoryWMS = ({
   const processStockUpdate = async (product, qtyChange, reason = "") => {
     try {
       // Lógica Pack vs Unidade usando a DAL Limpa!
-      if (product.itemType === "pack" && product.parentId) {
-        const factor = product.conversionFactor || product.packQuantity || 1;
-        await tenantDB.firestore.update("products", product.parentId, {
-          stock: tenantDB.firestore.utils.increment(qtyChange * factor),
-        });
-      } else {
-        await tenantDB.firestore.update("products", product.id, {
-          stock: tenantDB.firestore.utils.increment(qtyChange),
-        });
-      }
+      const { target, factor } = resolveStockTarget(product, products);
+      await tenantDB.firestore.update("products", target.id, {
+        stock: tenantDB.firestore.utils.increment(qtyChange * factor),
+      });
 
       // Se tiver motivo (Perca), registra nas Vendas E no Financeiro usando a DAL
       if (reason) {
@@ -775,14 +770,7 @@ const InventoryWMS = ({
     return parent ? parent.name : "...";
   };
 
-  const getDisplayStock = (prod) => {
-    if (prod.itemType === "pack" && prod.parentId) {
-      const parent = products.find((p) => p.id === prod.parentId);
-      const factor = prod.conversionFactor || prod.packQuantity || 1;
-      return parent ? Math.floor((parent.stock || 0) / factor) : 0;
-    }
-    return prod.stock;
-  };
+  const getDisplayStock = (prod) => getDisplayStockShared(prod, products);
 
   // =========================================================================
   // LÓGICA DE AUDITORIA DE ESTOQUE (Cirúrgico com o padrão do WMS)
@@ -1270,16 +1258,10 @@ const InventoryWMS = ({
                         // Igual a processStockUpdate: produto "pack" não tem stock próprio (é
                         // sempre derivado do pai) — decrementar o campo do próprio pack é um
                         // no-op silencioso que não reflete no estoque real/vendável.
-                        if (item.itemType === "pack" && item.parentId) {
-                          const factor = item.conversionFactor || item.packQuantity || 1;
-                          batch.update("products", item.parentId, {
-                            stock: tenantDB.firestore.utils.increment(-item.qty * factor),
-                          });
-                        } else {
-                          batch.update("products", item.id, {
-                            stock: tenantDB.firestore.utils.increment(-item.qty),
-                          });
-                        }
+                        const { target, factor } = resolveStockTarget(item, products);
+                        batch.update("products", target.id, {
+                          stock: tenantDB.firestore.utils.increment(-item.qty * factor),
+                        });
                       });
 
                       // A nossa DAL permite encadear ou adicionar direto no batch!

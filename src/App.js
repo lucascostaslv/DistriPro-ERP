@@ -89,6 +89,7 @@ import { BlingService } from "./utils/BlingService";
 import { buildNFePayload } from "./utils/NFeBuilder";
 import { NFeService } from "./utils/NFeService";
 import { safeStr } from "./utils/safeString";
+import { resolveStockTarget, getDisplayStock as getDisplayStockShared } from "./utils/packStock";
 import { extractCancelEventData } from "./utils/fiscalCancelHelpers";
 import ComandaManager from "./ComandaManager";
 import { downloadSmart } from "./EntradaNotas/FiscalInvoices";
@@ -132,20 +133,7 @@ const isToday = (dateString) => {
 };
 
 const getDisplayStock = (product, allProducts) => {
-  if (!product) return 0;
-  const itemType = product.itemType || "unit";
-
-  if (itemType === "unit") {
-    const available = (product.stock || 0) - (product.reserved_stock || 0);
-    return Math.max(0, available);
-  }
-  if (itemType === "pack") {
-    const unitProduct = allProducts.find((p) => p.id === product.parentId);
-    if (!unitProduct || !unitProduct.stock || !product.conversionFactor) return 0;
-    const availableUnits = (unitProduct.stock || 0) - (unitProduct.reserved_stock || 0);
-    return Math.floor(Math.max(0, availableUnits) / product.conversionFactor);
-  }
-  return Math.max(0, (product.stock || 0) - (product.reserved_stock || 0));
+  return getDisplayStockShared(product, allProducts);
 };
 
 // --- COMPONENTS ---
@@ -1010,8 +998,10 @@ const Dashboard = ({ sales, products, bankAccounts = [], onGoToReceivables }) =>
 
   // --- CORREÇÃO ESTOQUE (Item 3): Usa getDisplayStock para considerar caixas ---
   const lowStockItems = products.filter((p) => {
-    // Ignora produtos que são "pacotes" (caixas), pois o estoque deles é virtual
-    if (p.itemType === "pack") return false;
+    // Ignora produtos que são "pacotes" (caixas), pois o estoque deles é virtual —
+    // exceto se o pai foi excluído (órfão): nesse caso o pack é tratado como
+    // unidade normal e deve entrar na checagem, não ficar invisível para sempre.
+    if (p.itemType === "pack" && products.some((parent) => parent.id === p.parentId)) return false;
 
     const threshold = p.minStock !== undefined ? Number(p.minStock) : 5;
     // Usa a função auxiliar que já considera a lógica pai/filho se necessário
@@ -1807,16 +1797,8 @@ const PDV = ({
       cart.forEach((item) => {
         const originalProd = products.find((p) => p.id === (item.originalId || item.id));
         if (!originalProd) return;
-        if (originalProd.itemType === "pack" && originalProd.parentId && originalProd.conversionFactor) {
-          const parentExists = products.find((p) => p.id === originalProd.parentId);
-          if (parentExists) {
-            batch.update("products", originalProd.parentId, {
-              stock: increment(-(item.qty * originalProd.conversionFactor)),
-            });
-          }
-        } else {
-          batch.update("products", originalProd.id, { stock: increment(-item.qty) });
-        }
+        const { target, factor } = resolveStockTarget(originalProd, products);
+        batch.update("products", target.id, { stock: increment(-(item.qty * factor)) });
       });
 
       // Auditoria de estoque (mesmo padrão da saída avulsa em InventoryWMS)
@@ -1888,14 +1870,8 @@ const PDV = ({
         if (!ri.qty) return;
         const prod = products.find((p) => p.id === ri.productId);
         if (!prod) return;
-        if (prod.itemType === "pack" && prod.parentId && prod.conversionFactor) {
-          const parentExists = products.find((p) => p.id === prod.parentId);
-          if (parentExists) {
-            batch.update("products", prod.parentId, { stock: increment(ri.qty * prod.conversionFactor) });
-          }
-        } else {
-          batch.update("products", prod.id, { stock: increment(ri.qty) });
-        }
+        const { target, factor } = resolveStockTarget(prod, products);
+        batch.update("products", target.id, { stock: increment(ri.qty * factor) });
       });
 
       if (hasReturns) {
@@ -5659,16 +5635,8 @@ const Finance = ({
         if (item.isDose) return;
         const originalProd = products.find((p) => p.id === (item.originalId || item.id));
         if (!originalProd) return;
-        if (originalProd.itemType === "pack" && originalProd.parentId && originalProd.conversionFactor) {
-          const parentExists = products.find((p) => p.id === originalProd.parentId);
-          if (parentExists) {
-            batch.update("products", originalProd.parentId, {
-              stock: inc(item.qty * originalProd.conversionFactor),
-            });
-          }
-        } else {
-          batch.update("products", originalProd.id, { stock: inc(item.qty) });
-        }
+        const { target, factor } = resolveStockTarget(originalProd, products);
+        batch.update("products", target.id, { stock: inc(item.qty * factor) });
       });
 
       if (!sale.isLoss) {
@@ -8591,11 +8559,11 @@ const cleanUndefinedFields = (obj, path = '') => {
       // baixa definitiva ou devolver a reserva. Divergir aqui deixa reserved_stock do produto
       // pai "preso" para sempre em vendas fiado de itens tipo pack/fardo.
       const reservedItems = (sale.items || []).map(item => {
-        const prod = products.find(p => p.id === (item.originalId || item.id));
-        if (prod && prod.itemType === 'pack' && prod.parentId && prod.conversionFactor) {
-          return { productId: prod.parentId, qty: item.qty * prod.conversionFactor };
-        }
-        return { productId: item.originalId || item.id, qty: item.qty };
+        const rawId = item.originalId || item.id;
+        const prod = products.find(p => p.id === rawId);
+        if (!prod) return { productId: rawId, qty: item.qty };
+        const { target, factor } = resolveStockTarget(prod, products);
+        return { productId: target.id, qty: item.qty * factor };
       });
 
       batch.set('receivables', receivableId, {
@@ -8815,28 +8783,11 @@ const cleanUndefinedFields = (obj, path = '') => {
           (p) => p.id === (item.originalId || item.id),
         );
         if (originalProd) {
-          if (
-            originalProd.itemType === "pack" &&
-            originalProd.parentId &&
-            originalProd.conversionFactor
-          ) {
-            const parentExists = products.find(
-              (p) => p.id === originalProd.parentId,
-            );
-
-            if (parentExists) {
-              const qtyToDeduct = item.qty * originalProd.conversionFactor;
-              batch.update("products", originalProd.parentId, {
-                stock: increment(-qtyToDeduct), // ✨ Nativo do Firebase
-                lastSale: serverTimestamp(), // ✨ Nativo do Firebase
-              });
-            }
-          } else {
-            batch.update("products", originalProd.id, {
-              stock: increment(-item.qty), // ✨ Nativo do Firebase
-              lastSale: serverTimestamp(), // ✨ Nativo do Firebase
-            });
-          }
+          const { target, factor } = resolveStockTarget(originalProd, products);
+          batch.update("products", target.id, {
+            stock: increment(-(item.qty * factor)), // ✨ Nativo do Firebase
+            lastSale: serverTimestamp(), // ✨ Nativo do Firebase
+          });
         }
 
         if (item.source === "tab" && item.tabId && item.tabItemId) {
