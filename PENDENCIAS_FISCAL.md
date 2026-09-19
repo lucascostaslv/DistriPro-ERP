@@ -67,11 +67,11 @@ Sem acesso de DDL (só a chave publishable), preciso que você rode estas 3 no
 **Supabase → SQL Editor**. O código já funciona sem elas (com fallback automático),
 mas os recursos abaixo só valem de verdade depois.
 
-- [ ] `supabase_migration_icms_st.sql` — sem isso, a emissão via BrasilNFe fica
+- [x] `supabase_migration_icms_st.sql` — sem isso, a emissão via BrasilNFe fica
       **bloqueada** para qualquer produto com perfil de ICMS-ST (ex.: cerveja).
-- [ ] `supabase_migration_fiscal_invoices_client_document.sql` — sem isso, o CPF/CNPJ
+- [x] `supabase_migration_fiscal_invoices_client_document.sql` — sem isso, o CPF/CNPJ
       informado na nota não fica salvo/visível na tela "Notas Fiscais Emitidas".
-- [ ] `supabase_migration_bling_sync_estoque.sql` — sem isso, o checkbox novo de
+- [x] `supabase_migration_bling_sync_estoque.sql` — sem isso, o checkbox novo de
       estoque duplicado no Bling não salva.
 
 ---
